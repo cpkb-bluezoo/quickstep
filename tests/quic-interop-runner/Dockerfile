@@ -68,7 +68,10 @@ RUN ./autogen.sh \
 # Not part of the image; "docker build --target check" runs it. It needs the
 # build stage's tree, so the endpoint above is built in the same pass.
 FROM build AS check
-RUN make -C tests check CFLAGS="-g -O2 -Werror"
+# Compile the tests in parallel, then run them one at a time: several of
+# them use fixed port ranges.
+RUN make -j"$(nproc)" -C tests check TESTS= CFLAGS="-g -O2 -Werror" \
+    && make -C tests check CFLAGS="-g -O2 -Werror"
 
 # ---- Runtime: the simulator's endpoint base plus quickstep's libraries ----
 FROM martenseemann/quic-network-simulator-endpoint:latest

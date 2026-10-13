@@ -19,5 +19,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The layers that build libgpg-error and libgcrypt do not change from
+      # one push to the next, so they come from the Actions cache.
+      - uses: docker/setup-buildx-action@v4
+
       - name: Build and test with gcc
-        run: docker build --target check -f tests/quic-interop-runner/Dockerfile .
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: tests/quic-interop-runner/Dockerfile
+          target: check
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
