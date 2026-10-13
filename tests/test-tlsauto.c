@@ -28,6 +28,8 @@
 #include <quickstep/tlsauto.h>
 #include <quickstep/tls12conn.h>
 
+#include <time.h>
+
 #include "tst-util.h"
 
 #ifndef HAVE_GNUTLS
@@ -390,6 +392,61 @@ test_client (void)
     }
 }
 
+/* A resuming client's hello carries a ticket of up to GQ_TICKET_MAX bytes
+   as well as a hybrid key share and a long ALPN list, and is well over 4 KB
+   then.  It has to survive being kept for a TLS 1.2 server that answers
+   instead.  */
+static void
+test_big_hello_fallback (void)
+{
+  static gq_tls_session sess;
+  static const uint16_t groups[] = { GQ_GROUP_SECP384R1_MLKEM1024,
+                                     GQ_GROUP_X25519 };
+  static char names[12][41];
+  static gq_slice alpn[12];
+  gq_tls_config cfg = client_cfg ();
+  struct peer c, s;
+  static const uint8_t hello[] = "hello, server";
+  size_t i, k;
+
+  memset (&sess, 0, sizeof sess);
+  for (i = 0; i < GQ_TICKET_MAX; i++)
+    sess.ticket[i] = (uint8_t) (i * 7 + 3);
+  sess.ticket_len = GQ_TICKET_MAX;
+  sess.cipher_suite = GQ_TLS_AES_128_GCM_SHA256;
+  sess.hash = GQ_HASH_SHA256;
+  sess.psk_len = 32;
+  sess.lifetime = 7200;
+  sess.received_ms = (uint64_t) time (NULL) * 1000;
+  for (i = 0; i < 12; i++)
+    {
+      memset (names[i], 'a' + (int) i, 40);
+      alpn[i].data = (const uint8_t *) names[i];
+      alpn[i].len = 40;
+    }
+  cfg.resume = &sess;
+  cfg.groups = groups;
+  cfg.n_groups = 2;
+  cfg.alpn = alpn;
+  cfg.n_alpn = 12;
+  for (k = 0; k < 2; k++)
+    {
+      peer_init (&c, KAUTO);
+      make_server (&s, k ? S_BARE12 : S_AUTO12);
+      CHECK_EQ (gq_tlsauto_client_new (&c.ca, &cfg, &c.ev, 0), GQ_OK);
+      CHECK_EQ (gq_tlsauto_start (c.ca), GQ_OK);
+      CHECK (c.out.n > 4096 + 5);
+      pump (&c, &s, 100000);
+      CHECK (c.connected && s.connected);
+      CHECK_EQ (gq_tlsauto_version (c.ca), 0x0303);
+      CHECK_EQ (peer_send (&c, hello, sizeof hello), GQ_OK);
+      pump (&c, &s, 100000);
+      CHECK (s.app.n == sizeof hello && !memcmp (s.app.p, hello, sizeof hello));
+      peer_free (&c);
+      peer_free (&s);
+    }
+}
+
 static void
 test_versions (void)
 {
@@ -490,6 +547,7 @@ main (void)
 {
   gq_crypto_init ();
   fx_setup ();
+  test_big_hello_fallback ();
   test_versions ();
   test_client ();
   test_fragmented_hello ();

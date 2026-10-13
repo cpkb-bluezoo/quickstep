@@ -76,7 +76,7 @@ gq_tls12_server_new (gq_tls12 **out, const gq_tls_server_config *cfg,
   t->cfg.hooks = cfg->hooks;
   t->cfg.max_message_len = cfg->max_message_len ? cfg->max_message_len : 65536;
   g12_filter (t, cfg->suites, cfg->n_suites, cfg->sigschemes,
-              cfg->n_sigschemes);
+              cfg->n_sigschemes, cfg->groups, cfg->n_groups);
   if (t->n_suites == 0 || t->n_sigs == 0)
     {
       free (t);
@@ -97,18 +97,22 @@ struct choice
   gq_slice alpn;
   int have_alpn;
   gq_slice sigalgs;		/* Raw list.  */
+  gq_slice groups;		/* supported_groups, raw list.  */
+  int have_groups;
   gq_slice ticket;
   int have_ticket_ext;
 };
 
-/* Does the key suit an RSA (1) or ECDSA (0) certificate suite?  */
+/* Does the key suit an RSA (1) or ECDSA (0) certificate suite?  An Ed25519
+   key goes with the ECDSA suites (RFC 8422 section 5.1.3).  */
 static int
 key_matches_suite (const gq_privkey *key, unsigned suite)
 {
   if (gq_tls12_suite_is_rsa (suite))
     return gq_privkey_supports (key, GQ_SIG_RSA_PKCS1_SHA256);
   return gq_privkey_supports (key, GQ_SIG_ECDSA_SECP256R1_SHA256)
-    || gq_privkey_supports (key, GQ_SIG_ECDSA_SECP384R1_SHA384);
+    || gq_privkey_supports (key, GQ_SIG_ECDSA_SECP384R1_SHA384)
+    || gq_privkey_supports (key, GQ_SIG_ED25519);
 }
 
 /* Read and check the extensions we care about.  Anything else is ignored,
@@ -149,14 +153,15 @@ read_exts (gq_tls12 *t, const gq_client_hello *ch, struct choice *c)
   else if (!gq_u16_contains (ch->cipher_suites, GQ_TLS12_SCSV_RENEGOTIATION))
     return g12_fail (t, GQ_ALERT_HANDSHAKE_FAILURE, GQ_ERR_PROTOCOL);
 
-  /* ECDHE needs secp256r1 offered (RFC 8422 section 5.1).  */
-  if (!gq_ext_find (ch->extensions, GQ_EXT_SUPPORTED_GROUPS, &v))
-    return g12_fail (t, GQ_ALERT_HANDSHAKE_FAILURE, GQ_ERR_PROTOCOL);
-  r = gq_list_u16 (v, 2, &list);
-  if (r != GQ_OK)
-    return g12_fail_parse (t, r);
-  if (!gq_u16_contains (list, GQ_GROUP_SECP256R1))
-    return g12_fail (t, GQ_ALERT_HANDSHAKE_FAILURE, GQ_ERR_PROTOCOL);
+  /* The groups the client can do; the choice is made in select_group,
+     once resumption is known.  */
+  if (gq_ext_find (ch->extensions, GQ_EXT_SUPPORTED_GROUPS, &v))
+    {
+      r = gq_list_u16 (v, 2, &c->groups);
+      if (r != GQ_OK)
+        return g12_fail_parse (t, r);
+      c->have_groups = 1;
+    }
 
   /* Uncompressed points; absence means the same.  */
   if (gq_ext_find (ch->extensions, GQ_EXT12_EC_POINT_FORMATS, &v))
@@ -226,6 +231,22 @@ select_alpn (gq_tls12 *t, const struct choice *c)
           }
     }
   return g12_fail (t, GQ_ALERT_NO_APPLICATION_PROTOCOL, GQ_ERR_PROTOCOL);
+}
+
+/* The ECDHE group: the first of our preference that the client offers
+   (RFC 8422 section 5.1.1).  A client that sent no supported_groups leaves
+   the choice to us (the same section), and gets secp256r1, the curve every
+   ECC peer has.  0 if there is none in common.  */
+static unsigned
+select_group (const gq_tls12 *t, const struct choice *c)
+{
+  size_t i;
+
+  for (i = 0; i < t->n_groups; i++)
+    if (c->have_groups ? gq_u16_contains (c->groups, t->groups[i])
+                       : t->groups[i] == GQ_GROUP_SECP256R1)
+      return t->groups[i];
+  return 0;
 }
 
 /* Try to resume from the client's ticket.  Anything wrong with it only
@@ -304,7 +325,8 @@ s_send_full_flight (gq_tls12 *t, int issue_ticket)
   /* ServerKeyExchange: fresh ECDHE key, signed with the certificate.  */
   TRY (g12_gen_kx (t));
   gq_wbuf_init (&pw, params, sizeof params);
-  gq_tls12_put_ecdh_params (&pw, (gq_slice) { t->kx.share, t->kx.share_len });
+  gq_tls12_put_ecdh_params (&pw, t->kx_group,
+                            (gq_slice) { t->kx.share, t->kx.share_len });
   if (gq_wbuf_status (&pw) != GQ_OK)
     return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, gq_wbuf_status (&pw));
   memcpy (data, t->client_random, 32);
@@ -373,6 +395,11 @@ s_on_client_hello (gq_tls12 *t, gq_slice msg, gq_slice body)
 
   if (!t->resumed)
     {
+      /* A resumption has no key exchange, so only a full handshake needs
+         a group in common.  */
+      t->kx_group = (uint16_t) select_group (t, &c);
+      if (!t->kx_group)
+        return g12_fail (t, GQ_ALERT_HANDSHAKE_FAILURE, GQ_ERR_UNSUPPORTED);
       t->sign_scheme = (uint16_t) g12_pick_scheme (t, t->creds->key,
                                                    c.sigalgs);
       if (!t->sign_scheme)
@@ -471,7 +498,7 @@ static int
 s_on_cke (gq_tls12 *t, gq_slice msg, gq_slice body)
 {
   gq_slice point;
-  int r = gq_tls12_cke_parse (body, &point);
+  int r = gq_tls12_cke_parse (body, t->kx_group, &point);
 
   if (r != GQ_OK)
     return g12_fail_parse (t, r);

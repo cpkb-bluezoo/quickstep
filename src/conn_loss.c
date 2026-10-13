@@ -125,6 +125,50 @@ sp_sent_add (gq_conn *c, int sp, const sent_pkt *p)
     }
 }
 
+/* Remember that packet PN carried an ACK frame whose largest was LARGEST.  */
+void
+conn_note_ack_sent (gq_conn *c, int sp, uint64_t pn, uint64_t largest)
+{
+  space *s = &c->sp[sp];
+
+  if (s->n_ack_sent == ACK_SENT_MAX)
+    {
+      memmove (&s->ack_sent[0], &s->ack_sent[1],
+               (ACK_SENT_MAX - 1) * sizeof s->ack_sent[0]);
+      s->n_ack_sent--;
+    }
+  s->ack_sent[s->n_ack_sent].pn = pn;
+  s->ack_sent[s->n_ack_sent].largest = largest;
+  s->n_ack_sent++;
+}
+
+/* The peer has acknowledged packets LO to HI: for each that carried an ACK
+   frame, nothing it named needs acknowledging again.  */
+static int
+ack_of_ack (void *user, uint64_t lo, uint64_t hi)
+{
+  space *s = user;
+  unsigned i = 0;
+
+  while (i < s->n_ack_sent)
+    {
+      if (s->ack_sent[i].pn >= lo && s->ack_sent[i].pn <= hi)
+        {
+          uint64_t upto = s->ack_sent[i].largest + 1;
+
+          gq_ranges_trim_below (&s->recv, upto);
+          if (s->recv_floor < upto)
+            s->recv_floor = upto;
+          memmove (&s->ack_sent[i], &s->ack_sent[i + 1],
+                   (s->n_ack_sent - i - 1) * sizeof s->ack_sent[0]);
+          s->n_ack_sent--;
+        }
+      else
+        i++;
+    }
+  return 0;
+}
+
 /* Forget everything outstanding in a space (keys were discarded).  */
 void
 sp_sent_clear (gq_conn *c, int sp)
@@ -308,12 +352,13 @@ update_rtt (gq_conn *c, uint64_t latest, uint64_t ack_delay)
       c->srtt = latest;
       c->rttvar = latest / 2;
       c->have_rtt = 1;
+      c->first_rtt_us = c->now;
       return;
     }
   if (latest < c->min_rtt)
     c->min_rtt = latest;
   adj = latest;
-  if (latest >= c->min_rtt + ack_delay)
+  if (ack_delay <= latest - c->min_rtt)	/* latest >= min_rtt here.  */
     adj -= ack_delay;
   diff = c->srtt > adj ? c->srtt - adj : adj - c->srtt;
   c->rttvar = (3 * c->rttvar + diff) / 4;
@@ -377,6 +422,7 @@ process_ack (gq_conn *c, int sp, const gq_frame *f, uint64_t now)
 
   if (s->discarded)
     return;
+  gq_ack_foreach (f, ack_of_ack, s);
   x.c = c;
   x.s = s;
   x.got = NULL;
@@ -390,6 +436,8 @@ process_ack (gq_conn *c, int sp, const gq_frame *f, uint64_t now)
       free (x.got);
       return;
     }
+  if (sp == SP_HANDSHAKE)
+    c->hs_acked = 1;
   if (!s->have_acked || f->u.ack.largest > s->largest_acked)
     {
       s->largest_acked = f->u.ack.largest;
@@ -413,7 +461,10 @@ process_ack (gq_conn *c, int sp, const gq_frame *f, uint64_t now)
         {
           unsigned e = c->peer_ack_delay_exp > 20 ? 20 : c->peer_ack_delay_exp;
 
-          delay = f->u.ack.delay << e;
+          /* Saturate: a delay too large to represent is no delay at all
+             to subtract, not a small one that wrapped.  */
+          delay = f->u.ack.delay > (UINT64_MAX >> e) ? UINT64_MAX
+                                                      : f->u.ack.delay << e;
           if (c->handshake_confirmed && delay > c->peer_max_ack_delay_us)
             delay = c->peer_max_ack_delay_us;
         }
@@ -426,6 +477,9 @@ process_ack (gq_conn *c, int sp, const gq_frame *f, uint64_t now)
       sent_pkt *p = &x.got[i];
 
       cc_on_ack (c, p, limited);
+      /* Something sent among the lost got through: not persistent.  */
+      if (c->pc_active && p->time_us >= c->pc_first_us)
+        c->pc_active = 0;
       if (p->in_flight)
         c->bytes_in_flight -= p->size;
       if (p->ack_eliciting && s->ae_in_flight)
@@ -440,7 +494,11 @@ process_ack (gq_conn *c, int sp, const gq_frame *f, uint64_t now)
   for (; i < x.n; i++)
     free_sent_frames (&x.got[i]);
   free (x.got);
-  c->pto_count = 0;
+  /* The backoff holds until the server's address is known to be validated:
+     a client cannot tell from an Initial acknowledgement (RFC 9002
+     appendix A.7).  */
+  if (c->role == GQ_ROLE_SERVER || c->handshake_confirmed || c->hs_acked)
+    c->pto_count = 0;
   loss_detect (c, sp, now);
 }
 
@@ -449,7 +507,7 @@ loss_detect (gq_conn *c, int sp, uint64_t now)
 {
   space *s = &c->sp[sp];
   uint64_t base, delay, lost_before;
-  uint64_t first_lost = 0, last_lost = 0, first_pn = 0, last_pn = 0;
+  uint64_t newest_lost = 0;
   int any_lost = 0;
   size_t i, j = 0;
 
@@ -476,14 +534,21 @@ loss_detect (gq_conn *c, int sp, uint64_t now)
           if (p->in_flight)
             {
               c->bytes_in_flight -= p->size;
-              if (!any_lost)
-                {
-                  first_lost = p->time_us;
-                  first_pn = p->pn;
-                }
-              last_lost = p->time_us;
-              last_pn = p->pn;
               any_lost = 1;
+              newest_lost = p->time_us;
+              /* Persistent congestion counts only what was sent once
+                 there was a round trip sample (RFC 9002 section 7.6.2).
+                 The run of losses is followed from one round of loss
+                 detection to the next, until something sent in it gets
+                 through (see process_ack).  */
+              if (p->time_us > c->first_rtt_us)
+                {
+                  if (!c->pc_active || p->time_us < c->pc_first_us)
+                    c->pc_first_us = p->time_us;
+                  if (!c->pc_active || p->time_us > c->pc_last_us)
+                    c->pc_last_us = p->time_us;
+                  c->pc_active = 1;
+                }
             }
           if (p->ack_eliciting && s->ae_in_flight)
             s->ae_in_flight--;
@@ -504,22 +569,13 @@ loss_detect (gq_conn *c, int sp, uint64_t now)
   s->n_sent = j;
   if (any_lost)
     {
-      cc_on_loss (c, last_lost, now);
-      /* Persistent congestion: losses spanning several probe timeouts
-         with nothing acknowledged in between.  */
-      if (c->have_rtt && last_lost > first_lost
-          && last_lost - first_lost
+      cc_on_loss (c, newest_lost, now);
+      if (c->pc_active && c->have_rtt && c->pc_last_us > c->pc_first_us
+          && c->pc_last_us - c->pc_first_us
              >= K_PERSISTENT_CONGESTION_THRESHOLD * conn_pto_base (c, SP_APP))
         {
-          size_t k;
-          int between = 0;
-
-          for (k = 0; k < s->acked_pns.n; k++)
-            if (s->acked_pns.r[k].lo < last_pn
-                && s->acked_pns.r[k].hi > first_pn + 1)
-              between = 1;
-          if (!between)
-            cc_persistent (c);
+          cc_persistent (c);
+          c->pc_active = 0;
         }
     }
 }
@@ -539,9 +595,10 @@ pto_space (const gq_conn *c, uint64_t *when)
   int sp, best = -1;
   uint64_t t, bt = 0;
   int any = 0;
+  uint64_t credit = 0;
+  int limited = conn_path_budget (c, c->cur_path, &credit);
 
-  if (c->role == GQ_ROLE_SERVER && !c->peer_addr_validated
-      && c->bytes_sent >= 3 * c->bytes_recv)
+  if (limited && credit == 0)
     return -1;			/* Nothing may be sent anyway.  */
   /* 0-RTT data in flight does not count before the handshake is confirmed
      (RFC 9002 section 6.2.2.1): the client must keep probing the handshake.  */
@@ -570,6 +627,10 @@ pto_space (const gq_conn *c, uint64_t *when)
       if (s->discarded || s->ae_in_flight == 0)
         continue;
       if (sp == SP_APP && !c->handshake_confirmed)
+        continue;
+      /* A probe needs credit for a packet: with less, there is no point in
+         a timer (RFC 9002 section 6.2.2.1).  */
+      if (limited && credit < conn_min_ae_datagram (c, sp))
         continue;
       t = s->last_ae_time + pto_interval (c, sp);
       if (best < 0 || t < bt)

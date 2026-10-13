@@ -1190,7 +1190,7 @@ send_client_auth (gq_tls *t)
   for (i = 0; have && i < t->cfg.n_client_chain; i++)
     total += t->cfg.client_chain[i].len + 8;
 
-  cap = total + 1024;
+  cap = total + 1024 + GQ_SIGNATURE_MAX;	/* The CertificateVerify too.  */
   heap = malloc (cap);
   if (heap == NULL)
     return gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_NOMEM);

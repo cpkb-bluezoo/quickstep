@@ -44,7 +44,7 @@ struct gq_tlsauto
   size_t npending, cap;
   int failed;
   gq_tlsconn_events wev;	/* Client: what the TLS 1.3 engine calls.  */
-  uint8_t ch[4096];		/* Client: the hello it sent (a handshake message).  */
+  uint8_t *ch;			/* Client: the hello it sent (a handshake message).  */
   size_t ch_len;
   int have_ch, undecided;
 };
@@ -85,6 +85,7 @@ gq_tlsauto_free (gq_tlsauto *c)
     return;
   gq_tlsconn_free (c->c13);
   gq_tls12conn_free (c->c12);
+  free (c->ch);
   if (c->pending)
     {
       memset (c->pending, 0, c->npending);
@@ -221,11 +222,18 @@ w_write (void *u, const uint8_t *d, size_t n)
     {
       size_t len = (size_t) (d[3] << 8 | d[4]);
 
-      if (5 + len <= n && len <= sizeof c->ch)
+      /* Whatever its size: with a ticket and a hybrid key share the hello
+         is several KB.  Without it a TLS 1.2 server's answer could not be
+         continued.  */
+      if (5 + len <= n)
         {
-          memcpy (c->ch, d + 5, len);
-          c->ch_len = len;
-          c->have_ch = 1;
+          c->ch = malloc (len ? len : 1);
+          if (c->ch != NULL)
+            {
+              memcpy (c->ch, d + 5, len);
+              c->ch_len = len;
+              c->have_ch = 1;
+            }
         }
     }
   return c->ev.write (c->ev.user, d, n);

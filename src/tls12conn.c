@@ -339,7 +339,11 @@ on_record (void *u, unsigned type, const uint8_t *data, size_t len)
           finish (c, 0, GQ_ALERT_CLOSE_NOTIFY);
           return 1;
         }
-      /* Any other alert ends the connection.  */
+      /* Only close_notify and a fatal alert end a TLS 1.2 connection; a
+         warning (unrecognized_name, no_renegotiation, user_canceled) may
+         be ignored (RFC 5246 section 7.2.2).  */
+      if (data[0] == GQ_ALERT_LEVEL_WARNING)
+        return 0;
       c->close_sent = 1;
       finish (c, GQ_ERR_PROTOCOL, data[1]);
       return 1;

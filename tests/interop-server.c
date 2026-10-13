@@ -333,7 +333,7 @@ main (int argc, char **argv)
     }
   cfg.alpn = alpn;
   cfg.n_alpn = n_alpn;
-  if (n_groups && !st.tls12)
+  if (n_groups)
     {
       cfg.groups = groups;
       cfg.n_groups = n_groups;

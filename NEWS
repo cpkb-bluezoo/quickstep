@@ -1,8 +1,68 @@
 quickstep NEWS - history of user-visible changes.
 
-* Noteworthy changes in release ?.? (????-??-??) [?]
+* Noteworthy changes in release 0.0.2 (2026-09-30)
 
-** Initial development.  No release has been made.
+** The project is renamed from gnuquic to quickstep.  Public headers live
+under include/quickstep/, the library is libquickstep, and pkg-config is
+quickstep.pc.  The C API (gq_ / GQ_) is unchanged.
+
+* Noteworthy changes in release 0.0.1 (2026-09-27)
+
+** First tarball sent for FSF evaluation (as gnuquic).
+
+* Noteworthy changes in development (unreleased)
+
+** Initial development.
+** TLS 1.2 and DTLS 1.2 negotiate x25519 as well as secp256r1 for ECDHE
+(RFC 8422): a client offers both, P-256 first, and the server picks the
+first group of its own preference (the configured groups that TLS 1.2 can
+do, else secp256r1 then x25519) that the client offers, writes it in
+ServerKeyExchange and parses the matching ClientKeyExchange.  A client
+that sends no supported_groups gets secp256r1; one with nothing in common
+is refused unless it resumes (no key exchange then, and info.group is 0
+for both ends).  A client refuses a ServerKeyExchange group it did not
+offer, a combined TLS 1.3 / 1.2 hello included.  Policy: gq_policy_*_groups_for (1.2) is {secp256r1, x25519}.
+** Ed25519 in TLS 1.2 and DTLS 1.2 (RFC 8422 section 5.1.3): a server whose
+certificate key is Ed25519 selects an ECDHE_ECDSA suite and signs its key
+exchange with it, a client verifies that, and Ed25519 client certificates
+work in both directions; Ed25519 is in the 1.2 signature list and in
+signature_algorithms_cert.  Interoperates with OpenSSL and GnuTLS (OpenSSL's
+own DTLS 1.2 server does not serve an Ed25519 certificate).
+** TLS 1.2 and DTLS 1.2 ignore warning-level alerts other than
+close_notify (RFC 5246 section 7.2.2); TLS 1.3 and DTLS 1.3 ignore
+user_canceled (RFC 8446 section 6) and still treat every other alert as
+fatal.  GQ_ALERT_USER_CANCELED and the GQ_ALERT_LEVEL_ constants are new.
+** gq_dtls_send and gq_dtls12_send send nothing for an empty write, as the
+stream transports do; the receiver drops empty records anyway.
+** Negotiating clients and servers: the hello kept for a fall back to
+TLS 1.2 is no longer limited to 4 KB (a ticket of 2 KB and a hybrid key
+share overflowed it, and the fall back then failed), and over DTLS it is
+put together from its fragments.  A negotiating DTLS server without a
+listener holds the first datagrams of a fragmented ClientHello until
+supported_versions is in, instead of taking it for DTLS 1.2.
+** Fixes found by gumdrop's interop work: a late Initial addressed to the
+ID of a connection that has gone no longer makes a new server connection
+(the endpoint remembers the IDs it issued for as long as the idle
+timeout); a cleartext (epoch 0) DTLS handshake fragment can no longer end
+a DTLS 1.2 or 1.3 association, whether it arrives after the handshake or
+conflicts with another, and a cleartext ACK only acknowledges cleartext
+records; DTLS 1.3 sends its alert before reporting the association
+closed; GQ_SIGNATURE_MAX now holds an ML-DSA-87 signature and the client's
+CertificateVerify buffer allows for it.
+** QUIC conformance fixes: a client keeps its probe timeout backoff until
+the server's address is validated (an Initial acknowledgement does not
+count); persistent congestion is judged only on packets sent after the
+first round trip sample and over several rounds of loss detection; the
+peer's ACK Delay cannot wrap round into a small one; a server holds an
+ack-eliciting Initial back rather than send it unpadded when the
+anti-amplification credit is below a datagram, and sets no probe timer
+it cannot use; peers' acknowledgements of our ACK frames retire what they
+named (RFC 9000 section 13.2.4), so ACK frames stay small under loss;
+when the peer retires connection IDs, no path goes on using one; the
+previous key phase's read keys are dropped after three probe timeouts;
+AEAD integrity and confidentiality limits close the connection
+(AEAD_LIMIT_REACHED); an acknowledgement of a 0-RTT packet no longer
+allows the first key update.
 ** Version negotiation for TLS and DTLS (tlsauto.h, dtlsauto.h): by
 default a server chooses between the TLS 1.3 and TLS 1.2 engines (or DTLS
 1.3 and 1.2) from the ClientHello, so one listener serves both and
@@ -76,5 +136,5 @@ tested against OpenSSL, GnuTLS and wolfSSL.
 record number encryption, fragmentation, ACKs, retransmission, KeyUpdate
 and a stateless address-validating cookie; tested against wolfSSL.
 ** TLS 1.2 (tls12.h, tls12conn.h) with the same restricted profile as
-Gumdrop and Hopf: ECDHE on secp256r1 and AEAD suites only, mandatory
+Gumdrop and Hopf: ECDHE on secp256r1 or x25519 and AEAD suites only, mandatory
 extended master secret and renegotiation indication, ticket resumption.

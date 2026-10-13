@@ -114,6 +114,20 @@ rd_point (struct rd *r, gq_slice *point)
   return GQ_OK;
 }
 
+/* Length of an uncompressed point of GROUP; 0 for a group TLS 1.2 does not
+   use.  secp384r1 only if WIDE.  */
+static size_t
+point_len (unsigned group, int wide)
+{
+  if (group == GQ_GROUP_SECP256R1)
+    return GQ_TLS12_POINT_LEN;
+  if (group == GQ_GROUP_X25519)
+    return 32;
+  if (wide && group == GQ_GROUP_SECP384R1)
+    return 97;
+  return 0;
+}
+
 static int
 parse_ske (gq_slice body, gq_tls12_ske *ske, int wide)
 {
@@ -128,13 +142,8 @@ parse_ske (gq_slice body, gq_tls12_ske *ske, int wide)
     return GQ_ERR_PROTOCOL;
   TRY (rd_uint (&r, 2, &v));
   ske->group = (uint16_t) v;
-  if (v == GQ_GROUP_SECP256R1)
-    want = GQ_TLS12_POINT_LEN;
-  else if (wide && v == GQ_GROUP_SECP384R1)
-    want = 97;
-  else if (wide && v == GQ_GROUP_X25519)
-    want = 32;
-  else
+  want = point_len ((unsigned) v, wide);
+  if (want == 0)
     return GQ_ERR_PROTOCOL;
   TRY (rd_point (&r, &ske->point));
   ske->params.data = start;
@@ -184,13 +193,13 @@ gq_tls12_certreq_parse (gq_slice body, gq_slice *sigalgs)
 }
 
 int
-gq_tls12_cke_parse (gq_slice body, gq_slice *point)
+gq_tls12_cke_parse (gq_slice body, unsigned group, gq_slice *point)
 {
   struct rd r = { body.data, body.len };
 
   TRY (rd_point (&r, point));
   TRY (rd_end (&r));
-  return point->len == GQ_TLS12_POINT_LEN ? GQ_OK : GQ_ERR_PROTOCOL;
+  return point->len == point_len (group, 0) ? GQ_OK : GQ_ERR_PROTOCOL;
 }
 
 int
@@ -275,9 +284,7 @@ gq_tls12_build_client_hello (gq_wbuf *w, const gq_tls12_ch_params *p)
   gq_wbuf_close (w);
   gq_wbuf_close (w);
   gq_wbuf_ext_open (w, GQ_EXT_SUPPORTED_GROUPS);
-  gq_wbuf_open (w, 2);
-  gq_wbuf_u16 (w, GQ_GROUP_SECP256R1);
-  gq_wbuf_close (w);
+  put_u16_list (w, p->groups, p->n_groups);
   gq_wbuf_close (w);
   gq_wbuf_ext_open (w, GQ_EXT12_EC_POINT_FORMATS);
   gq_wbuf_open (w, 1);
@@ -367,10 +374,10 @@ gq_tls12_build_certificate (gq_wbuf *w, const gq_slice *chain, size_t n)
 }
 
 void
-gq_tls12_put_ecdh_params (gq_wbuf *w, gq_slice point)
+gq_tls12_put_ecdh_params (gq_wbuf *w, unsigned group, gq_slice point)
 {
   gq_wbuf_u8 (w, GQ_TLS12_CURVE_NAMED);
-  gq_wbuf_u16 (w, GQ_GROUP_SECP256R1);
+  gq_wbuf_u16 (w, group);
   gq_wbuf_open (w, 1);
   gq_wbuf_slice (w, point);
   gq_wbuf_close (w);

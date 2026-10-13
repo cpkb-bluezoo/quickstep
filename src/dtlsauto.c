@@ -33,6 +33,9 @@
 
 #define V13 0xfefc
 #define V12 0xfefd
+#define MORE 1			/* Not a version: wait for more fragments.  */
+#define PROBE_MAX 4096		/* How much of a hello we put together to tell.  */
+#define HELD_MAX 8		/* Datagrams kept for that.  */
 
 struct gq_dtlsauto
 {
@@ -45,12 +48,29 @@ struct gq_dtlsauto
   int have_params;
   gq_dtls *d13;
   gq_dtls12 *d12;
-  /* Client: the hello the DTLS 1.3 engine sent, for the hand-over.  */
-  uint8_t ch[4096];
-  size_t ch_len;
-  uint64_t ch_next_seq;
+  /* Client: the hello the DTLS 1.3 engine sent, for the hand-over.  It is
+     put together from its fragments (a ticket makes it more than a
+     datagram): CH is the message, CH_GOT one byte per byte of it, set when
+     that byte has been seen.  */
+  /* Server: datagrams of a ClientHello kept until its version is clear.  */
+  uint8_t *held[HELD_MAX];
+  size_t held_len[HELD_MAX], n_held;
+  uint8_t *ch, *ch_got;
+  size_t ch_len, ch_have;
+  unsigned ch_msg_seq;
+  uint64_t ch_next_seq, ch_rec_seq;
   int have_ch, undecided;
 };
+
+static void
+free_held (gq_dtlsauto *c)
+{
+  size_t i;
+
+  for (i = 0; i < c->n_held; i++)
+    free (c->held[i]);
+  c->n_held = 0;
+}
 
 static unsigned
 norm (unsigned v)
@@ -159,45 +179,104 @@ list_has (gq_slice s, unsigned v)
   return 0;
 }
 
-/* Which DTLS version is this first datagram of a client for?  Returns V13
-   or V12, or 0 for a datagram to drop.  See dtlsauto.h.  */
-static unsigned
-classify (const uint8_t *d, size_t n, unsigned versions)
+/* The start of the first ClientHello of D[0..K), put together from its
+   fragments, as far as it is contiguous from the start.  */
+struct probe
 {
-  struct first x;
+  uint8_t buf[PROBE_MAX];
+  uint8_t got[PROBE_MAX];
+  size_t total;			/* The message's length.  */
+  unsigned seq;
+  int seen;
+};
+
+static int
+probe_frag (void *u, const gq_dtls_hs_frag *f)
+{
+  struct probe *p = u;
+  size_t i;
+
+  if (f->type != GQ_HS_CLIENT_HELLO)
+    return 0;
+  if (!p->seen)
+    {
+      p->seen = 1;
+      p->seq = f->message_seq;
+      p->total = f->length;
+    }
+  if (f->message_seq != p->seq || f->length != p->total)
+    return 0;
+  for (i = 0; i < f->frag_len && f->frag_off + i < PROBE_MAX; i++)
+    {
+      p->buf[f->frag_off + i] = f->data.data[i];
+      p->got[f->frag_off + i] = 1;
+    }
+  return 0;
+}
+
+static int
+probe_rec (void *u, const gq_drec *r)
+{
+  if (r->kind == GQ_DREC_PLAINTEXT && r->epoch == 0
+      && r->type == GQ_DTLS_CT_HANDSHAKE)
+    gq_dtls_hs_parse (r->body, 65536, probe_frag, u);
+  return 0;
+}
+
+/* Which DTLS version are these first datagrams of a client for?  Returns
+   V13 or V12, or 0 for a datagram to drop, or MORE if the part of the hello
+   we have does not say and the rest may (it is fragmented, and
+   supported_versions may follow in a later fragment).  See dtlsauto.h.  */
+static unsigned
+classify (const uint8_t *const *d, const size_t *n, size_t k,
+          unsigned versions)
+{
+  struct probe x;
   const uint8_t *p;
-  size_t len, l;
+  size_t len, l, i, el;
   gq_slice s, cookie;
-  int found;
+  int found, whole;
   gq_slice body;
+  unsigned unsure;
 
   if (versions == GQ_DTLSAUTO_DTLS13)
     return V13;
   if (versions == GQ_DTLSAUTO_DTLS12)
     return V12;
-  if (!first_frag (d, n, &x) || x.f.type != GQ_HS_CLIENT_HELLO)
+  memset (&x, 0, sizeof x);
+  for (i = 0; i < k; i++)
+    gq_dtls_records (d[i], n[i], probe_rec, &x);
+  if (!x.seen)
     return 0;
-  p = x.f.data.data;
-  len = x.f.data.len;
+  for (len = 0; len < x.total && len < PROBE_MAX && x.got[len]; len++)
+    ;
+  whole = len == x.total;
+  p = x.buf;
+  /* What we have ends too soon to say: if the message is not all here, more
+     fragments may be on their way.  */
+  unsure = whole ? V12 : MORE;
   if (!take (&p, &len, 2 + 32, &s) || !take (&p, &len, 1, &s)
       || !take (&p, &len, s.data[0], &s))
-    return 0;
+    return whole ? 0 : MORE;
   if (!take (&p, &len, 1, &s) || !take (&p, &len, s.data[0], &cookie))
-    return 0;
+    return whole ? 0 : MORE;
   if (cookie.len)		/* A HelloVerifyRequest cookie answers 1.2.  */
     return V12;
   if (!take (&p, &len, 2, &s))
-    return 0;
+    return unsure;
   l = ((size_t) s.data[0] << 8) | s.data[1];
   if (!take (&p, &len, l, &s) || !take (&p, &len, 1, &s)
       || !take (&p, &len, s.data[0], &s) || !take (&p, &len, 2, &s))
-    return V12;
-  find_ext (p, len, GQ_EXT_COOKIE, &found, &body);
+    return unsure;
+  el = ((size_t) s.data[0] << 8) | s.data[1];
+  if (len < el && whole)
+    return V12;			/* Malformed: the engine will refuse it.  */
+  find_ext (p, len < el ? len : el, GQ_EXT_COOKIE, &found, &body);
   if (found)			/* A HelloRetryRequest cookie: 1.3.  */
     return V13;
-  find_ext (p, len, GQ_EXT_SUPPORTED_VERSIONS, &found, &body);
+  find_ext (p, len < el ? len : el, GQ_EXT_SUPPORTED_VERSIONS, &found, &body);
   if (!found)
-    return V12;
+    return len < el ? MORE : V12;
   if (list_has (body, V13))
     return V13;
   return list_has (body, V12) ? V12 : 0;
@@ -221,7 +300,13 @@ gq_dtlsauto_listen (gq_dtls_cookies *ck, const gq_tls_server_config *config,
     return GQ_ERR_INVAL;
   versions = norm (versions);
   memset (prime, 0, sizeof *prime);
-  v = classify (dgram, len, versions);
+  v = classify (&dgram, &len, 1, versions);
+  /* Stateless, so a hello that does not say in its first fragment cannot
+     be waited for: as DTLS 1.2's own cookie exchange answers a first
+     fragment, it is taken for 1.2 (a 1.3 listener could not use it
+     either: see gq_dtls_listen).  */
+  if (v == MORE)
+    v = V12;
   if (v == V13)
     r = gq_dtls_listen (ck, config, binding, binding_len, dgram, len, reply,
                         reply_cap, reply_len, &prime->p13);
@@ -313,6 +398,9 @@ gq_dtlsauto_free (gq_dtlsauto *c)
     return;
   gq_dtls_free (c->d13);
   gq_dtls12_free (c->d12);
+  free (c->ch);
+  free (c->ch_got);
+  free_held (c);
   free (c);
 }
 
@@ -320,26 +408,67 @@ gq_dtlsauto_free (gq_dtlsauto *c)
 /* Client                                                             */
 /* ------------------------------------------------------------------ */
 
-/* While undecided, remember the hello the DTLS 1.3 engine sent (the last
-   copy: retransmissions carry higher record numbers).  */
+/* One fragment of a ClientHello we sent: add it to the hello being kept.  */
+static int
+w_frag (void *u, const gq_dtls_hs_frag *f)
+{
+  gq_dtlsauto *c = u;
+  size_t i;
+
+  if (f->type != GQ_HS_CLIENT_HELLO || f->length > 65535)
+    return 0;
+  if (c->ch == NULL)
+    {
+      c->ch = malloc (f->length + 4);
+      c->ch_got = calloc (1, f->length + 4);
+      if (c->ch == NULL || c->ch_got == NULL)
+        return 0;
+      c->ch[0] = GQ_HS_CLIENT_HELLO;
+      c->ch[1] = (uint8_t) (f->length >> 16);
+      c->ch[2] = (uint8_t) (f->length >> 8);
+      c->ch[3] = (uint8_t) f->length;
+      c->ch_len = f->length + 4;
+      c->ch_msg_seq = f->message_seq;
+    }
+  if (f->message_seq != c->ch_msg_seq || f->length + 4 != c->ch_len
+      || f->frag_off + f->frag_len > f->length)
+    return 0;
+  for (i = 0; i < f->frag_len; i++)
+    if (!c->ch_got[4 + f->frag_off + i])
+      {
+        c->ch_got[4 + f->frag_off + i] = 1;
+        c->ch_have++;
+      }
+  memcpy (c->ch + 4 + f->frag_off, f->data.data, f->frag_len);
+  if (c->ch_rec_seq + 1 > c->ch_next_seq)
+    c->ch_next_seq = c->ch_rec_seq + 1;
+  c->have_ch = c->ch_have == c->ch_len - 4;
+  return 0;
+}
+
+static int
+w_rec (void *u, const gq_drec *r)
+{
+  gq_dtlsauto *c = u;
+
+  if (r->kind == GQ_DREC_PLAINTEXT && r->epoch == 0
+      && r->type == GQ_DTLS_CT_HANDSHAKE)
+    {
+      c->ch_rec_seq = r->seq;
+      gq_dtls_hs_parse (r->body, 65536, w_frag, c);
+    }
+  return 0;
+}
+
+/* While undecided, remember the hello the DTLS 1.3 engine sent (from the
+   last copy: retransmissions carry higher record numbers).  */
 static int
 w_send (void *u, const uint8_t *d, size_t n)
 {
   gq_dtlsauto *c = u;
-  struct first x;
 
-  if (c->undecided && first_frag (d, n, &x) && x.f.type == GQ_HS_CLIENT_HELLO
-      && x.f.frag_len == x.f.length && x.f.length + 4 <= sizeof c->ch)
-    {
-      c->ch[0] = GQ_HS_CLIENT_HELLO;
-      c->ch[1] = (uint8_t) (x.f.length >> 16);
-      c->ch[2] = (uint8_t) (x.f.length >> 8);
-      c->ch[3] = (uint8_t) x.f.length;
-      memcpy (c->ch + 4, x.f.data.data, x.f.length);
-      c->ch_len = x.f.length + 4;
-      c->ch_next_seq = x.rec.seq + 1;
-      c->have_ch = 1;
-    }
+  if (c->undecided)
+    gq_dtls_records (d, n, w_rec, c);
   return c->ev.send (c->ev.user, d, n);
 }
 
@@ -514,13 +643,46 @@ gq_dtlsauto_receive (gq_dtlsauto *c, const uint8_t *dgram, size_t len,
     return GQ_ERR_INVAL;
   if (c->server && !c->d13 && !c->d12)
     {
-      unsigned v = classify (dgram, len, c->versions);
+      const uint8_t *dv[HELD_MAX + 1];
+      size_t nv[HELD_MAX + 1], i;
+      unsigned v;
 
+      for (i = 0; i < c->n_held; i++)
+        {
+          dv[i] = c->held[i];
+          nv[i] = c->held_len[i];
+        }
+      dv[c->n_held] = dgram;
+      nv[c->n_held] = len;
+      v = classify (dv, nv, c->n_held + 1, c->versions);
+      if (v == MORE && c->n_held < HELD_MAX)
+        {
+          /* The hello is in pieces and the first ones do not say which
+             version it is for: keep this one until the rest is in.  */
+          c->held[c->n_held] = malloc (len);
+          if (c->held[c->n_held] == NULL)
+            return GQ_ERR_NOMEM;
+          memcpy (c->held[c->n_held], dgram, len);
+          c->held_len[c->n_held++] = len;
+          return GQ_OK;
+        }
+      if (v == MORE)
+        v = V12;		/* Too long to wait: as without waiting.  */
       if (v == 0)
-        return GQ_OK;		/* Not a hello we can serve: dropped.  */
+        {
+          free_held (c);
+          return GQ_OK;		/* Not a hello we can serve: dropped.  */
+        }
       r = make_server_engine (c, v, NULL);
       if (r != GQ_OK)
         return r;
+      /* The datagrams that were kept, in the order they came.  */
+      for (i = 0; i < c->n_held; i++)
+        if (c->d13)
+          gq_dtls_receive (c->d13, c->held[i], c->held_len[i], now);
+        else
+          gq_dtls12_receive (c->d12, c->held[i], c->held_len[i], now);
+      free_held (c);
     }
   else if (!c->server && c->undecided)
     {

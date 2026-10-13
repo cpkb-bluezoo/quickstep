@@ -46,8 +46,9 @@ extern "C" {
 typedef struct gq_pubkey gq_pubkey;
 typedef struct gq_privkey gq_privkey;
 
-/* Largest signature any supported scheme produces (RSA-4096 PSS).  */
-#define GQ_SIGNATURE_MAX 512
+/* Largest signature any supported scheme produces: ML-DSA-87 (FIPS 204)
+   makes 4627 octets, well above RSA-4096.  */
+#define GQ_SIGNATURE_MAX 4627
 
 /* 1 if the backend can actually use SCHEME (ML-DSA schemes need a backend
    that implements them).  The result is computed once and cached.  */

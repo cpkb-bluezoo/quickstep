@@ -576,6 +576,8 @@ try_ccs (gq_dtls12 *c)
 struct rxctx
 {
   gq_dtls12 *c;
+  int unauth;			/* From an epoch 0 record: anyone could have
+				   sent it.  */
 };
 
 static int
@@ -605,12 +607,27 @@ on_frag (void *u, const gq_dtls_hs_frag *f)
 {
   struct rxctx *x = u;
   gq_dtls12 *c = x->c;
-  int d = gq_dtls_reasm_push (&c->reasm, f, on_msg, x);
+  int d;
 
+  /* A cleartext message with something to say is only for as long as nothing
+     is protected yet; after that only a repeat of one already delivered is
+     of any use (it draws our flight again).  RFC 6347 section 4.1.2.7:
+     what cannot be authenticated is discarded, not fatal.  */
+  if (x->unauth && c->rd1.active
+      && !((int16_t) (uint16_t) (f->message_seq - c->reasm.next_seq) < 0))
+    return 0;
+  d = gq_dtls_reasm_push (&c->reasm, f, on_msg, x);
   if (d == GQ_ERR_HANDLER || c->closed)
     return 1;
   if (d < 0)
     {
+      if (x->unauth)
+        {
+          /* Whatever it clashed with is suspect: start that message over
+             (the peer sends it again).  */
+          gq_dtls_reasm_trim (&c->reasm);
+          return 0;
+        }
       send_alert (c, 2, GQ_ALERT_ILLEGAL_PARAMETER);
       fail (c, d, GQ_ALERT_ILLEGAL_PARAMETER);
       return 1;
@@ -623,11 +640,12 @@ on_frag (void *u, const gq_dtls_hs_frag *f)
 }
 
 static void
-process_hs (gq_dtls12 *c, gq_slice body)
+process_hs (gq_dtls12 *c, gq_slice body, int unauth)
 {
   struct rxctx x;
 
   x.c = c;
+  x.unauth = unauth;
   c->d_hs = 1;
   gq_dtls_hs_parse (body, c->reasm.max_len, on_frag, &x);
 }
@@ -639,6 +657,8 @@ handle_alert (gq_dtls12 *c, gq_slice a)
     return;
   if (a.data[1] == GQ_ALERT_CLOSE_NOTIFY)
     finish (c, 0, GQ_ALERT_CLOSE_NOTIFY);
+  else if (a.data[0] == GQ_ALERT_LEVEL_WARNING)
+    return;			/* Ignorable (RFC 5246 section 7.2.2).  */
   else
     finish (c, GQ_ERR_PROTOCOL, a.data[1]);
 }
@@ -658,7 +678,7 @@ on_record (void *u, const gq_d12rec *rec)
         {
         case GQ_D12_CT_HANDSHAKE:
           gq_dtls12_replay_update (&c->rd0, rec->seq);
-          process_hs (c, rec->body);
+          process_hs (c, rec->body, 1);
           break;
         case GQ_D12_CT_CHANGE_CIPHER_SPEC:
           if (rec->body.len != 1 || rec->body.data[0] != 1)
@@ -711,7 +731,7 @@ on_record (void *u, const gq_d12rec *rec)
         {
         case GQ_D12_CT_HANDSHAKE:
           if (len > 0)
-            process_hs (c, pt);
+            process_hs (c, pt, 0);
           break;
         case GQ_D12_CT_APPLICATION_DATA:
           /* Not before the peer's Finished has been verified.  */
@@ -829,6 +849,11 @@ gq_dtls12_send (gq_dtls12 *c, const uint8_t *data, size_t len)
     return GQ_ERR_INVAL;
   if (len > gq_dtls12_max_payload (c))
     return GQ_ERR_BUFSIZE;
+  /* Nothing to say: as for the stream transports, no record.  The peer
+     drops an empty one unseen (see on_record), so it would only cost a
+     datagram and a sequence number.  */
+  if (len == 0)
+    return GQ_OK;
   r = put_record (c, 1, GQ_D12_CT_APPLICATION_DATA, data, len);
   if (r == GQ_OK)
     r = flush_dgram (c);

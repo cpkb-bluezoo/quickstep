@@ -482,7 +482,7 @@ main (int argc, char **argv)
     }
   cfg.alpn = alpn;
   cfg.n_alpn = o.n_alpn;
-  if (o.n_groups && !o.tls12)
+  if (o.n_groups)
     {
       cfg.groups = o.groups;
       cfg.n_groups = o.n_groups;

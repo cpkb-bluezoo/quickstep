@@ -63,16 +63,20 @@ static const uint16_t sigs[] = {
   GQ_SIG_RSA_PSS_RSAE_SHA512
 };
 
-/* TLS 1.2 / DTLS 1.2: ECDHE on secp256r1 only.  */
+/* TLS 1.2 / DTLS 1.2: ECDHE on secp256r1 or x25519 (RFC 8422), P-256
+   first: the one curve every ECC peer has.  */
 static const uint16_t groups12[] = {
-  GQ_GROUP_SECP256R1
+  GQ_GROUP_SECP256R1,
+  GQ_GROUP_X25519
 };
 
 /* TLS 1.2 / DTLS 1.2 signatures.  RSA-PSS is accepted from peers, but the
-   engine signs RSA with PKCS#1 v1.5 (see tls12.c).  */
+   engine signs RSA with PKCS#1 v1.5 (see tls12.c).  Ed25519 signs under the
+   ECDHE_ECDSA suites (RFC 8422 section 5.1.3).  */
 static const uint16_t sigs12[] = {
   GQ_SIG_ECDSA_SECP256R1_SHA256,
   GQ_SIG_ECDSA_SECP384R1_SHA384,
+  GQ_SIG_ED25519,
   GQ_SIG_RSA_PSS_RSAE_SHA256,
   GQ_SIG_RSA_PSS_RSAE_SHA384,
   GQ_SIG_RSA_PSS_RSAE_SHA512,

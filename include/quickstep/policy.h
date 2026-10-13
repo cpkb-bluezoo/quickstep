@@ -24,9 +24,9 @@
    RSA signatures in TLS 1.3, SHA-1 signatures, renegotiation,
    compression, finite-field DH groups, export ciphers) is not a
    configuration option; it is not implemented.  DTLS 1.3 uses the TLS 1.3
-   lists unchanged.  TLS 1.2 is a narrower
-   profile again: ECDHE on secp256r1 only, and no Ed25519 or ML-DSA.  The "Security policy" chapter of the manual
-   gives the reasoning behind each choice.
+   lists unchanged.  TLS 1.2 is a narrower profile again: ECDHE on
+   secp256r1 or x25519 only, and no ML-DSA.  The "Security
+   policy" chapter of the manual gives the reasoning behind each choice.
 
    Values are the IANA registry code points.  */
 
@@ -72,8 +72,10 @@ enum gq_tls12_suite
   GQ_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305    = 0xcca8
 };
 
-/* Key exchange groups.  TLS 1.2 / DTLS 1.2 use secp256r1 only.  Hybrid post-quantum groups (RFC 10024 /
-   draft-ietf-tls-ecdhe-mlkem) come first in the default preference.  */
+/* Key exchange groups.  TLS 1.2 / DTLS 1.2 use secp256r1 and x25519
+   only, P-256 first.  Hybrid post-quantum groups (RFC 10024 /
+   draft-ietf-tls-ecdhe-mlkem) come first in the default TLS 1.3
+   preference.  */
 enum gq_group
 {
   GQ_GROUP_SECP256R1            = 0x0017,

@@ -292,6 +292,7 @@ conn_discard_space (gq_conn *c, int sp)
   s->ack_deadline = 0;
   s->loss_time = 0;
   s->probes = 0;
+  s->n_ack_sent = 0;
   c->pto_count = 0;
   return GQ_OK;
 }

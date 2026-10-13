@@ -28,7 +28,11 @@
    gq_dtls12_listen.  The association then starts with
    gq_dtlsauto_server_new and the prime it filled in.  Without a listener,
    gq_dtlsauto_server_new collects the ClientHello itself from the first
-   datagrams and decides.
+   datagrams and decides, keeping them (up to eight) while a fragmented
+   hello does not yet say.  A listener for DTLS 1.3 answers only a first
+   ClientHello that fits one datagram: its cookie holds the hash of the
+   whole message, and a stateless server cannot reassemble.  A DTLS 1.2 one
+   answers the first fragment (a HelloVerifyRequest needs no more).
 
    Client side: the DTLS 1.3 engine sends a hello that offers both versions
    (a small one, so that a stateless listener can answer it) and the client

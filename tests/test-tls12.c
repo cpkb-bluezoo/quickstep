@@ -216,6 +216,9 @@ deliver (struct eng *from, struct eng *to, size_t chunk)
   return r;
 }
 
+/* The ServerHello random, and the client's, for re-signing.  */
+static const uint8_t *g_client_random;
+
 /* ---- Configuration ---- */
 
 struct opts
@@ -234,6 +237,12 @@ struct opts
   uint64_t (*snow) (void *);	/* Server clock.  */
   const gq_slice *calpn, *salpn;
   size_t n_calpn, n_salpn;
+  const uint16_t *cgroups;	/* Client and server group preferences.  */
+  size_t n_cgroups;
+  const uint16_t *sgroups;
+  size_t n_sgroups;
+  const uint16_t *csigs;	/* Client signature schemes.  */
+  size_t n_csigs;
 };
 
 struct pair
@@ -266,6 +275,10 @@ pair_new (const struct opts *o)
   p->cc.alpn = o->calpn;
   p->cc.n_alpn = o->n_calpn;
   p->cc.hooks.now_ms = o->now;
+  p->cc.groups = o->cgroups;
+  p->cc.n_groups = o->n_cgroups;
+  p->cc.sigschemes = o->csigs;
+  p->cc.n_sigschemes = o->n_csigs;
   if (o->client_id)
     {
       p->cc.client_chain = o->client_id->chain;
@@ -280,6 +293,8 @@ pair_new (const struct opts *o)
   p->sc.ticket_keys = o->keys;
   p->sc.alpn = o->salpn;
   p->sc.n_alpn = o->n_salpn;
+  p->sc.groups = o->sgroups;
+  p->sc.n_groups = o->n_sgroups;
   p->sc.hooks.now_ms = o->snow ? o->snow : o->now;
 
   cs = sink_for (p->c);
@@ -314,15 +329,18 @@ run (struct pair *p, size_t chunk)
   return r;
 }
 
+/* As expect_done, with the ECDHE group both ends must report: none on a
+   resumed session, where no key exchange happens.  */
 static void
-expect_done (struct pair *p, int resumed)
+expect_done_group (struct pair *p, int resumed, unsigned group)
 {
   CHECK (p->c->complete && p->s->complete);
   CHECK (gq_tls12_is_complete (p->c->t) && gq_tls12_is_complete (p->s->t));
   CHECK_EQ (p->c->info.cipher_suite, p->s->info.cipher_suite);
   CHECK_EQ (p->c->info.resumed, resumed);
   CHECK_EQ (p->s->info.resumed, resumed);
-  CHECK_EQ (p->c->info.group, GQ_GROUP_SECP256R1);
+  CHECK_EQ (p->c->info.group, resumed ? 0 : group);
+  CHECK_EQ (p->s->info.group, resumed ? 0 : group);
   /* Both ends derived the same keys, in opposite directions.  */
   CHECK (p->c->klen == p->s->klen && p->c->klen > 0);
   CHECK (memcmp (p->c->key[1], p->s->key[0], p->c->klen) == 0);
@@ -340,6 +358,12 @@ expect_done (struct pair *p, int resumed)
                                3, b, sizeof b), GQ_OK);
     CHECK (memcmp (a, b, sizeof a) == 0);
   }
+}
+
+static void
+expect_done (struct pair *p, int resumed)
+{
+  expect_done_group (p, resumed, GQ_GROUP_SECP256R1);
 }
 
 /* ---- Wire-level editing helpers ---- */
@@ -447,7 +471,7 @@ test_suites_and_keys (void)
 {
   size_t chunks[] = { 0, 1, 3, 100 };
   size_t i, k;
-  struct ident *ec = &fx_ec, *ec384 = &fx_ec384, *rsa = &fx_rsa;
+  struct ident *ec = &fx_ec, *ec384 = &fx_ec384, *rsa = &fx_rsa, *ed = &fx_ed;
   struct
   {
     const uint16_t *s;
@@ -458,6 +482,9 @@ test_suites_and_keys (void)
     { ecdsa256, ec, GQ_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 },
     { ecdsachacha, ec, GQ_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305 },
     { ecdsa128, ec384, GQ_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 },
+    /* RFC 8422 section 5.1.3: Ed25519 keys sign under the ECDSA suites.  */
+    { ecdsa128, ed, GQ_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 },
+    { ecdsachacha, ed, GQ_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305 },
     { rsa128, rsa, GQ_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 },
     { rsa256, rsa, GQ_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 },
     { rsachacha, rsa, GQ_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305 }
@@ -746,6 +773,22 @@ test_client_auth (void)
   CHECK_EQ (p->s->info.client_auth_sent, 1);
   pair_free (p);
 
+  /* An Ed25519 client key, with an Ed25519 and an EC server key.  */
+  o.client_id = &fx_cli_ed;
+  p = pair_new (&o);
+  CHECK_EQ (run (p, 0), GQ_OK);
+  expect_done (p, 0);
+  CHECK_EQ (p->s->info.client_auth_sent, 1);
+  pair_free (p);
+  o.server_id = &fx_ed;
+  p = pair_new (&o);
+  CHECK_EQ (run (p, 3), GQ_OK);
+  expect_done (p, 0);
+  CHECK_EQ (p->s->info.client_auth_sent, 1);
+  pair_free (p);
+  o.server_id = NULL;
+  o.client_id = &fx_cli_rsa;
+
   /* RSA server certificate and RSA client together.  */
   o.server_id = &fx_rsa;
   p = pair_new (&o);
@@ -845,13 +888,18 @@ static void bad_reneg (uint8_t *m, size_t n)
   m[o + 4] = 0xaa;			/* Not the empty indication.  */
 }
 static void no_groups (uint8_t *m, size_t n) { (void) n; rename_ext (m, GQ_EXT_SUPPORTED_GROUPS, 0x7779); }
-static void wrong_group (uint8_t *m, size_t n)
+static void
+wrong_group (uint8_t *m, size_t n)
 {
   long o = find_ext (m, GQ_EXT_SUPPORTED_GROUPS);
 
   (void) n;
   CHECK (o >= 0);
-  m[o + 6] = 0x00; m[o + 7] = 0x1d;		/* x25519 only.  */
+  /* The client offers two groups: both become secp384r1, which the
+     engine does not do on TLS 1.2.  */
+  CHECK (m[o + 5] == 4);
+  m[o + 6] = 0x00; m[o + 7] = 0x18;
+  m[o + 8] = 0x00; m[o + 9] = 0x18;
 }
 static void no_sigs (uint8_t *m, size_t n) { (void) n; rename_ext (m, GQ_EXT_SIGNATURE_ALGORITHMS, 0x777a); }
 static void old_version (uint8_t *m, size_t n) { (void) n; m[4] = 3; m[5] = 2; }
@@ -929,7 +977,9 @@ test_server_refusals (void)
   CHECK_EQ (ch_case (no_reneg, &o), GQ_ALERT_HANDSHAKE_FAILURE);
   CHECK_EQ (ch_case (bad_reneg, &o), GQ_ALERT_HANDSHAKE_FAILURE);
   CHECK_EQ (ch_case (scsv_instead, &o), -1);
-  CHECK_EQ (ch_case (no_groups, &o), GQ_ALERT_HANDSHAKE_FAILURE);
+  /* No supported_groups at all lets the server choose (RFC 8422 section
+     5.1.1); a list with nothing in common with ours is a failure.  */
+  CHECK_EQ (ch_case (no_groups, &o), -1);
   CHECK_EQ (ch_case (wrong_group, &o), GQ_ALERT_HANDSHAKE_FAILURE);
   CHECK_EQ (ch_case (no_sigs, &o), GQ_ALERT_HANDSHAKE_FAILURE);
   CHECK_EQ (ch_case (old_version, &o), GQ_ALERT_PROTOCOL_VERSION);
@@ -951,7 +1001,12 @@ flight_case (void (*mut) (struct item *it), const struct opts *o)
   struct pair *p = pair_new (o);
   int r, alert;
 
+  static uint8_t crnd[32];
+
   CHECK_EQ (gq_tls12_start (p->c->t), GQ_OK);
+  /* The client's random, for a mutator that signs over it.  */
+  memcpy (crnd, p->c->q[0].d + 6, sizeof crnd);
+  g_client_random = crnd;
   CHECK_EQ (deliver (p->c, p->s, 0), GQ_OK);
   CHECK_EQ (p->s->nq, 1);
   if (mut)
@@ -1124,6 +1179,353 @@ test_client_refusals (void)
     CHECK_EQ (p->c->alert, GQ_ALERT_UNKNOWN_CA);
     pair_free (p);
     gq_trust_free (empty);
+  }
+}
+
+/* ---- ECDHE group negotiation (RFC 8422 section 5.1) ---- */
+
+static const uint16_t g_x25519[] = { GQ_GROUP_X25519 };
+static const uint16_t g_p256[] = { GQ_GROUP_SECP256R1 };
+static const uint16_t g_both[] = { GQ_GROUP_SECP256R1, GQ_GROUP_X25519 };
+static const uint16_t g_both_x[] = { GQ_GROUP_X25519, GQ_GROUP_SECP256R1 };
+static const uint16_t g_hybrid[] = { GQ_GROUP_X25519_MLKEM768 };
+
+/* The group named in the ServerKeyExchange in IT.  */
+static unsigned
+ske_group (const struct item *it)
+{
+  long m = find_msg (it, GQ_HS12_SERVER_KEY_EXCHANGE);
+
+  CHECK (m >= 0);
+  if (m < 0)
+    return 0;
+  return ((unsigned) it->d[m + 4 + 1] << 8) | it->d[m + 4 + 2];
+}
+
+/* Replace the point in the ServerKeyExchange at IT by LEN filler bytes and
+   name GROUP, keeping the scheme and signature (so only a check that comes
+   before the signature can refuse it for the right reason).  */
+static void
+ske_regroup (struct item *it, unsigned group, size_t len)
+{
+  long m = find_msg (it, GQ_HS12_SERVER_KEY_EXCHANGE);
+  size_t n = ((size_t) it->d[m + 1] << 16) | ((size_t) it->d[m + 2] << 8) | it->d[m + 3];
+  size_t oldp = it->d[m + 4 + 3], tail = it->n - (size_t) m - 4 - n;
+  size_t keep = n - 4 - oldp;		/* Scheme, signature length, signature.  */
+  uint8_t *b = it->d + m;
+
+  CHECK (m >= 0);
+  /* Move the scheme and signature and the messages after SKE.  */
+  memmove (b + 4 + 4 + len, b + 4 + 4 + oldp, keep + tail);
+  b[4 + 1] = (uint8_t) (group >> 8);
+  b[4 + 2] = (uint8_t) group;
+  b[4 + 3] = (uint8_t) len;
+  memset (b + 4 + 4, 0x42, len);
+  n = n - oldp + len;
+  b[1] = (uint8_t) (n >> 16); b[2] = (uint8_t) (n >> 8); b[3] = (uint8_t) n;
+  it->n = (size_t) m + 4 + n + tail;
+}
+
+static void
+ske_to_p256 (struct item *it)
+{
+  ske_regroup (it, GQ_GROUP_SECP256R1, GQ_TLS12_POINT_LEN);
+}
+
+static void
+ske_to_x25519 (struct item *it)
+{
+  ske_regroup (it, GQ_GROUP_X25519, 32);
+}
+
+static void
+ske_to_p384 (struct item *it)
+{
+  ske_regroup (it, GQ_GROUP_SECP384R1, 97);
+}
+
+static void
+test_groups (void)
+{
+  gq_ticket_keys *keys;
+  struct opts o;
+  struct pair *p;
+  gq_tls_session sess;
+  size_t chunks[] = { 0, 1 }, k;
+
+  /* Both ends offer both: the server's first preference, P-256.  */
+  memset (&o, 0, sizeof o);
+  p = pair_new (&o);
+  CHECK_EQ (run (p, 0), GQ_OK);
+  expect_done_group (p, 0, GQ_GROUP_SECP256R1);
+  pair_free (p);
+
+  /* A client that only does x25519 gets it, on every suite family.  */
+  for (k = 0; k < 2; k++)
+    {
+      o.cgroups = g_x25519;
+      o.n_cgroups = 1;
+      p = pair_new (&o);
+      CHECK_EQ (run (p, chunks[k]), GQ_OK);
+      expect_done_group (p, 0, GQ_GROUP_X25519);
+      pair_free (p);
+    }
+  o.server_id = &fx_rsa;
+  p = pair_new (&o);
+  CHECK_EQ (run (p, 0), GQ_OK);
+  expect_done_group (p, 0, GQ_GROUP_X25519);
+  pair_free (p);
+  o.server_id = NULL;
+
+  /* The server's preference decides among what the client offers.  */
+  o.cgroups = g_both;
+  o.n_cgroups = 2;
+  o.sgroups = g_both_x;
+  o.n_sgroups = 2;
+  p = pair_new (&o);
+  CHECK_EQ (run (p, 0), GQ_OK);
+  expect_done_group (p, 0, GQ_GROUP_X25519);
+  pair_free (p);
+  o.cgroups = g_both_x;
+  o.sgroups = g_both;
+  p = pair_new (&o);
+  CHECK_EQ (run (p, 0), GQ_OK);
+  expect_done_group (p, 0, GQ_GROUP_SECP256R1);
+  pair_free (p);
+
+  /* The client's list is sent in its own order.  */
+  o.cgroups = g_both_x;
+  o.sgroups = NULL;
+  o.n_sgroups = 0;
+  p = pair_new (&o);
+  CHECK_EQ (gq_tls12_start (p->c->t), GQ_OK);
+  {
+    long e = find_ext (p->c->q[0].d, GQ_EXT_SUPPORTED_GROUPS);
+
+    CHECK (e >= 0 && p->c->q[0].d[e + 5] == 4);
+    CHECK (p->c->q[0].d[e + 7] == 0x1d && p->c->q[0].d[e + 9] == 0x17);
+  }
+  pair_free (p);
+
+  /* A server limited to one group refuses a client without it.  */
+  memset (&o, 0, sizeof o);
+  o.cgroups = g_p256;
+  o.n_cgroups = 1;
+  o.sgroups = g_x25519;
+  o.n_sgroups = 1;
+  p = pair_new (&o);
+  CHECK (run (p, 0) < 0);
+  CHECK_EQ (p->s->alert, GQ_ALERT_HANDSHAKE_FAILURE);
+  pair_free (p);
+
+  /* Groups TLS 1.2 cannot do are ignored; with none left, the defaults
+     apply.  */
+  o.cgroups = g_hybrid;
+  o.n_cgroups = 1;
+  o.sgroups = g_hybrid;
+  o.n_sgroups = 1;
+  p = pair_new (&o);
+  CHECK_EQ (run (p, 0), GQ_OK);
+  expect_done_group (p, 0, GQ_GROUP_SECP256R1);
+  pair_free (p);
+
+  /* A ClientHello without supported_groups is answered with secp256r1.  */
+  memset (&o, 0, sizeof o);
+  p = pair_new (&o);
+  CHECK_EQ (gq_tls12_start (p->c->t), GQ_OK);
+  no_groups (p->c->q[0].d, p->c->q[0].n);
+  CHECK_EQ (deliver (p->c, p->s, 0), GQ_OK);
+  CHECK_EQ (ske_group (&p->s->q[0]), GQ_GROUP_SECP256R1);
+  pair_free (p);
+  /* Even from a server that prefers x25519.  */
+  o.sgroups = g_both_x;
+  o.n_sgroups = 2;
+  p = pair_new (&o);
+  CHECK_EQ (gq_tls12_start (p->c->t), GQ_OK);
+  no_groups (p->c->q[0].d, p->c->q[0].n);
+  CHECK_EQ (deliver (p->c, p->s, 0), GQ_OK);
+  CHECK_EQ (ske_group (&p->s->q[0]), GQ_GROUP_SECP256R1);
+  pair_free (p);
+  /* But not from one that does not do secp256r1.  */
+  o.sgroups = g_x25519;
+  o.n_sgroups = 1;
+  p = pair_new (&o);
+  CHECK_EQ (gq_tls12_start (p->c->t), GQ_OK);
+  no_groups (p->c->q[0].d, p->c->q[0].n);
+  CHECK (deliver (p->c, p->s, 0) < 0);
+  CHECK_EQ (p->s->alert, GQ_ALERT_HANDSHAKE_FAILURE);
+  pair_free (p);
+
+  /* The ticket is for a full handshake with the default groups.  */
+  CHECK_EQ (gq_ticket_keys_new (&keys), GQ_OK);
+  fake_now = 1000000000000ull;
+  memset (&o, 0, sizeof o);
+  o.keys = keys;
+  o.now = now_fn;
+  p = pair_new (&o);
+  CHECK_EQ (run (p, 0), GQ_OK);
+  expect_done (p, 0);
+  sess = p->c->session;
+  pair_free (p);
+
+  /* Resumption needs no key exchange, so what the client offers for one
+     cannot matter: x25519 only works and reports no group ...  */
+  o.resume = &sess;
+  o.cgroups = g_x25519;
+  o.n_cgroups = 1;
+  o.sgroups = g_p256;
+  o.n_sgroups = 1;
+  p = pair_new (&o);
+  CHECK_EQ (run (p, 0), GQ_OK);
+  expect_done (p, 1);
+  pair_free (p);
+  /* ... and so does a hello with nothing in common at all ...  */
+  memset (&o, 0, sizeof o);
+  o.keys = keys;
+  o.now = now_fn;
+  o.resume = &sess;
+  p = pair_new (&o);
+  CHECK_EQ (gq_tls12_start (p->c->t), GQ_OK);
+  wrong_group (p->c->q[0].d, p->c->q[0].n);
+  CHECK_EQ (deliver (p->c, p->s, 0), GQ_OK);
+  CHECK_EQ (p->s->alert, -1);
+  CHECK (find_msg (&p->s->q[0], GQ_HS12_SERVER_KEY_EXCHANGE) < 0);
+  pair_free (p);
+  /* ... but the same hello without a ticket is refused.  */
+  o.resume = NULL;
+  p = pair_new (&o);
+  CHECK_EQ (gq_tls12_start (p->c->t), GQ_OK);
+  wrong_group (p->c->q[0].d, p->c->q[0].n);
+  CHECK (deliver (p->c, p->s, 0) < 0);
+  CHECK_EQ (p->s->alert, GQ_ALERT_HANDSHAKE_FAILURE);
+  pair_free (p);
+  gq_ticket_keys_free (keys);
+
+  /* The client accepts only a group it offered (RFC 8422 section 5.1: the
+     server picks from the client's list).  The point and group are
+     rewritten without touching the signature, so only a check ahead of
+     signature verification gives illegal_parameter.  */
+  memset (&o, 0, sizeof o);
+  o.cgroups = g_x25519;
+  o.n_cgroups = 1;
+  CHECK_EQ (flight_case (NULL, &o), -1);
+  CHECK_EQ (flight_case (ske_to_p256, &o), GQ_ALERT_ILLEGAL_PARAMETER);
+  CHECK_EQ (flight_case (ske_to_p384, &o), GQ_ALERT_ILLEGAL_PARAMETER);
+  o.cgroups = g_p256;
+  CHECK_EQ (flight_case (ske_to_x25519, &o), GQ_ALERT_ILLEGAL_PARAMETER);
+  /* A group that was offered still has its signature checked.  */
+  o.cgroups = g_both;
+  o.n_cgroups = 2;
+  CHECK_EQ (flight_case (ske_to_x25519, &o), GQ_ALERT_DECRYPT_ERROR);
+}
+
+/* Replace the server's Certificate and signature by an Ed25519 one (RFC
+   8422 section 5.1.3), keeping the key exchange parameters.  */
+static void
+ske_ed25519 (struct item *it)
+{
+  static const uint8_t zero[32];
+  long sh = find_msg (it, GQ_HS_SERVER_HELLO);
+  long cert = find_msg (it, GQ_HS_CERTIFICATE);
+  long ske = find_msg (it, GQ_HS12_SERVER_KEY_EXCHANGE);
+  long shd = find_msg (it, GQ_HS12_SERVER_HELLO_DONE);
+  size_t plen = it->d[ske + 4 + 3], at = (size_t) cert;
+  uint8_t data[64 + 128], sig[GQ_SIGNATURE_MAX];
+  uint8_t out[8192];
+  size_t sl;
+  gq_wbuf w;
+
+  CHECK (sh >= 0 && cert > sh && ske > cert && shd > ske);
+  memcpy (data, g_client_random ? g_client_random : zero, 32);
+  memcpy (data + 32, it->d + sh + 6, 32);
+  memcpy (data + 64, it->d + ske + 4, 4 + plen);
+  CHECK_EQ (gq_privkey_sign (fx_ed.key, GQ_SIG_ED25519, data, 64 + 4 + plen,
+                             sig, sizeof sig, &sl), GQ_OK);
+  memcpy (out, it->d, at);			/* ServerHello.  */
+  gq_wbuf_init (&w, out + at, sizeof out - at);
+  gq_tls12_build_certificate (&w, fx_ed.chain, 1);
+  gq_tls12_build_ske (&w, (gq_slice) { it->d + ske + 4, 4 + plen },
+                      GQ_SIG_ED25519, (gq_slice) { sig, sl });
+  CHECK_EQ (gq_wbuf_status (&w), GQ_OK);
+  memcpy (out + at + w.len, it->d + shd, 4);	/* ServerHelloDone.  */
+  memcpy (it->d, out, at + w.len + 4);
+  it->n = at + w.len + 4;
+}
+
+/* A client whose hello also offered TLS 1.3 (gq_tlsauto) is handed that
+   hello and checks the server's group against its supported_groups.  MUT
+   rewrites the server's flight (may be NULL); returns the client's alert
+   or -1.  */
+static int
+adopted_case (void (*mut) (struct item *it))
+{
+  static const uint16_t suites[] = { GQ_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 };
+  static const uint16_t sigs[] = { GQ_SIG_ECDSA_SECP256R1_SHA256,
+                                   GQ_SIG_ED25519 };
+  struct opts o;
+  struct pair *p;
+  uint8_t rnd[32] = { 1 };
+  uint8_t buf[2048];
+  gq_wbuf w;
+  gq_tls12_ch_params cp;
+  int r, alert;
+
+  memset (&o, 0, sizeof o);
+  p = pair_new (&o);
+  memset (&cp, 0, sizeof cp);
+  cp.random = rnd;
+  cp.suites = suites;
+  cp.n_suites = 1;
+  cp.sigalgs = sigs;
+  cp.n_sigalgs = 2;
+  cp.groups = g_x25519;
+  cp.n_groups = 1;
+  g_client_random = rnd;
+  gq_wbuf_init (&w, buf, sizeof buf);
+  gq_tls12_build_client_hello (&w, &cp);
+  CHECK_EQ (gq_wbuf_status (&w), GQ_OK);
+  CHECK_EQ (gq_tls12_client_adopt (p->c->t, buf, w.len), GQ_OK);
+  /* The server answers the same bytes.  */
+  p->c->nq = 1;
+  p->c->q[0].ccs = 0;
+  memcpy (p->c->q[0].d, buf, w.len);
+  p->c->q[0].n = w.len;
+  CHECK_EQ (deliver (p->c, p->s, 0), GQ_OK);
+  CHECK_EQ (ske_group (&p->s->q[0]), GQ_GROUP_X25519);
+  if (mut)
+    mut (&p->s->q[0]);
+  r = deliver (p->s, p->c, 0);
+  alert = r == GQ_OK ? -1 : p->c->alert;
+  pair_free (p);
+  return alert;
+}
+
+static void
+test_adopted_groups (void)
+{
+  CHECK_EQ (adopted_case (NULL), -1);
+  /* Groups that a combined client could take from a server (secp256r1 and
+     secp384r1), but not ones its hello did not list.  */
+  CHECK_EQ (adopted_case (ske_to_p256), GQ_ALERT_ILLEGAL_PARAMETER);
+  CHECK_EQ (adopted_case (ske_to_p384), GQ_ALERT_ILLEGAL_PARAMETER);
+
+  /* A TLS 1.2 server with an Ed25519 certificate signs with it when the
+     hello listed the scheme (RFC 8422 section 5.1.3): the combined hello
+     does, and so does a plain TLS 1.2 client's.  */
+  CHECK_EQ (adopted_case (ske_ed25519), -1);
+  {
+    struct opts o;
+
+    memset (&o, 0, sizeof o);
+    CHECK_EQ (flight_case (ske_ed25519, &o), -1);
+    /* ...but a client that restricted itself does not take it.  */
+    {
+      static const uint16_t only_ec[] = { GQ_SIG_ECDSA_SECP256R1_SHA256 };
+
+      o.csigs = only_ec;
+      o.n_csigs = 1;
+      CHECK_EQ (flight_case (ske_ed25519, &o), GQ_ALERT_ILLEGAL_PARAMETER);
+    }
   }
 }
 
@@ -1362,12 +1764,12 @@ test_config (void)
   CHECK_EQ (gq_tls12_client_new (&t, &c, &s), GQ_ERR_INVAL);
   c.suites = NULL;
   c.n_suites = 0;
-  /* Only ML-DSA and Ed25519: not TLS 1.2 schemes.  */
+  /* Only ML-DSA and SHA-1: not TLS 1.2 schemes.  */
   {
-    static const uint16_t sigs[] = { GQ_SIG_ED25519, GQ_SIG_MLDSA65, 0x0201 };
+    static const uint16_t sigs[] = { GQ_SIG_MLDSA65, 0x0201 };
 
     c.sigschemes = sigs;
-    c.n_sigschemes = 3;
+    c.n_sigschemes = 2;
     CHECK_EQ (gq_tls12_client_new (&t, &c, &s), GQ_ERR_INVAL);
   }
   c.sigschemes = NULL;
@@ -1419,6 +1821,8 @@ main (void)
   test_client_auth ();
   test_server_refusals ();
   test_client_refusals ();
+  test_groups ();
+  test_adopted_groups ();
   test_state_machine ();
   test_fuzz ();
   test_config ();

@@ -479,6 +479,30 @@ test_failures (void)
          && s->ev.close_alert == 40);
   side_free (s);
 
+  /* user_canceled is a closure alert, not an error (RFC 8446 section 6.1):
+     the connection goes on, to the close_notify that should follow.  Any
+     other alert is an error whatever its level field says (section 6: the
+     level is implicit in the type), so a warning-level one ends it.  */
+  s = side_new ();
+  handshake (s, 0, 1);
+  {
+    static const uint8_t uc[2] = { 1, GQ_ALERT_USER_CANCELED };
+    static const uint8_t un[2] = { 1, 112 };	/* unrecognized_name */
+
+    peer_write (s, GQ_CT_ALERT, uc, 2);
+    CHECK_EQ (deliver (s, 0), GQ_OK);
+    CHECK_EQ (s->ev.closed, 0);
+    CHECK (!gq_tlsconn_is_closed (s->conn));
+    peer_write (s, GQ_CT_APPLICATION_DATA, (const uint8_t *) "data", 4);
+    CHECK_EQ (deliver (s, 0), GQ_OK);
+    CHECK_EQ (s->ev.app.n, 4);
+    peer_write (s, GQ_CT_ALERT, un, 2);
+    CHECK (deliver (s, 0) < 0 || s->ev.closed);
+    CHECK (s->ev.closed == 1 && s->ev.close_error == GQ_ERR_PROTOCOL
+           && s->ev.close_alert == 112);
+  }
+  side_free (s);
+
   /* The peer closes first: we answer close_notify.  */
   s = side_new ();
   handshake (s, 1, 1);

@@ -72,6 +72,7 @@ mkcert ()
 {
   mkcert ec ec -pkeyopt ec_paramgen_curve:P-256 &&
   mkcert rsa rsa:2048 &&
+  mkcert ed ed25519 &&
   mkcert bad ec -pkeyopt ec_paramgen_curve:P-256 &&
   mkcert cli ec -pkeyopt ec_paramgen_curve:P-256 &&
   mkcert badcli ec -pkeyopt ec_paramgen_curve:P-256
@@ -235,10 +236,15 @@ ours_server ()
 # ---- our client ----
 ours_client "dtls12/openssl-server: default" openssl "-cert ec.pem -key ec.key" \
   "--rev" ok "connected suite=0xc0" "result=ok"
+ours_client "dtls12/openssl-server: x25519 when the client prefers it" openssl \
+  "-cert ec.pem -key ec.key -groups X25519:P-256 -serverpref" "--rev --groups x25519,p256" ok \
+  "group=0x001d" "result=ok"
 ours_client "dtls12/openssl-server: cookie exchange" openssl \
   "-cert ec.pem -key ec.key -listen" "--rev" ok "result=ok"
 ours_client "dtls12/openssl-server: RSA certificate" openssl \
   "-cert rsa.pem -key rsa.key" "--rev" ok "result=ok"
+# (No OpenSSL server with an Ed25519 certificate here: its own DTLS 1.2
+# client gets "no shared cipher" from it too.)
 ours_client "dtls12/openssl-server: ECDHE-ECDSA-AES256-GCM-SHA384" openssl \
   "-cert ec.pem -key ec.key -cipher ECDHE-ECDSA-AES256-GCM-SHA384" \
   "--rev" ok "suite=0xc02c"
@@ -277,9 +283,14 @@ ours_client "dtls12/wolf-server: 25% loss, cookie" wolf \
 
 # ---- our server ----
 ours_server "dtls12/openssl-client: default" openssl "" "" ok "connected suite=" "echoed=1"
+ours_server "dtls12/openssl-client: our preference wins over the client's x25519" openssl "" \
+  "-groups X25519:P-256" ok "group=0x0017" "echoed=1"
+ours_server "dtls12/gnutls-client: x25519 only" gnutls "" \
+  "--priority=$P12:-GROUP-ALL:+GROUP-X25519" ok "group=0x001d" "echoed=1"
 ours_server "dtls12/openssl-client: cookie exchange" openssl "--cookie" "" ok \
   "cookie-verified" "echoed=1"
 ours_server "dtls12/openssl-client: RSA certificate" openssl "--cert rsa.pem --key rsa.key" "" ok "echoed=1"
+ours_server "dtls12/openssl-client: Ed25519 certificate" openssl "--cert ed.pem --key ed.key" "" ok "echoed=1"
 ours_server "dtls12/openssl-client: ChaCha20" openssl "--suites ecdsa-chacha" \
   "-cipher ECDHE-ECDSA-CHACHA20-POLY1305" ok "suite=0xcca9"
 ours_server "dtls12/openssl-client: client certificate" openssl \
@@ -314,6 +325,8 @@ ours_client "dtls12/gnutls-server: default" gnutls \
   "--x509certfile=ec.pem --x509keyfile=ec.key --priority=$P12" "" ok "echoed=3" "result=ok"
 ours_client "dtls12/gnutls-server: RSA certificate" gnutls \
   "--x509certfile=rsa.pem --x509keyfile=rsa.key --priority=$P12" "" ok "result=ok"
+ours_client "dtls12/gnutls-server: Ed25519 certificate" gnutls \
+  "--x509certfile=ed.pem --x509keyfile=ed.key --priority=$P12" "" ok "result=ok"
 ours_client "dtls12/gnutls-server: ChaCha20-Poly1305" gnutls \
   "--x509certfile=ec.pem --x509keyfile=ec.key --priority=$P12:-CIPHER-ALL:+CHACHA20-POLY1305" \
   "--suites ecdsa-chacha" ok "suite=0xcca9"

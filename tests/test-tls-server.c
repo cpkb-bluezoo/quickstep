@@ -155,6 +155,8 @@ struct end
   int n_tickets;
   unsigned hs_seq[8];		/* Handshake-level message types sent.  */
   int n_hs;
+  unsigned ini_seq[8], app_seq[8];	/* ...and at the Initial and 1-RTT levels.  */
+  int n_ini, n_app;
 };
 
 static int
@@ -164,6 +166,10 @@ e_send (void *u, enum gq_level l, const uint8_t *d, size_t n)
 
   if (l == GQ_LEVEL_HANDSHAKE && n > 0 && e->n_hs < 8)
     e->hs_seq[e->n_hs++] = d[0];
+  if (l == GQ_LEVEL_INITIAL && n > 0 && e->n_ini < 8)
+    e->ini_seq[e->n_ini++] = d[0];
+  if (l == GQ_LEVEL_APPLICATION && n > 0 && e->n_app < 8)
+    e->app_seq[e->n_app++] = d[0];
   memcpy (e->sent[l] + e->sent_len[l], d, n);
   e->sent_len[l] += n;
   return 0;
@@ -444,6 +450,16 @@ test_hrr (int cookie)
   check_success (p);
   CHECK_EQ (p->s.info.hello_retry, 1);
   CHECK_EQ (p->s.info.group, GQ_GROUP_SECP384R1);
+  /* RFC 9001 section 4.1.3: everything of the exchange of hellos, the retry
+     included, goes at the Initial level, on both sides, and nothing of it at
+     the Handshake level.  */
+  CHECK_EQ (p->s.n_ini, 2);
+  CHECK (p->s.ini_seq[0] == GQ_HS_SERVER_HELLO
+         && p->s.ini_seq[1] == GQ_HS_SERVER_HELLO);
+  CHECK_EQ (p->c.n_ini, 2);
+  CHECK (p->c.ini_seq[0] == GQ_HS_CLIENT_HELLO
+         && p->c.ini_seq[1] == GQ_HS_CLIENT_HELLO);
+  CHECK (p->s.hs_seq[0] == GQ_HS_ENCRYPTED_EXTENSIONS);
   pair_free (p);
 }
 
@@ -1158,6 +1174,11 @@ first_connection (gq_ticket_keys *keys, gq_tls_session *session,
   CHECK_EQ (p->c.info.resumed, 0);
   CHECK_EQ (p->c.n_tickets, 2);
   CHECK (p->s.n_hs == 4 && p->s.hs_seq[1] == GQ_HS_CERTIFICATE);
+  /* RFC 9001 section 4.1.3: tickets follow in 1-RTT, not after Finished at
+     the Handshake level.  */
+  CHECK_EQ (p->s.n_app, 2);
+  CHECK (p->s.app_seq[0] == GQ_HS_NEW_SESSION_TICKET
+         && p->s.app_seq[1] == GQ_HS_NEW_SESSION_TICKET);
   *session = p->c.session;
   pair_free (p);
 }

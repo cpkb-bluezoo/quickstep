@@ -183,6 +183,10 @@ struct opts
   const gq_dtls12_prime *prime;
   int no_server;		/* Do not create the server.  */
   int cookie;			/* Put gq_dtls_listen in front of it.  */
+  const uint16_t *cgroups;	/* Client and server group preferences.  */
+  size_t n_cgroups;
+  const uint16_t *sgroups;
+  size_t n_sgroups;
 };
 
 static struct net *
@@ -216,6 +220,8 @@ net_new (const struct opts *o)
   cc.suites = o->csuites;
   cc.n_suites = o->n_csuites;
   cc.resume = o->resume;
+  cc.groups = o->cgroups;
+  cc.n_groups = o->n_cgroups;
   if (o->client_id)
     {
       cc.client_chain = o->client_id->chain;
@@ -234,6 +240,8 @@ net_new (const struct opts *o)
       creds.key = sid->key;
       sc.credentials = creds;
       sc.ticket_keys = o->keys;
+      sc.groups = o->sgroups;
+      sc.n_groups = o->n_sgroups;
       sc.client_auth = o->auth;
       sc.client_trust = fx_trust;
       ev.user = &n->s[1];
@@ -657,6 +665,99 @@ test_resumption (void)
   gq_ticket_keys_free (keys);
 }
 
+/* ECDHE group negotiation (RFC 8422 section 5.1), as for TLS 1.2.  */
+static const uint16_t g_x25519[] = { GQ_GROUP_X25519 };
+static const uint16_t g_p256[] = { GQ_GROUP_SECP256R1 };
+static const uint16_t g_both_x[] = { GQ_GROUP_X25519, GQ_GROUP_SECP256R1 };
+
+static void
+test_groups (void)
+{
+  struct opts o;
+  struct net *n;
+  gq_ticket_keys *keys;
+  gq_tls_session sess;
+
+  /* The default: both offered, P-256 preferred.  */
+  memset (&o, 0, sizeof o);
+  n = net_new (&o);
+  CHECK (handshake (n, 20000));
+  expect_ok (n);
+  CHECK_EQ (n->s[0].info.group, GQ_GROUP_SECP256R1);
+  CHECK_EQ (n->s[1].info.group, GQ_GROUP_SECP256R1);
+  net_free (n);
+
+  /* A client that only does x25519 gets it, with and without a cookie.  */
+  o.cgroups = g_x25519;
+  o.n_cgroups = 1;
+  n = net_new (&o);
+  CHECK (handshake (n, 20000));
+  expect_ok (n);
+  CHECK_EQ (n->s[0].info.group, GQ_GROUP_X25519);
+  CHECK_EQ (n->s[1].info.group, GQ_GROUP_X25519);
+  exchange (n, 3, 1);
+  net_free (n);
+  o.cookie = 1;
+  o.server_id = &fx_rsa;
+  n = net_new (&o);
+  CHECK_EQ (gq_dtls12_start (n->s[0].d, n->now), GQ_OK);
+  run (n, 20000);
+  CHECK_EQ (n->replies, 1);
+  expect_ok (n);
+  CHECK_EQ (n->s[0].info.group, GQ_GROUP_X25519);
+  CHECK_EQ (n->s[1].info.group, GQ_GROUP_X25519);
+  net_free (n);
+
+  /* The server's preference decides.  */
+  memset (&o, 0, sizeof o);
+  o.sgroups = g_both_x;
+  o.n_sgroups = 2;
+  n = net_new (&o);
+  CHECK (handshake (n, 20000));
+  expect_ok (n);
+  CHECK_EQ (n->s[0].info.group, GQ_GROUP_X25519);
+  CHECK_EQ (n->s[1].info.group, GQ_GROUP_X25519);
+  net_free (n);
+
+  /* Nothing in common: handshake_failure from the server.  */
+  o.cgroups = g_p256;
+  o.n_cgroups = 1;
+  o.sgroups = g_x25519;
+  o.n_sgroups = 1;
+  n = net_new (&o);
+  CHECK (!handshake (n, 30000));
+  run (n, 30000);
+  CHECK_EQ (n->s[1].closed, 1);
+  CHECK_EQ (n->s[1].close_alert, 40);
+  net_free (n);
+
+  /* Resumption needs no key exchange: no group on either end, whatever
+     the client offers for one.  */
+  CHECK_EQ (gq_ticket_keys_new (&keys), GQ_OK);
+  memset (&o, 0, sizeof o);
+  o.keys = keys;
+  n = net_new (&o);
+  CHECK (handshake (n, 20000));
+  run (n, 20000);
+  sess = n->s[0].sess;
+  net_free (n);
+  o.resume = &sess;
+  o.cgroups = g_x25519;
+  o.n_cgroups = 1;
+  o.sgroups = g_p256;
+  o.n_sgroups = 1;
+  n = net_new (&o);
+  CHECK (handshake (n, 20000));
+  run (n, 20000);
+  expect_ok (n);
+  CHECK_EQ (n->s[0].info.resumed, 1);
+  CHECK_EQ (n->s[1].info.resumed, 1);
+  CHECK_EQ (n->s[0].info.group, 0);
+  CHECK_EQ (n->s[1].info.group, 0);
+  net_free (n);
+  gq_ticket_keys_free (keys);
+}
+
 static void
 test_client_auth (void)
 {
@@ -805,9 +906,11 @@ static const uint16_t rsachacha[] = { GQ_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305 };
 static void
 test_handshakes (void)
 {
+  /* The last is an Ed25519 certificate (RFC 8422 section 5.1.3).  */
   static const struct { const uint16_t *s; int rsa; } cases[] = {
     { NULL, 0 }, { ecdsa128, 0 }, { ecdsa256, 0 }, { ecdsachacha, 0 },
-    { NULL, 1 }, { rsa128, 1 }, { rsa256, 1 }, { rsachacha, 1 }
+    { NULL, 1 }, { rsa128, 1 }, { rsa256, 1 }, { rsachacha, 1 },
+    { NULL, 2 }, { ecdsa128, 2 }, { ecdsachacha, 2 }
   };
   size_t i;
 
@@ -819,7 +922,8 @@ test_handshakes (void)
       memset (&o, 0, sizeof o);
       o.csuites = cases[i].s;
       o.n_csuites = cases[i].s ? 1 : 0;
-      o.server_id = cases[i].rsa ? &fx_rsa : NULL;
+      o.server_id = cases[i].rsa == 2 ? &fx_ed
+        : cases[i].rsa ? &fx_rsa : NULL;
       n = net_new (&o);
       CHECK (handshake (n, 20000));
       expect_ok (n);
@@ -986,6 +1090,210 @@ test_listener (void)
 }
 
 
+/* ---- Cleartext records are unauthenticated: they must not hurt ---- */
+
+/* An epoch 0 handshake record: TYPE with a LENGTH byte message, fragment OFF
+   of FLEN bytes of 0xaa.  */
+static size_t
+spoof_hs (uint8_t *out, unsigned type, unsigned length, unsigned msgseq,
+          unsigned off, unsigned flen, uint64_t recseq)
+{
+  size_t i = 0;
+  int k;
+
+  out[i++] = 22;
+  out[i++] = 0xfe;
+  out[i++] = 0xfd;
+  out[i++] = 0;
+  out[i++] = 0;
+  for (k = 5; k >= 0; k--)
+    out[i++] = (uint8_t) (recseq >> (8 * k));
+  out[i++] = 0;
+  out[i++] = (uint8_t) (12 + flen);
+  out[i++] = (uint8_t) type;
+  out[i++] = 0;
+  out[i++] = (uint8_t) (length >> 8);
+  out[i++] = (uint8_t) length;
+  out[i++] = (uint8_t) (msgseq >> 8);
+  out[i++] = (uint8_t) msgseq;
+  out[i++] = 0;
+  out[i++] = 0;
+  out[i++] = (uint8_t) off;
+  out[i++] = 0;
+  out[i++] = 0;
+  out[i++] = (uint8_t) flen;
+  memset (out + i, 0xaa, flen);
+  return i + flen;
+}
+
+/* After the handshake, anyone who can guess a message_seq can send a
+   cleartext handshake message: it is not for us, and must not end the
+   association.  */
+static void
+test_spoofed_cleartext_after_handshake (void)
+{
+  int target;
+
+  for (target = 0; target < 2; target++)
+    {
+      struct opts o;
+      struct net *n;
+      unsigned k;
+
+      memset (&o, 0, sizeof o);
+      n = net_new (&o);
+      CHECK (handshake (n, 20000));
+      run (n, 20000);
+      expect_ok (n);
+      for (k = 0; k < 20; k++)
+        {
+          uint8_t d[64];
+          size_t l = spoof_hs (d, 0, 0, k, 0, 0, 5000 + k);
+
+          gq_dtls12_receive (n->s[target].d, d, l, n->now);
+        }
+      CHECK_EQ (n->s[0].closed, 0);
+      CHECK_EQ (n->s[1].closed, 0);
+      exchange (n, 3, 1);
+      net_free (n);
+    }
+}
+
+/* Two cleartext fragments of the same message that disagree are an attack
+   or a corruption, not a reason to give up on the peer.  */
+static void
+test_spoofed_fragments_mid_handshake (void)
+{
+  struct opts o;
+  struct net *n;
+  uint8_t d[200];
+  size_t l;
+
+  memset (&o, 0, sizeof o);
+  n = net_new (&o);
+  l = spoof_hs (d, 1, 100, 0, 0, 10, 0);
+  gq_dtls12_receive (n->s[1].d, d, l, n->now);
+  l = spoof_hs (d, 1, 101, 0, 10, 10, 1);
+  gq_dtls12_receive (n->s[1].d, d, l, n->now + 1);
+  CHECK_EQ (n->s[1].closed, 0);
+  n->now += 100;
+  CHECK (handshake (n, 60000));
+  expect_ok (n);
+  net_free (n);
+}
+
+/* A cleartext alert record (epoch 0) of LEVEL and CODE.  */
+static size_t
+spoof_alert (uint8_t *out, unsigned level, unsigned code, uint64_t recseq)
+{
+  size_t i = 0;
+  int k;
+
+  out[i++] = 21;
+  out[i++] = 0xfe;
+  out[i++] = 0xfd;
+  out[i++] = 0;
+  out[i++] = 0;
+  for (k = 5; k >= 0; k--)
+    out[i++] = (uint8_t) (recseq >> (8 * k));
+  out[i++] = 0;
+  out[i++] = 2;
+  out[i++] = (uint8_t) level;
+  out[i++] = (uint8_t) code;
+  return i;
+}
+
+/* Only a fatal alert, or close_notify, ends a DTLS 1.2 association: a
+   warning such as unrecognized_name is ignored (RFC 6347 section 4.1.1
+   and RFC 5246 section 7.2.2).  Cleartext alerts are what is honoured
+   before the keys exist.  */
+static void
+test_warning_alerts (void)
+{
+  static const unsigned codes[] = { 112, 100, 90, 0x77 };
+  size_t i;
+  int target;
+  uint8_t d[32];
+  size_t l;
+  struct opts o;
+  struct net *n;
+
+  memset (&o, 0, sizeof o);
+  for (target = 0; target < 2; target++)
+    {
+      for (i = 0; i < sizeof codes / sizeof codes[0]; i++)
+        {
+          /* A warning: the handshake still completes.  */
+          n = net_new (&o);
+          if (target == 0)
+            CHECK_EQ (gq_dtls12_start (n->s[0].d, n->now), GQ_OK);
+          l = spoof_alert (d, 1, codes[i], 10 + i);
+          gq_dtls12_receive (n->s[target].d, d, l, n->now);
+          CHECK_EQ (n->s[target].closed, 0);
+          if (target == 0)
+            run (n, 20000);
+          else
+            CHECK (handshake (n, 20000));
+          expect_ok (n);
+          exchange (n, 3, 1);
+          net_free (n);
+
+          /* The same at fatal level ends it, with the code.  */
+          n = net_new (&o);
+          if (target == 0)
+            CHECK_EQ (gq_dtls12_start (n->s[0].d, n->now), GQ_OK);
+          l = spoof_alert (d, 2, codes[i], 10 + i);
+          gq_dtls12_receive (n->s[target].d, d, l, n->now);
+          CHECK_EQ (n->s[target].closed, 1);
+          CHECK_EQ (n->s[target].close_alert, (int) codes[i]);
+          CHECK (n->s[target].close_err < 0);
+          net_free (n);
+        }
+    }
+
+  /* close_notify at warning level is an orderly close.  */
+  n = net_new (&o);
+  CHECK_EQ (gq_dtls12_start (n->s[0].d, n->now), GQ_OK);
+  l = spoof_alert (d, 1, 0, 30);
+  gq_dtls12_receive (n->s[0].d, d, l, n->now);
+  CHECK_EQ (n->s[0].closed, 1);
+  CHECK_EQ (n->s[0].close_err, 0);
+  net_free (n);
+}
+
+/* An empty write puts nothing on the wire, as for the stream transports:
+   the receiver drops a zero-length record unseen, so there is nothing to
+   deliver and a datagram (and a sequence number) would be wasted.  */
+static void
+test_empty_send (void)
+{
+  struct opts o;
+  struct net *n;
+  int side, sent, total;
+
+  memset (&o, 0, sizeof o);
+  n = net_new (&o);
+  CHECK (handshake (n, 20000));
+  run (n, 20000);
+  expect_ok (n);
+  for (side = 0; side < 2; side++)
+    {
+      sent = n->s[side].sent;
+      total = n->total;
+      CHECK_EQ (gq_dtls12_send (n->s[side].d, NULL, 0), GQ_OK);
+      CHECK_EQ (gq_dtls12_send (n->s[side].d, (const uint8_t *) "", 0), GQ_OK);
+      CHECK_EQ (n->s[side].sent, sent);
+      CHECK_EQ (n->total, total);
+      CHECK_EQ (n->nq, 0);
+    }
+  run (n, 5000);
+  CHECK_EQ (n->s[0].n_app + n->s[1].n_app, 0);
+  /* The association is unharmed and the next real message is the first.  */
+  exchange (n, 3, 1);
+  CHECK_EQ (n->s[0].closed + n->s[1].closed, 0);
+  net_free (n);
+}
+
 int
 main (void)
 {
@@ -1001,8 +1309,13 @@ main (void)
   test_timeout ();
   test_mtu ();
   test_resumption ();
+  test_groups ();
   test_client_auth ();
   test_noise ();
+  test_spoofed_cleartext_after_handshake ();
+  test_spoofed_fragments_mid_handshake ();
+  test_warning_alerts ();
+  test_empty_send ();
   TST_DONE ();
 }
 

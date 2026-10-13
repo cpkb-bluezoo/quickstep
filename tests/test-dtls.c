@@ -1152,6 +1152,250 @@ test_listener (void)
   net_free (n);
 }
 
+/* ---- Cleartext records are unauthenticated: they must not hurt ---- */
+
+/* An epoch 0 handshake record: TYPE with a LENGTH byte message, fragment OFF
+   of FLEN bytes of 0xaa (or none, for a HelloRequest-like empty message).  */
+static size_t
+spoof_hs (uint8_t *out, unsigned type, unsigned length, unsigned msgseq,
+          unsigned off, unsigned flen, uint64_t recseq)
+{
+  size_t i = 0;
+  int k;
+
+  out[i++] = 22;
+  out[i++] = 0xfe;
+  out[i++] = 0xfd;
+  out[i++] = 0;
+  out[i++] = 0;
+  for (k = 5; k >= 0; k--)
+    out[i++] = (uint8_t) (recseq >> (8 * k));
+  out[i++] = 0;
+  out[i++] = (uint8_t) (12 + flen);
+  out[i++] = (uint8_t) type;
+  out[i++] = 0;
+  out[i++] = (uint8_t) (length >> 8);
+  out[i++] = (uint8_t) length;
+  out[i++] = (uint8_t) (msgseq >> 8);
+  out[i++] = (uint8_t) msgseq;
+  out[i++] = 0;
+  out[i++] = 0;
+  out[i++] = (uint8_t) off;
+  out[i++] = 0;
+  out[i++] = 0;
+  out[i++] = (uint8_t) flen;
+  memset (out + i, 0xaa, flen);
+  return i + flen;
+}
+
+/* After the handshake, anyone who can guess a message_seq can send a
+   cleartext handshake message: it is not for us, and must not end the
+   association.  */
+static void
+test_spoofed_cleartext_after_handshake (void)
+{
+  int cookie, target;
+
+  for (cookie = 0; cookie < 2; cookie++)
+    for (target = 0; target < 2; target++)
+      {
+        struct opts o;
+        struct net *n;
+        unsigned k;
+
+        memset (&o, 0, sizeof o);
+        o.cookie = cookie;
+        n = net_new (&o);
+        CHECK (handshake (n, 20000));
+        run (n, 20000);
+        expect_ok (n);
+        for (k = 0; k < 20; k++)
+          {
+            uint8_t d[64];
+            size_t l = spoof_hs (d, 0, 0, k, 0, 0, 5000 + k);
+
+            gq_dtls_receive (n->s[target].d, d, l, n->now);
+          }
+        CHECK_EQ (n->s[0].closed, 0);
+        CHECK_EQ (n->s[1].closed, 0);
+        exchange (n, 3, 1);
+        net_free (n);
+      }
+}
+
+/* Two cleartext fragments of the same message that disagree are an attack
+   or a corruption, not a reason to give up on the peer: the real message
+   follows.  */
+static void
+test_spoofed_fragments_mid_handshake (void)
+{
+  struct opts o;
+  struct net *n;
+  uint8_t d[200];
+  size_t l;
+
+  memset (&o, 0, sizeof o);
+  n = net_new (&o);
+  l = spoof_hs (d, 1, 100, 0, 0, 10, 0);
+  gq_dtls_receive (n->s[1].d, d, l, n->now);
+  l = spoof_hs (d, 1, 101, 0, 10, 10, 1);
+  gq_dtls_receive (n->s[1].d, d, l, n->now + 1);
+  CHECK_EQ (n->s[1].closed, 0);
+  /* A genuine handshake still completes: the poisoned message is dropped
+     and the client's retransmission starts afresh.  */
+  n->now += 100;
+  CHECK (handshake (n, 60000));
+  expect_ok (n);
+  net_free (n);
+}
+
+/* A cleartext ACK may only acknowledge cleartext records: otherwise a
+   forged one silences the retransmission of a protected flight.  */
+static void
+test_spoofed_cleartext_ack (void)
+{
+  struct opts o;
+  struct net *n;
+  uint8_t c[400];
+  size_t i, k, q, N = 20;
+  uint64_t before;
+
+  memset (&o, 0, sizeof o);
+  o.cgroups = x25519;
+  o.n_cgroups = 1;
+  n = net_new (&o);
+  CHECK_EQ (gq_dtls_start (n->s[0].d, n->now), GQ_OK);
+  for (q = 0; q < (size_t) n->nq; q++)
+    if (n->q[q].to == 1)
+      gq_dtls_receive (n->s[1].d, n->q[q].data, n->q[q].len, n->now);
+  before = gq_dtls_deadline (n->s[1].d);
+  CHECK (before != 0);
+  /* A plaintext ACK naming epoch 2 records 0..N-1 (and epoch 0 ones).  */
+  c[0] = 26;
+  c[1] = 0xfe;
+  c[2] = 0xfd;
+  memset (c + 3, 0, 8);
+  c[10] = 7;
+  c[11] = (uint8_t) ((2 + 16 * N) >> 8);
+  c[12] = (uint8_t) (2 + 16 * N);
+  c[13] = (uint8_t) ((16 * N) >> 8);
+  c[14] = (uint8_t) (16 * N);
+  for (k = 0, i = 15; k < N; k++)
+    {
+      memset (c + i, 0, 16);
+      c[i + 7] = (k < 4) ? 0 : 2;
+      c[i + 15] = (uint8_t) (k < 4 ? k : k - 4);
+      i += 16;
+    }
+  gq_dtls_receive (n->s[1].d, c, i, n->now + 5);
+  CHECK (gq_dtls_deadline (n->s[1].d) != 0);
+  net_free (n);
+}
+
+/* A cleartext alert record (epoch 0) of LEVEL and CODE.  */
+static size_t
+spoof_alert (uint8_t *out, unsigned level, unsigned code, uint64_t recseq)
+{
+  size_t i = 0;
+  int k;
+
+  out[i++] = 21;
+  out[i++] = 0xfe;
+  out[i++] = 0xfd;
+  out[i++] = 0;
+  out[i++] = 0;
+  for (k = 5; k >= 0; k--)
+    out[i++] = (uint8_t) (recseq >> (8 * k));
+  out[i++] = 0;
+  out[i++] = 2;
+  out[i++] = (uint8_t) level;
+  out[i++] = (uint8_t) code;
+  return i;
+}
+
+/* In DTLS 1.3, as in TLS 1.3, the level is implicit in the alert (RFC 8446
+   section 6): everything but close_notify and user_canceled is an error
+   even at warning level, and user_canceled, a closure alert that should
+   be followed by close_notify, does not end the association.  Cleartext
+   alerts are what is honoured before the keys exist.  */
+static void
+test_alerts_by_type (void)
+{
+  uint8_t d[32];
+  size_t l;
+  struct opts o;
+  struct net *n;
+  int target, level;
+
+  memset (&o, 0, sizeof o);
+  for (target = 0; target < 2; target++)
+    {
+      /* user_canceled, whatever its level: the handshake completes.  */
+      for (level = 1; level <= 2; level++)
+        {
+          n = net_new (&o);
+          if (target == 0)
+            CHECK_EQ (gq_dtls_start (n->s[0].d, n->now), GQ_OK);
+          l = spoof_alert (d, (unsigned) level, GQ_ALERT_USER_CANCELED, 10);
+          gq_dtls_receive (n->s[target].d, d, l, n->now);
+          CHECK_EQ (n->s[target].closed, 0);
+          if (target == 0)
+            run (n, 20000);
+          else
+            CHECK (handshake (n, 20000));
+          expect_ok (n);
+          exchange (n, 3, 1);
+          net_free (n);
+        }
+      /* Anything else ends it, warning level or not.  */
+      for (level = 1; level <= 2; level++)
+        {
+          n = net_new (&o);
+          if (target == 0)
+            CHECK_EQ (gq_dtls_start (n->s[0].d, n->now), GQ_OK);
+          l = spoof_alert (d, (unsigned) level, 112, 11);
+          gq_dtls_receive (n->s[target].d, d, l, n->now);
+          CHECK_EQ (n->s[target].closed, 1);
+          CHECK_EQ (n->s[target].close_alert, 112);
+          CHECK (n->s[target].close_err < 0);
+          net_free (n);
+        }
+    }
+}
+
+/* An empty write puts nothing on the wire, as for the stream transports:
+   the receiver drops a zero-length record unseen, so there is nothing to
+   deliver and a datagram (and a sequence number) would be wasted.  */
+static void
+test_empty_send (void)
+{
+  struct opts o;
+  struct net *n;
+  int side, sent, total;
+
+  memset (&o, 0, sizeof o);
+  n = net_new (&o);
+  CHECK (handshake (n, 20000));
+  run (n, 20000);
+  expect_ok (n);
+  for (side = 0; side < 2; side++)
+    {
+      sent = n->s[side].sent;
+      total = n->total;
+      CHECK_EQ (gq_dtls_send (n->s[side].d, NULL, 0), GQ_OK);
+      CHECK_EQ (gq_dtls_send (n->s[side].d, (const uint8_t *) "", 0), GQ_OK);
+      CHECK_EQ (n->s[side].sent, sent);
+      CHECK_EQ (n->total, total);
+      CHECK_EQ (n->nq, 0);
+    }
+  run (n, 5000);
+  CHECK_EQ (n->s[0].n_app + n->s[1].n_app, 0);
+  /* The association is unharmed and the next real message is the first.  */
+  exchange (n, 3, 1);
+  CHECK_EQ (n->s[0].closed + n->s[1].closed, 0);
+  net_free (n);
+}
+
 int
 main (void)
 {
@@ -1171,6 +1415,11 @@ main (void)
   test_client_auth ();
   test_key_update ();
   test_noise ();
+  test_spoofed_cleartext_after_handshake ();
+  test_spoofed_fragments_mid_handshake ();
+  test_spoofed_cleartext_ack ();
+  test_alerts_by_type ();
+  test_empty_send ();
   TST_DONE ();
 }
 

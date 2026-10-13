@@ -63,7 +63,8 @@ enum gq_ext12_type
 /* TLS_EMPTY_RENEGOTIATION_INFO_SCSV (RFC 5746 section 3.3).  */
 #define GQ_TLS12_SCSV_RENEGOTIATION 0x00ff
 
-/* ECCurveType named_curve and the one group used (secp256r1).  */
+/* ECCurveType named_curve, and the length of an uncompressed secp256r1
+   point (x25519 has 32 bytes, secp384r1 97).  */
 #define GQ_TLS12_CURVE_NAMED 3
 #define GQ_TLS12_POINT_LEN 65
 
@@ -78,8 +79,8 @@ int gq_tls12_certificate_parse (gq_slice body, gq_slice *chain, size_t max,
 
 /* ServerKeyExchange for ECDHE.  PARAMS is the ServerECDHParams exactly as
    sent (what the signature covers, after the two randoms); POINT the
-   encoded public key.  A curve other than named secp256r1 is
-   GQ_ERR_PROTOCOL.  */
+   encoded public key.  A curve other than named secp256r1 or x25519, or
+   a point of the wrong length for it, is GQ_ERR_PROTOCOL.  */
 typedef struct gq_tls12_ske
 {
   gq_slice params;
@@ -101,8 +102,9 @@ int gq_tls12_ske_parse_wide (gq_slice body, gq_tls12_ske *ske);
    here; the CA list is validated for syntax only.  */
 int gq_tls12_certreq_parse (gq_slice body, gq_slice *sigalgs);
 
-/* ClientKeyExchange for ECDHE: the client's encoded public point.  */
-int gq_tls12_cke_parse (gq_slice body, gq_slice *point);
+/* ClientKeyExchange for ECDHE: the client's encoded public point, which
+   must have the length of GROUP's points.  */
+int gq_tls12_cke_parse (gq_slice body, unsigned group, gq_slice *point);
 
 /* RFC 5077 NewSessionTicket.  */
 int gq_tls12_nst_parse (gq_slice body, uint32_t *lifetime, gq_slice *ticket);
@@ -115,6 +117,8 @@ typedef struct gq_tls12_ch_params
   gq_slice session_id;
   const uint16_t *suites;
   size_t n_suites;
+  const uint16_t *groups;	/* supported_groups, in preference order.  */
+  size_t n_groups;
   const char *server_name;	/* NULL: no SNI.  */
   const gq_slice *alpn;
   size_t n_alpn;
@@ -128,9 +132,9 @@ typedef struct gq_tls12_ch_params
   gq_slice cookie;		/* DTLS: from a HelloVerifyRequest, else empty.  */
 } gq_tls12_ch_params;
 
-/* Always sent: supported_versions {TLS 1.2}, supported_groups
-   {secp256r1}, ec_point_formats {uncompressed}, extended_master_secret
-   and an empty renegotiation_info.  */
+/* Always sent: supported_versions {TLS 1.2}, supported_groups (from
+   the params), ec_point_formats {uncompressed}, extended_master_secret and
+   an empty renegotiation_info.  */
 void gq_tls12_build_client_hello (gq_wbuf *w, const gq_tls12_ch_params *p);
 
 typedef struct gq_tls12_sh_params
@@ -148,9 +152,9 @@ void gq_tls12_build_server_hello (gq_wbuf *w, const gq_tls12_sh_params *p);
 
 void gq_tls12_build_certificate (gq_wbuf *w, const gq_slice *chain, size_t n);
 
-/* ServerECDHParams for secp256r1 with POINT (65 bytes), appended to W with
-   no message framing: the bytes the signature covers.  */
-void gq_tls12_put_ecdh_params (gq_wbuf *w, gq_slice point);
+/* ServerECDHParams for GROUP with POINT, appended to W with no message
+   framing: the bytes the signature covers.  */
+void gq_tls12_put_ecdh_params (gq_wbuf *w, unsigned group, gq_slice point);
 
 /* ServerKeyExchange: PARAMS as written by gq_tls12_put_ecdh_params, then
    the signature.  */

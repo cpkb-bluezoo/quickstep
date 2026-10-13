@@ -119,7 +119,8 @@ int gq_dtls_receive (gq_dtls *c, const uint8_t *dgram, size_t len,
                      uint64_t now);
 
 /* Send LEN bytes as one record.  GQ_ERR_BUFSIZE if more than
-   gq_dtls_max_payload.  Only after the connected event.  */
+   gq_dtls_max_payload.  An empty write sends nothing.  Only after the
+   connected event.  */
 int gq_dtls_send (gq_dtls *c, const uint8_t *data, size_t len);
 size_t gq_dtls_max_payload (const gq_dtls *c);
 

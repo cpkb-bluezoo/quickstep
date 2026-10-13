@@ -26,6 +26,8 @@
 #include <quickstep/status.h>
 #include <quickstep/policy.h>
 #include <quickstep/tls12conn.h>
+#include <quickstep/tls12.h>
+#include <quickstep/record12.h>
 
 #include "tst-util.h"
 
@@ -388,6 +390,236 @@ test_wire_errors (void)
   link_free (l);
 }
 
+/* ---- Alerts of warning level (RFC 5246 section 7.2) ---- */
+
+/* A server of our own, the engine and a record layer, so that a test can
+   write any record, protected, at a gq_tls12conn client.  */
+struct msrv
+{
+  gq_tls12 *t;
+  gq_record12 rec;
+  struct bytes out;
+  int complete;
+  gq_tls_server_config sc;
+};
+
+static int
+msrv_write (struct msrv *m, unsigned type, const uint8_t *d, size_t n)
+{
+  uint8_t rec[GQ_REC12_MAX_RECORD];
+  size_t rl;
+
+  CHECK_EQ (gq_record12_protect (&m->rec, type, d, n, rec, sizeof rec, &rl),
+            GQ_OK);
+  bytes_add (&m->out, rec, rl);
+  return 0;
+}
+
+static int
+ms_send (void *u, const uint8_t *d, size_t n)
+{
+  return msrv_write (u, GQ_CT_HANDSHAKE, d, n);
+}
+
+static int
+ms_keys (void *u, enum gq_dir dir, enum gq_aead aead, const uint8_t *k,
+         size_t kl, const uint8_t *iv, size_t il)
+{
+  static const uint8_t ccs = 1;
+
+  if (dir == GQ_DIR_WRITE)
+    msrv_write (u, GQ_CT_CHANGE_CIPHER_SPEC, &ccs, 1);
+  return gq_record12_set_keys (&((struct msrv *) u)->rec, dir, aead, k, kl, iv,
+                               il) != GQ_OK;
+}
+
+static int
+ms_complete (void *u, const gq_tls_info *i)
+{
+  (void) i;
+  ((struct msrv *) u)->complete = 1;
+  return 0;
+}
+
+static int
+ms_record (void *u, unsigned type, const uint8_t *d, size_t n)
+{
+  struct msrv *m = u;
+  const uint8_t *p = d;
+  size_t l = n;
+
+  if (type == GQ_CT_HANDSHAKE)
+    return gq_tls12_feed (m->t, &p, &l) != GQ_OK;
+  if (type == GQ_CT_CHANGE_CIPHER_SPEC)
+    return gq_tls12_change_cipher_spec (m->t) != GQ_OK;
+  return 0;
+}
+
+static struct msrv *
+msrv_new (struct ident *id)
+{
+  struct msrv *m = calloc (1, sizeof *m);
+  gq_tls12_sink s;
+
+  memset (&s, 0, sizeof s);
+  s.user = m;
+  s.send = ms_send;
+  s.change_keys = ms_keys;
+  s.complete = ms_complete;
+  gq_record12_init (&m->rec);
+  m->sc.credentials.chain = id->chain;
+  m->sc.credentials.n_chain = 1;
+  m->sc.credentials.key = id->key;
+  CHECK_EQ (gq_tls12_server_new (&m->t, &m->sc, &s), GQ_OK);
+  return m;
+}
+
+static void
+msrv_free (struct msrv *m)
+{
+  gq_tls12_free (m->t);
+  gq_record12_wipe (&m->rec);
+  free (m->out.p);
+  free (m);
+}
+
+/* Join the client of L (its server half is unused) to M until quiet.  */
+static void
+msrv_pump (struct link *l, struct msrv *m)
+{
+  int guard;
+
+  for (guard = 0; guard < 50; guard++)
+    {
+      int moved = 0;
+
+      if (l->ce.wire.n)
+        {
+          uint8_t *p = l->ce.wire.p;
+          size_t n = l->ce.wire.n;
+
+          l->ce.wire.n = 0;
+          while (n > 0 && gq_record12_receive (&m->rec, &p, &n, ms_record, m)
+                 == GQ_OK)
+            ;
+          moved = 1;
+        }
+      if (m->out.n)
+        {
+          uint8_t *copy = malloc (m->out.n);
+          size_t n = m->out.n;
+
+          memcpy (copy, m->out.p, n);
+          m->out.n = 0;
+          if (!gq_tls12conn_is_closed (l->c))
+            gq_tls12conn_receive (l->c, copy, n);
+          free (copy);
+          moved = 1;
+        }
+      if (!moved)
+        break;
+    }
+}
+
+/* Write an alert record of LEVEL and CODE from M to the client.  */
+static void
+msrv_alert (struct link *l, struct msrv *m, unsigned level, unsigned code)
+{
+  uint8_t a[2];
+
+  a[0] = (uint8_t) level;
+  a[1] = (uint8_t) code;
+  msrv_write (m, GQ_CT_ALERT, a, 2);
+  msrv_pump (l, m);
+}
+
+/* Only a fatal alert, or close_notify, ends a TLS 1.2 connection: a
+   warning (unrecognized_name, no_renegotiation, user_canceled) is noted
+   and ignored (RFC 5246 section 7.2.2).  */
+static void
+test_warning_alerts (void)
+{
+  static const uint8_t early[] = { 21, 3, 3, 0, 2, 1, 112 };
+  static const uint8_t hi[] = "still here";
+  struct link *l;
+  struct msrv *m;
+  size_t before;
+
+  /* Before the handshake: the client sends its hello, gets a warning, and
+     the handshake goes on to the end.  */
+  l = link_new (&fx_ec, NULL, NULL, NULL, NULL, GQ_CLIENT_AUTH_NONE);
+  gq_tls12conn_start (l->c);
+  CHECK_EQ (gq_tls12conn_receive (l->c, early, sizeof early), GQ_OK);
+  CHECK_EQ (l->ce.closed, 0);
+  pump (l, 0);
+  CHECK (l->ce.connected && l->se.connected);
+  CHECK_EQ (l->ce.closed, 0);
+  link_free (l);
+
+  /* The same at a server, as the first thing it hears.  */
+  l = link_new (&fx_ec, NULL, NULL, NULL, NULL, GQ_CLIENT_AUTH_NONE);
+  CHECK_EQ (gq_tls12conn_receive (l->s, early, sizeof early), GQ_OK);
+  CHECK_EQ (l->se.closed, 0);
+  gq_tls12conn_start (l->c);
+  pump (l, 0);
+  CHECK (l->ce.connected && l->se.connected);
+  link_free (l);
+
+  /* After the handshake, protected, with data going on either side of it.  */
+  l = link_new (&fx_ec, NULL, NULL, NULL, NULL, GQ_CLIENT_AUTH_NONE);
+  m = msrv_new (&fx_ec);
+  gq_tls12conn_start (l->c);
+  msrv_pump (l, m);
+  CHECK (l->ce.connected && m->complete);
+  msrv_write (m, GQ_CT_APPLICATION_DATA, hi, 10);
+  msrv_pump (l, m);
+  CHECK_EQ (l->ce.app.n, 10);
+  before = l->ce.app.n;
+  msrv_alert (l, m, 1, 112);		/* unrecognized_name */
+  msrv_alert (l, m, 1, GQ_ALERT_NO_RENEGOTIATION);
+  msrv_alert (l, m, 1, GQ_ALERT_USER_CANCELED);
+  msrv_alert (l, m, 1, 0x77);		/* One nobody has heard of.  */
+  CHECK_EQ (l->ce.closed, 0);
+  CHECK (!gq_tls12conn_is_closed (l->c));
+  msrv_write (m, GQ_CT_APPLICATION_DATA, hi, 10);
+  msrv_pump (l, m);
+  CHECK_EQ (l->ce.app.n, before + 10);
+  CHECK_EQ (l->ce.closed, 0);
+  /* We can still send.  */
+  CHECK_EQ (gq_tls12conn_send (l->c, hi, 10), GQ_OK);
+  /* A warning does not turn into an alert of ours.  */
+  CHECK_EQ (l->ce.close_alert, 0);
+  /* And close_notify at warning level is still an orderly close.  */
+  msrv_alert (l, m, 1, GQ_ALERT_CLOSE_NOTIFY);
+  CHECK_EQ (l->ce.closed, 1);
+  CHECK_EQ (l->ce.close_error, 0);
+  msrv_free (m);
+  link_free (l);
+
+  /* The same alerts at fatal level end it, with the code, user_canceled
+     included.  */
+  {
+    static const uint8_t codes[] = { 112, GQ_ALERT_NO_RENEGOTIATION,
+                                     GQ_ALERT_USER_CANCELED, 40 };
+    size_t i;
+
+    for (i = 0; i < sizeof codes; i++)
+      {
+        l = link_new (&fx_ec, NULL, NULL, NULL, NULL, GQ_CLIENT_AUTH_NONE);
+        m = msrv_new (&fx_ec);
+        gq_tls12conn_start (l->c);
+        msrv_pump (l, m);
+        CHECK (l->ce.connected);
+        msrv_alert (l, m, 2, codes[i]);
+        CHECK_EQ (l->ce.closed, 1);
+        CHECK (l->ce.close_error < 0);
+        CHECK_EQ (l->ce.close_alert, codes[i]);
+        msrv_free (m);
+        link_free (l);
+      }
+  }
+}
+
 /* AES-GCM cannot be used past its record limit and there is no rekeying:
    the connection says close_notify and closes.  The limit is lowered
    through rekey_records to keep the test short.  */
@@ -444,6 +676,7 @@ main (void)
   test_resume_conn ();
   test_client_auth_conn ();
   test_wire_errors ();
+  test_warning_alerts ();
   test_record_limit ();
   TST_DONE ();
 }

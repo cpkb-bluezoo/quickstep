@@ -28,6 +28,7 @@
 
 #define T12_MAX_SUITES 8
 #define T12_MAX_SIGS 16
+#define T12_MAX_GROUPS 4
 #define T12_MAX_CHAIN 16
 #define T12_TB_MAX (1u << 20)	/* Bound on the buffered transcript.  */
 
@@ -65,6 +66,11 @@ struct gq_tls12
   size_t n_suites;
   uint16_t sigs[T12_MAX_SIGS];
   size_t n_sigs;
+  /* ECDHE groups.  Client: those its hello offered (for a combined hello,
+     those of it this engine can do), which bound what ServerKeyExchange
+     may name.  Server: our preference order.  */
+  uint16_t groups[T12_MAX_GROUPS];
+  size_t n_groups;
 
   uint8_t client_random[32], server_random[32];
   uint8_t sid[32];		/* Session ID we sent (client) or echo.  */
@@ -76,7 +82,7 @@ struct gq_tls12
   gq_tls12_keys keys;		/* Derived, wiped once installed.  */
   int have_keys;
 
-  uint16_t kx_group;		/* Its group; 0 means secp256r1.  */
+  uint16_t kx_group;		/* Its group; 0 until a full handshake picks one.  */
   gq_kx_key kx;			/* Our ephemeral key.  */
   int have_kx;
   uint8_t pms[GQ_KX_SHARED_MAX];
@@ -152,6 +158,7 @@ unsigned g12_pick_scheme (const gq_tls12 *t, const gq_privkey *key,
 int g12_server_dispatch (gq_tls12 *t, gq_slice msg, gq_slice body);
 int g12_server_ccs (gq_tls12 *t);
 void g12_filter (gq_tls12 *t, const uint16_t *suites, size_t n_suites,
-                 const uint16_t *sigs, size_t n_sigs);
+                 const uint16_t *sigs, size_t n_sigs, const uint16_t *groups,
+                 size_t n_groups);
 
 #endif

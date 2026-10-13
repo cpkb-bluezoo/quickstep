@@ -44,6 +44,8 @@ typedef struct pk
   unsigned nsf;
   int ae;			/* Contains an ack-eliciting frame.  */
   int closing;
+  int ack_valid;		/* Carries an ACK frame; its largest:  */
+  uint64_t ack_largest;
   int challenge;		/* Carries a PATH_CHALLENGE.  */
   int early;			/* A 0-RTT packet.  */
   size_t hdr_est;		/* Header estimate used to size cap.  */
@@ -207,6 +209,8 @@ add_ack (gq_conn *c, pk *p, uint64_t now)
   f.u.ack.ranges.len = w;
   if (add (p, &f, 0, NULL) == 0)
     {
+      p->ack_valid = 1;
+      p->ack_largest = r[0].hi;
       s->ack_pending = s->ack_now = 0;
       s->ack_deadline = 0;
       s->ae_since_ack = 0;
@@ -357,6 +361,9 @@ add_stream_data (gq_conn *c, pk *p, stream *st)
                             window_credit (c->max_data_peer, c->data_sent),
                             &off, &d, &n, &fin, &nb))
         break;
+      /* The stream has taken them as sent whatever becomes of this packet:
+         what is resent after a failure is not new (nb 0), so charge now.  */
+      c->data_sent += nb;
       memset (&f, 0, sizeof f);
       f.type = GQ_FRAME_STREAM;
       f.u.stream.id = st->id;
@@ -375,7 +382,6 @@ add_stream_data (gq_conn *c, pk *p, stream *st)
           gq_sstream_on_lost (&st->s, off, n, fin);
           break;
         }
-      c->data_sent += nb;
     }
 }
 
@@ -582,6 +588,18 @@ overhead_of (const gq_conn *c, int sp)
          + 2 + pn + GQ_AEAD_TAG_LEN;
 }
 
+/* The least credit under which an ack-eliciting packet of SP is worth
+   sending.  A server's Initial must go in a datagram of 1200 bytes (RFC 9000
+   section 14.1), so it needs that much; the other spaces need only room for
+   a packet.  */
+size_t
+conn_min_ae_datagram (const gq_conn *c, int sp)
+{
+  if (sp == SP_INITIAL && c->role == GQ_ROLE_SERVER)
+    return GQ_MIN_INITIAL_DATAGRAM;
+  return overhead_of (c, sp) + MIN_PACKET_ROOM;
+}
+
 static void
 add_close (gq_conn *c, pk *p)
 {
@@ -641,6 +659,7 @@ assemble_early (gq_conn *c, uint64_t now, size_t budget, pk *p)
   p->nsf = 0;
   p->ae = 0;
   p->closing = 0;
+  p->ack_valid = 0;
   p->challenge = 0;
   p->cap = budget - ov;
   p->hdr_est = ov;
@@ -651,7 +670,8 @@ assemble_early (gq_conn *c, uint64_t now, size_t budget, pk *p)
 
 /* Fill P with what SP has to say.  Returns 1 if there is a packet.  */
 static int
-assemble (gq_conn *c, int sp, uint64_t now, size_t budget, pk *p)
+assemble (gq_conn *c, int sp, uint64_t now, size_t budget, size_t maxdg,
+          pk *p)
 {
   space *s = &c->sp[sp];
   size_t ov = overhead_of (c, sp);
@@ -667,6 +687,7 @@ assemble (gq_conn *c, int sp, uint64_t now, size_t budget, pk *p)
   p->nsf = 0;
   p->ae = 0;
   p->closing = 0;
+  p->ack_valid = 0;
   p->challenge = 0;
   p->cap = budget - ov;
   p->hdr_est = ov;
@@ -678,6 +699,11 @@ assemble (gq_conn *c, int sp, uint64_t now, size_t budget, pk *p)
   if (!conn_have_work (c, sp))
     return 0;
   add_ack (c, p, now);
+  /* A server's ack-eliciting Initial cannot go in a datagram too short to
+     pad to 1200 bytes (the credit does not allow it): it waits.  */
+  if (sp == SP_INITIAL && c->role == GQ_ROLE_SERVER
+      && maxdg < GQ_MIN_INITIAL_DATAGRAM)
+    return p->len > 0;
   if (conn_can_send_ae (c) || s->probes)
     {
       add_crypto (c, p);
@@ -803,6 +829,8 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
         break;
       total += w;
       c->st.packets_sent++;
+      if (p->ack_valid)
+        conn_note_ack_sent (c, p->sp, pns[i], p->ack_largest);
       if (p->ae)
         {
           sent_pkt sp;
@@ -957,6 +985,12 @@ conn_build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
   *len = 0;
   if (maxdg > cap)
     maxdg = cap;
+  /* If no update was possible, stop at the limit: a key may not protect
+     more packets than its confidentiality limit (RFC 9001 section 6.6).  */
+  if (c->sp[SP_APP].have_wk
+      && c->sp[SP_APP].wk.aead != GQ_AEAD_CHACHA20_POLY1305
+      && c->sp[SP_APP].next_pn - c->w_first_pn >= ((uint64_t) 1 << 23))
+    conn_fail (c, GQ_QERR_AEAD_LIMIT, "AEAD confidentiality limit reached");
   if (c->state == GQ_CONN_ESTABLISHED)
     {
       int idx = conn_path_probe_pending (c, now);
@@ -986,7 +1020,7 @@ conn_build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
         continue;
       if (est + 1 >= maxdg)
         break;
-      if (!assemble (c, sp, now, maxdg - est, p))
+      if (!assemble (c, sp, now, maxdg - est, maxdg, p))
         continue;
       pks[n] = p;
       pns[n] = s->next_pn++;

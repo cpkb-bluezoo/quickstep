@@ -230,6 +230,54 @@ test_weak_rsa (void)
   tst_free_cert (&c);
 }
 
+/* GQ_SIGNATURE_MAX is documented as always enough; ML-DSA signatures are
+   several kilobytes (FIPS 204: 2420, 3309 and 4627 octets), and the engines
+   sign into buffers of that size.  */
+static void
+test_mldsa_size (void)
+{
+  static const struct
+  {
+    unsigned scheme;
+    gnutls_pk_algorithm_t pk;
+    size_t size;
+  } kinds[] = {
+    { GQ_SIG_MLDSA44, GNUTLS_PK_MLDSA44, 2420 },
+    { GQ_SIG_MLDSA65, GNUTLS_PK_MLDSA65, 3309 },
+    { GQ_SIG_MLDSA87, GNUTLS_PK_MLDSA87, 4627 }
+  };
+  size_t i;
+
+  /* Whatever the backend: the buffer must hold the largest signature.  */
+  CHECK (GQ_SIGNATURE_MAX >= 4627);
+  for (i = 0; i < sizeof kinds / sizeof kinds[0]; i++)
+    {
+      gnutls_x509_privkey_t key;
+      gnutls_datum_t pem;
+      gq_privkey *priv;
+      uint8_t sig[GQ_SIGNATURE_MAX];
+      size_t n = 0;
+
+      if (!gq_sigscheme_available (kinds[i].scheme))
+        {
+          fprintf (stderr, "note: no ML-DSA here; skipped\n");
+          return;
+        }
+      CHECK_EQ (gnutls_x509_privkey_init (&key), 0);
+      CHECK_EQ (gnutls_x509_privkey_generate (key, kinds[i].pk, 0, 0), 0);
+      CHECK_EQ (gnutls_x509_privkey_export2_pkcs8 (key, GNUTLS_X509_FMT_PEM,
+                                                   NULL, GNUTLS_PKCS_PLAIN,
+                                                   &pem), 0);
+      CHECK_EQ (gq_privkey_from_pem (&priv, pem.data, pem.size), GQ_OK);
+      CHECK_EQ (gq_privkey_sign (priv, kinds[i].scheme, message,
+                                 sizeof message, sig, sizeof sig, &n), GQ_OK);
+      CHECK_EQ (n, kinds[i].size);
+      gq_privkey_free (priv);
+      gnutls_free (pem.data);
+      gnutls_x509_privkey_deinit (key);
+    }
+}
+
 int
 main (void)
 {
@@ -249,6 +297,7 @@ main (void)
   test_key (TST_RSA2048, rsa, 6);
   test_policy_and_errors ();
   test_weak_rsa ();
+  test_mldsa_size ();
   TST_DONE ();
 }
 

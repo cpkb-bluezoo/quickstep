@@ -26,7 +26,7 @@
    the handshake fragmentation and reassembly of dtlshs.h.
 
    The security profile is that of TLS 1.2 here (tls12.h): ECDHE on
-   secp256r1 with AEAD suites, mandatory extended master secret and secure
+   secp256r1 or x25519 with AEAD suites, mandatory extended master secret and secure
    renegotiation indication, RFC 5077 tickets only, no renegotiation.
    There is no rekeying in DTLS 1.2: an AES-GCM direction that reaches
    2^24 records closes the association.
@@ -104,7 +104,8 @@ int gq_dtls12_receive (gq_dtls12 *c, const uint8_t *dgram, size_t len,
                        uint64_t now);
 
 /* Send LEN bytes as one record; GQ_ERR_BUFSIZE if more than
-   gq_dtls12_max_payload.  Only after the connected event.  */
+   gq_dtls12_max_payload.  An empty write sends nothing.  Only after the
+   connected event.  */
 int gq_dtls12_send (gq_dtls12 *c, const uint8_t *data, size_t len);
 size_t gq_dtls12_max_payload (const gq_dtls12 *c);
 

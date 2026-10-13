@@ -84,6 +84,11 @@ enum gq_dir
   GQ_DIR_WRITE = 2		/* Protects data we send.  */
 };
 
+/* Alert levels (RFC 5246 section 7.2) as sent on the wire; TLS 1.3 sends
+   them but ignores them on receipt.  */
+#define GQ_ALERT_LEVEL_WARNING 1
+#define GQ_ALERT_LEVEL_FATAL 2
+
 /* TLS alert codes (RFC 8446 section 6.2) the engine may send.  */
 enum gq_alert
 {
@@ -103,6 +108,7 @@ enum gq_alert
   GQ_ALERT_PROTOCOL_VERSION = 70,
   GQ_ALERT_INSUFFICIENT_SECURITY = 71,
   GQ_ALERT_INTERNAL_ERROR = 80,
+  GQ_ALERT_USER_CANCELED = 90,
   GQ_ALERT_NO_RENEGOTIATION = 100,	/* TLS 1.2 only.  */
   GQ_ALERT_MISSING_EXTENSION = 109,
   GQ_ALERT_UNSUPPORTED_EXTENSION = 110,

@@ -26,19 +26,19 @@
    gq_tls12_change_cipher_spec.  The configuration structures are the ones
    of tls.h (gq_tls_config, gq_tls_server_config); fields that only make
    sense for TLS 1.3 or QUIC (transport parameters, early data, ticket
-   counts, HelloRetryRequest cookies, group lists) are refused or ignored
+   counts, HelloRetryRequest cookies) are refused or ignored
    as documented in each.
 
    The profile is deliberately narrow, the same as Gumdrop's and Hopf's
    (see the manual's "TLS 1.2 hardening" section):
 
-     key exchange  ECDHE on secp256r1 only; no static RSA, no
+     key exchange  ECDHE on secp256r1 or x25519; no static RSA, no
                    finite-field DH, no other curve
      suites        ECDHE_ECDSA and ECDHE_RSA with AES-GCM or
                    ChaCha20-Poly1305; no CBC, RC4, 3DES, CCM
-     signatures    ECDSA (P-256, P-384) and RSA PKCS#1 v1.5 with SHA-2 are
-                   made; RSA-PSS is also accepted from peers; no SHA-1, no
-                   Ed25519
+     signatures    ECDSA (P-256, P-384), Ed25519 and RSA PKCS#1 v1.5 with
+                   SHA-2 are made; RSA-PSS is also accepted from peers; no
+                   SHA-1
      master secret extended (RFC 7627), mandatory: a peer that does not
                    offer or echo it is refused
      renegotiation never; the indication of RFC 5746 is mandatory and any
@@ -102,14 +102,17 @@ typedef struct gq_tls12_sink
 typedef struct gq_tls12 gq_tls12;
 
 /* Client.  Requires config->trust or sink->verify_peer.  Refuses QUIC
-   mode and early data.  config->groups is ignored (secp256r1 only);
-   suites and sigschemes are filtered to the TLS 1.2 policy.  If
+   mode and early data.  config->groups is filtered to secp256r1 and
+   x25519 and offered in that order (the default is both, secp256r1
+   first); suites and sigschemes are filtered to the TLS 1.2 policy.  If
    config->resume holds a TLS 1.2 session it is offered.  */
 int gq_tls12_client_new (gq_tls12 **out, const gq_tls_config *config,
                          const gq_tls12_sink *sink);
 
 /* Server.  Credentials must be RSA or ECDSA (P-256 or P-384) keys.  The
-   server config's groups, max_early_data, n_tickets, replay and
+   ECDHE group is the first of config->groups (filtered as for the client)
+   that the client offers; a client with no supported_groups gets
+   secp256r1.  The server config's max_early_data, n_tickets, replay and
    HelloRetryRequest fields are ignored; one ticket is issued per full
    handshake when ticket_keys is set, and none on resumption.  */
 int gq_tls12_server_new (gq_tls12 **out, const gq_tls_server_config *config,

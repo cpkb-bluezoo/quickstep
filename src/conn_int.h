@@ -79,6 +79,10 @@ typedef struct sent_pkt
   sent_frame *frames;
 } sent_pkt;
 
+/* ACK frames sent and not yet acknowledged, per space (RFC 9000 section
+   13.2.4).  */
+#define ACK_SENT_MAX 16
+
 typedef struct space
 {
   gq_packet_keys rk, wk;
@@ -104,6 +108,11 @@ typedef struct space
   uint64_t recv_floor;		/* Packet numbers below this count as seen.  */
   unsigned ae_in_flight;	/* Ack-eliciting packets outstanding.  */
   unsigned probes;		/* Probe packets still to send.  */
+  struct
+  {
+    uint64_t pn, largest;	/* The packet, and what its ACK frame named.  */
+  } ack_sent[ACK_SENT_MAX];
+  unsigned n_ack_sent;
 } space;
 
 typedef struct lcid
@@ -231,12 +240,18 @@ struct gq_conn
   uint64_t r_first_pn;		/* First pn of the current read phase.  */
   uint64_t w_first_pn;		/* First pn we sent in the write phase.  */
   uint8_t w_phase_acked;
+  uint64_t rk_prev_until;	/* When the previous phase's read keys go.  */
+  uint64_t aead_failed;		/* Packets that failed authentication.  */
   uint64_t key_updates;
 
   /* Timing.  */
   uint64_t now;
   uint64_t latest_rtt, srtt, rttvar, min_rtt;
   uint8_t have_rtt;
+  uint64_t first_rtt_us;	/* When the first RTT sample was taken.  */
+  uint8_t pc_active;		/* A run of lost packets is being followed:  */
+  uint64_t pc_first_us, pc_last_us;	/* ...when its first and last were sent.  */
+  uint8_t hs_acked;		/* A Handshake packet of ours was acknowledged.  */
   unsigned pto_count;
   uint64_t idle_timeout_us;
   uint64_t idle_deadline;
@@ -327,6 +342,7 @@ size_t conn_max_datagram (const gq_conn *c);
 /* conn_loss.c */
 void sp_sent_add (gq_conn *c, int sp, const sent_pkt *p);
 void sp_sent_clear (gq_conn *c, int sp);
+void conn_note_ack_sent (gq_conn *c, int sp, uint64_t pn, uint64_t largest);
 void free_sent_frames (sent_pkt *p);
 void process_ack (gq_conn *c, int sp, const gq_frame *f, uint64_t now);
 void loss_detect (gq_conn *c, int sp, uint64_t now);
@@ -372,8 +388,10 @@ void conn_path_challenge_data (gq_conn *c, int idx, uint8_t out[8]);
 uint64_t conn_path_deadline (const gq_conn *c);
 void conn_path_on_timeout (gq_conn *c, uint64_t now);
 int conn_path_budget (const gq_conn *c, int idx, uint64_t *budget);
+size_t conn_min_ae_datagram (const gq_conn *c, int sp);
 void conn_path_note_sent (gq_conn *c, int idx, size_t len);
 void conn_path_dcid_changed (gq_conn *c);
+void conn_path_cids_retired (gq_conn *c);
 int conn_path_rx_initial (const gq_conn *c);
 
 /* conn_send.c */

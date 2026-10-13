@@ -118,6 +118,7 @@ struct gq_dtls
 
   /* What the datagram being processed did.  */
   int d_hs, d_dup, d_ooo, d_partial, d_was_connected;
+  int ack_clear;		/* The ACK being processed came in the clear.  */
 };
 
 /* ------------------------------------------------------------------ */
@@ -456,6 +457,9 @@ on_ack_rec (void *u, gq_dtls_recno r)
   gq_dtls *c = u;
   unsigned i;
 
+  /* A cleartext ACK speaks for cleartext records only.  */
+  if (c->ack_clear && r.epoch != 0)
+    return 0;
   for (i = 0; i < FL_SENT; i++)
     if (c->fl.sent[i].used && c->fl.sent[i].epoch == r.epoch
         && c->fl.sent[i].seq == r.seq)
@@ -464,10 +468,11 @@ on_ack_rec (void *u, gq_dtls_recno r)
 }
 
 static void
-process_ack (gq_dtls *c, gq_slice body)
+process_ack (gq_dtls *c, gq_slice body, int cleartext)
 {
   if (!c->fl.active)
     return;
+  c->ack_clear = cleartext;
   if (gq_dtls_acks (body, on_ack_rec, c) == GQ_OK)
     fl_check_done (c);
 }
@@ -793,6 +798,8 @@ struct rxctx
   enum gq_level level;
   gq_dtls_recno rec;
   int acked;
+  int unauth;			/* From a cleartext record: anyone could have
+				   sent it.  */
 };
 
 static int
@@ -820,14 +827,30 @@ on_frag (void *u, const gq_dtls_hs_frag *f)
 {
   struct rxctx *x = u;
   gq_dtls *c = x->c;
-  int d = gq_dtls_reasm_push (&c->reasm, f, on_msg, x), ok = 0;
+  int d, ok = 0;
 
+  /* A cleartext message with something to say is only for as long as nothing
+     is protected yet; after that only a repeat of one already delivered is
+     of any use (it draws our flight again).  RFC 6347 section 4.1.2.7:
+     what cannot be authenticated is discarded, not fatal.  */
+  if (x->unauth && c->have_rd
+      && !((int16_t) (uint16_t) (f->message_seq - c->reasm.next_seq) < 0))
+    return 0;
+  d = gq_dtls_reasm_push (&c->reasm, f, on_msg, x);
   if (d == GQ_ERR_HANDLER || c->closed)
     return 1;
   if (d < 0)
     {
-      fail (c, d, GQ_ALERT_ILLEGAL_PARAMETER);
+      if (x->unauth)
+        {
+          /* Whatever it clashed with is suspect: start that message over
+             (the peer sends it again).  */
+          gq_dtls_reasm_trim (&c->reasm);
+          return 0;
+        }
+      /* The alert goes out before the association is over.  */
       send_alert (c, 2, GQ_ALERT_ILLEGAL_PARAMETER);
+      fail (c, d, GQ_ALERT_ILLEGAL_PARAMETER);
       return 1;
     }
   switch (d)
@@ -865,6 +888,7 @@ process_hs (gq_dtls *c, enum gq_level level, gq_slice body, gq_dtls_recno rec)
   x.level = level;
   x.rec = rec;
   x.acked = 0;
+  x.unauth = level == GQ_LEVEL_INITIAL;
   c->d_hs = 1;
   /* A malformed record is dropped; whatever it completed stays done.  */
   gq_dtls_hs_parse (body, c->reasm.max_len, on_frag, &x);
@@ -877,6 +901,8 @@ handle_alert (gq_dtls *c, gq_slice a)
     return;
   if (a.data[1] == GQ_ALERT_CLOSE_NOTIFY)
     finish (c, 0, GQ_ALERT_CLOSE_NOTIFY);
+  else if (a.data[1] == GQ_ALERT_USER_CANCELED)
+    return;			/* To be followed by close_notify (RFC 8446 6.1).  */
   else
     finish (c, GQ_ERR_PROTOCOL, a.data[1]);
 }
@@ -908,7 +934,7 @@ on_record (void *u, const gq_drec *rec)
             handle_alert (c, rec->body);
           break;
         case GQ_DTLS_CT_ACK:
-          process_ack (c, rec->body);
+          process_ack (c, rec->body, 1);
           break;
         default:
           break;
@@ -966,7 +992,7 @@ on_record (void *u, const gq_drec *rec)
           handle_alert (c, pt);
           break;
         case GQ_DTLS_CT_ACK:
-          process_ack (c, pt);
+          process_ack (c, pt, 0);
           break;
         default:
           break;
@@ -1084,6 +1110,11 @@ gq_dtls_send (gq_dtls *c, const uint8_t *data, size_t len)
     return GQ_ERR_INVAL;
   if (len > gq_dtls_max_payload (c))
     return GQ_ERR_BUFSIZE;
+  /* Nothing to say: as for the stream transports, no record.  The peer
+     drops an empty one unseen (see on_record), so it would only cost a
+     datagram and a sequence number.  */
+  if (len == 0)
+    return GQ_OK;
   e = pool_find (c->wr, c->wr_app);
   if (e && e->send_seq >= c->rekey_after && !c->wr_next)
     gq_dtls_key_update (c, 0);		/* Best effort; the limit is firm.  */

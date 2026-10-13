@@ -26,6 +26,10 @@
 
 #include <quickstep/status.h>
 #include <quickstep/dtlsauto.h>
+#include <quickstep/dtlsrec.h>
+#include <quickstep/dtlshs.h>
+
+#include <time.h>
 
 #include "tst-util.h"
 
@@ -133,6 +137,9 @@ ev_closed (void *u, int error, int alert)
   s->close_err = error;
 }
 
+/* A session the clients of net_new offer, if set.  */
+static const gq_tls_session *g_resume;
+
 /* CLIENT and SERVER are the version flags each end is allowed.  */
 static struct net *
 net_new (unsigned client, unsigned server, int front)
@@ -155,6 +162,7 @@ net_new (unsigned client, unsigned server, int front)
   memset (&cc, 0, sizeof cc);
   cc.server_name = "example.test";
   cc.trust = fx_trust;
+  cc.resume = g_resume;
   ev.user = &n->s[0];
   CHECK_EQ (gq_dtlsauto_client_new (&n->s[0].a, &cc, &ev, NULL, client),
             GQ_OK);
@@ -361,6 +369,120 @@ sentinel (unsigned client, int expect_refused)
 #define D12 GQ_DTLSAUTO_DTLS12
 #define D13 GQ_DTLSAUTO_DTLS13
 
+/* A ClientHello whose extensions start with a big one that means nothing,
+   so that supported_versions lies in a later fragment.  Take the hello
+   CLIENT produced (one datagram), pad it by PAD bytes, and cut it into
+   datagrams of PIECE bytes of message each.  Returns how many.  */
+static int
+padded_hello (struct net *n, size_t pad, size_t piece, uint8_t out[][1500],
+              size_t *outlen)
+{
+  uint8_t msg[8192];
+  const uint8_t *b;
+  size_t mlen, p, k, sl, i, extlen, total, off;
+  int count = 0;
+  gq_wbuf w, f;
+
+  CHECK (n->nq >= 1);
+  /* Record header 13, fragment header 12, then the hello body.  */
+  b = n->q[0].data;
+  CHECK (b[0] == 22 && n->q[0].len > 25);
+  mlen = ((size_t) b[14] << 16) | ((size_t) b[15] << 8) | b[16];
+  CHECK (n->q[0].len == 13 + 12 + mlen);
+  b += 25;
+  p = 2 + 32;
+  p += 1 + b[p];			/* session_id */
+  p += 1 + b[p];			/* legacy_cookie */
+  sl = ((size_t) b[p] << 8) | b[p + 1];
+  p += 2 + sl;
+  p += 1 + b[p];			/* compression */
+  extlen = ((size_t) b[p] << 8) | b[p + 1];
+  CHECK (p + 2 + extlen == mlen);
+  /* body up to the extension length, the new length, the big extension,
+     the old extensions.  */
+  memcpy (msg, b, p);
+  k = p;
+  extlen += 4 + pad;
+  msg[k++] = (uint8_t) (extlen >> 8);
+  msg[k++] = (uint8_t) extlen;
+  msg[k++] = 0x0a; msg[k++] = 0x0a;		/* A reserved type.  */
+  msg[k++] = (uint8_t) (pad >> 8);
+  msg[k++] = (uint8_t) pad;
+  memset (msg + k, 0, pad);
+  k += pad;
+  memcpy (msg + k, b + p + 2, mlen - p - 2);
+  total = k + mlen - p - 2;
+  CHECK (total < sizeof msg);
+  for (off = 0, i = 0; off < total; off += piece, i++)
+    {
+      uint8_t frag[1500];
+      size_t take = total - off < piece ? total - off : piece;
+
+      gq_wbuf_init (&f, frag, sizeof frag);
+      gq_dtls_put_hs_frag (&f, 1, (uint32_t) total, 0, (uint32_t) off,
+                           msg + off, take);
+      gq_wbuf_init (&w, out[count], 1500);
+      gq_dtls_put_plain (&w, 22, i, frag, f.len);
+      CHECK_EQ (gq_wbuf_status (&w), GQ_OK);
+      outlen[count++] = w.len;
+    }
+  return count;
+}
+
+/* The version of a ClientHello cannot be told from its first fragment if
+   supported_versions comes later: the server waits for the rest rather
+   than guessing DTLS 1.2.  */
+static void
+fragmented_classify (unsigned client, unsigned want)
+{
+  uint8_t d[8][1500];
+  size_t l[8];
+  struct net *n = net_new (client, BOTH, 0);
+  int i, count;
+
+  CHECK_EQ (gq_dtlsauto_start (n->s[0].a, n->now), GQ_OK);
+  count = padded_hello (n, 1500, 600, d, l);
+  CHECK (count >= 3 && count <= 8);
+  for (i = 0; i < count; i++)
+    {
+      gq_dtlsauto_receive (n->s[1].a, d[i], l[i], n->now);
+      /* Undecided, however many fragments are in, until the last.  */
+      if (i + 1 < count)
+        CHECK_EQ (gq_dtlsauto_version (n->s[1].a), 0);
+    }
+  CHECK_EQ (gq_dtlsauto_version (n->s[1].a), want);
+  net_free (n);
+}
+
+/* A resuming client's hello carries a ticket (up to GQ_TICKET_MAX bytes)
+   and does not fit a datagram: it goes out in fragments, and has to be
+   kept whole for a DTLS 1.2 server that answers instead.  A DTLS 1.2
+   listener in front (stateless cookies) copes with the fragments too.  */
+static void
+big_ticket (int front, int lose)
+{
+  static gq_tls_session sess;
+  size_t i;
+
+  memset (&sess, 0, sizeof sess);
+  for (i = 0; i < GQ_TICKET_MAX; i++)
+    sess.ticket[i] = (uint8_t) (i * 7 + 3);
+  sess.ticket_len = GQ_TICKET_MAX;
+  sess.cipher_suite = GQ_TLS_AES_128_GCM_SHA256;
+  sess.hash = GQ_HASH_SHA256;
+  sess.psk_len = 32;
+  sess.lifetime = 7200;
+  sess.received_ms = (uint64_t) time (NULL) * 1000;
+  g_resume = &sess;
+  one (BOTH, D12, front, lose, 0xfefd);
+  /* A listener answering statelessly for DTLS 1.3 cannot take a ClientHello1
+     spread over several datagrams (its cookie holds the hash of the whole
+     message): that, and only that, is not served.  */
+  if (!front)
+    one (BOTH, BOTH, front, lose, 0xfefc);
+  g_resume = NULL;
+}
+
 int
 main (void)
 {
@@ -385,6 +507,12 @@ main (void)
         one (D13, D12, front, lose, 0);
         one (D12, D13, front, lose, 0);
       }
+  big_ticket (0, 0);
+  big_ticket (0, 3);
+  big_ticket (1, 0);
+  big_ticket (1, 3);
+  fragmented_classify (BOTH, 0xfefc);
+  fragmented_classify (D12, 0xfefd);
   sentinel (BOTH, 1);
   sentinel (D12, 0);
   TST_DONE ();

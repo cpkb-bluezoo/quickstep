@@ -254,6 +254,13 @@ if "$OPENSSL" s_server -help >/dev/null 2>&1; then
   C12="--tls12 --expect $HTTP200"
   scenario "tls12/openssl: default" openssl "$O12" "$C12" ok \
     "group=0x0017" "resumed=0" "result=ok"
+  # OpenSSL wants its P-256 certificate curve in its own group list too.
+  scenario "tls12/openssl: x25519 when the client prefers it" openssl \
+    "$O12 -groups X25519:P-256 -serverpref" "$C12 --groups x25519,p256" ok "group=0x001d"
+  scenario "tls12/openssl: P-256 when the client prefers it" openssl \
+    "$O12 -groups X25519:P-256" "$C12 --groups p256,x25519" ok "group=0x0017"
+  scenario "tls12/openssl: x25519 only server is refused by a P-256 only client" openssl \
+    "$O12 -groups X25519" "$C12 --groups p256" fail "result=fail"
   scenario "tls12/openssl: ECDHE-ECDSA-AES128-GCM-SHA256" openssl \
     "$O12 -cipher ECDHE-ECDSA-AES128-GCM-SHA256" "$C12 --suites ecdsa-aes128" ok "suite=0xc02b"
   scenario "tls12/openssl: ECDHE-ECDSA-AES256-GCM-SHA384" openssl \
@@ -337,6 +344,9 @@ if [ -n "$GNUTLS_SERV" ] && "$GNUTLS_SERV" --version >/dev/null 2>&1; then
   P12="NORMAL:-VERS-ALL:+VERS-TLS1.2"
   scenario "tls12/gnutls: default" gnutls "$GS --priority=$P12" \
     "--tls12 --expect $HTTP200" ok "result=ok" "resumed=0"
+  scenario "tls12/gnutls: x25519 only" gnutls \
+    "$GS --priority=$P12:-GROUP-ALL:+GROUP-X25519" \
+    "--tls12 --groups x25519 --expect $HTTP200" ok "group=0x001d"
   # A client that negotiates (the default): TLS 1.3 when the server has it,
   # else TLS 1.2 within the same handshake.
   scenario "auto/openssl: prefers TLS 1.3" openssl "$OS" "--expect $HTTP200" ok \
@@ -345,6 +355,15 @@ if [ -n "$GNUTLS_SERV" ] && "$GNUTLS_SERV" --version >/dev/null 2>&1; then
     "version=303" "result=ok"
   scenario "auto/openssl: falls back to TLS 1.2 (RSA certificate)" openssl "$R12" \
     "--expect $HTTP200" ok "version=303" "result=ok"
+  # A 1.2 server with an Ed25519 certificate signs with it (RFC 8422
+  # section 5.1.3), for a client that negotiates and for one pinned to 1.2.
+  scenario "auto/openssl: falls back to TLS 1.2 (Ed25519 certificate)" openssl \
+    "-tls1_2 -cert ed.pem -key ed.key -www" "--expect $HTTP200" ok "version=303" "result=ok"
+  scenario "tls12/openssl: Ed25519 certificate" openssl \
+    "-tls1_2 -cert ed.pem -key ed.key -www" "$C12" ok "version=303" "result=ok"
+  scenario "tls12/openssl: client certificate (Ed25519)" openssl \
+    "$O12 -Verify 1 -CAfile ca.pem" "$C12 --cert cliED.pem --key cliED.key" ok \
+    "client_auth_requested=1" "client_auth_sent=1"
   scenario "auto/gnutls: falls back to TLS 1.2" gnutls "$GS --priority=$P12" \
     "--expect $HTTP200" ok "version=303" "result=ok"
   scenario "pinned TLS 1.3 client against a TLS 1.2 server fails" openssl "$O12" \
@@ -361,6 +380,9 @@ if [ -n "$GNUTLS_SERV" ] && "$GNUTLS_SERV" --version >/dev/null 2>&1; then
   scenario "tls12/gnutls: client certificate" gnutls \
     "$GS --priority=$P12 --require-client-cert --x509cafile=ca.pem" \
     "--tls12 --cert cli.pem --key cli.key --expect $HTTP200" ok "client_auth_sent=1"
+  scenario "tls12/gnutls: Ed25519 certificate" gnutls \
+    "--x509certfile=ed.pem --x509keyfile=ed.key --http --priority=$P12" \
+    "--tls12 --expect $HTTP200" ok "result=ok"
   scenario "tls12/gnutls: untrusted server certificate" gnutls \
     "--x509certfile=bad.pem --x509keyfile=bad.key --http --priority=$P12" \
     "--tls12 --expect $HTTP200" fail "alert=48"
@@ -501,12 +523,20 @@ if "$OPENSSL" s_client -help >/dev/null 2>&1; then
     "$SC --rekey 2 --key-update 1" "" ok "result=ok"
   server_scenario "server12/openssl: default" openssl "$S12" "-tls1_2" ok \
     "result=ok" "sni=example.test" "group=0x0017"
+  server_scenario "server12/openssl: our preference wins over the client's x25519" openssl "$S12" \
+    "-tls1_2 -groups X25519:P-256" ok "group=0x0017"
+  server_scenario "server12/openssl: server preferring x25519" openssl \
+    "$S12 --groups x25519,p256" "-tls1_2" ok "group=0x001d"
   server_scenario "server12/openssl: ECDHE-ECDSA-CHACHA20-POLY1305" openssl "$S12" \
     "-tls1_2 -cipher ECDHE-ECDSA-CHACHA20-POLY1305" ok "suite=0xcca9"
   server_scenario "server12/openssl: ECDHE-ECDSA-AES128-GCM-SHA256" openssl "$S12" \
     "-tls1_2 -cipher ECDHE-ECDSA-AES128-GCM-SHA256" ok "suite=0xc02b"
   server_scenario "server12/openssl: server preference picks AES-256-GCM" openssl "$S12" \
     "-tls1_2" ok "suite=0xc02c"
+  server_scenario "server12/openssl: Ed25519 certificate" openssl \
+    "--tls12 --cert ed.pem --key ed.key" "-tls1_2" ok "version=303" "result=ok"
+  server_scenario "server12/openssl: client certificate (Ed25519)" openssl \
+    "$S12 --client-auth required --ca ca.pem" "-tls1_2 -cert cliED.pem -key cliED.key" ok "client_auth=1"
   server_scenario "server12/openssl: RSA certificate (ECDHE-RSA-AES128-GCM-SHA256)" openssl \
     "--tls12 --cert rsa.pem --key rsa.key" "-tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256" ok "suite=0xc02f"
   server_scenario "server12/openssl: RSA certificate (ChaCha20-Poly1305)" openssl \
@@ -557,6 +587,8 @@ if [ -n "${GNUTLS_CLI:-}" ] && "$GNUTLS_CLI" --version >/dev/null 2>&1; then
     "--priority=$P13" ok "version=304" "result=ok"
   P12="NORMAL:-VERS-ALL:+VERS-TLS1.2"
   server_scenario "server12/gnutls: default" gnutls "$S12" "--priority=$P12" ok "result=ok" "sni=example.test"
+  server_scenario "server12/gnutls: x25519 only client" gnutls "$S12" \
+    "--priority=$P12:-GROUP-ALL:+GROUP-X25519" ok "group=0x001d"
   server_scenario "server12/gnutls: ChaCha20-Poly1305" gnutls "$S12" \
     "--priority=$P12:-CIPHER-ALL:+CHACHA20-POLY1305" ok "suite=0xcca9"
   server_scenario "server12/gnutls: RSA certificate" gnutls "--tls12 --cert rsa.pem --key rsa.key" \

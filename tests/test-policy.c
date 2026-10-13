@@ -61,11 +61,11 @@ main (void)
   CHECK (gq_policy_allows_sigscheme (GQ_TLS_1_2, GQ_SIG_RSA_PKCS1_SHA256));
   CHECK (gq_policy_allows_sigscheme (GQ_DTLS_1_2, GQ_SIG_RSA_PKCS1_SHA384));
   CHECK (gq_policy_allows_sigscheme (GQ_TLS_1_2, GQ_SIG_ECDSA_SECP256R1_SHA256));
-  CHECK (!gq_policy_allows_sigscheme (GQ_TLS_1_2, GQ_SIG_ED25519));
+  CHECK (gq_policy_allows_sigscheme (GQ_TLS_1_2, GQ_SIG_ED25519));	/* RFC 8422.  */
   CHECK (!gq_policy_allows_sigscheme (GQ_TLS_1_2, 0x0201));	/* RSA SHA-1.  */
   CHECK (!gq_policy_allows_sigscheme (GQ_TLS_1_2, 0x0203));	/* ECDSA SHA-1.  */
   CHECK (gq_policy_allows_group_for (GQ_TLS_1_2, GQ_GROUP_SECP256R1));
-  CHECK (!gq_policy_allows_group_for (GQ_TLS_1_2, GQ_GROUP_X25519));
+  CHECK (gq_policy_allows_group_for (GQ_TLS_1_2, GQ_GROUP_X25519));
   CHECK (!gq_policy_allows_group_for (GQ_TLS_1_2, GQ_GROUP_SECP384R1));
   CHECK (!gq_policy_allows_group_for (GQ_DTLS_1_2, GQ_GROUP_X25519_MLKEM768));
   CHECK (gq_policy_allows_group_for (GQ_TLS_1_3, GQ_GROUP_X25519));
@@ -73,9 +73,9 @@ main (void)
 
   /* DTLS 1.2 has the TLS 1.2 profile.  */
   CHECK (gq_policy_allows_group_for (GQ_DTLS_1_2, GQ_GROUP_SECP256R1));
-  CHECK (!gq_policy_allows_group_for (GQ_DTLS_1_2, GQ_GROUP_X25519));
+  CHECK (gq_policy_allows_group_for (GQ_DTLS_1_2, GQ_GROUP_X25519));
   CHECK (gq_policy_allows_sigscheme (GQ_DTLS_1_2, GQ_SIG_RSA_PKCS1_SHA256));
-  CHECK (!gq_policy_allows_sigscheme (GQ_DTLS_1_2, GQ_SIG_ED25519));
+  CHECK (gq_policy_allows_sigscheme (GQ_DTLS_1_2, GQ_SIG_ED25519));
   CHECK (gq_policy_allows_suite (GQ_DTLS_1_2,
                                  GQ_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305));
   CHECK (!gq_policy_allows_suite (GQ_DTLS_1_2, GQ_TLS_AES_128_GCM_SHA256));
@@ -96,7 +96,7 @@ main (void)
   for (i = 0; i < n; i++)
     CHECK (gq_policy_allows_sigscheme (GQ_TLS_1_2, l[i]));
   l = gq_policy_default_groups_for (GQ_TLS_1_2, &n);
-  CHECK (n == 1 && l[0] == GQ_GROUP_SECP256R1);
+  CHECK (n == 2 && l[0] == GQ_GROUP_SECP256R1 && l[1] == GQ_GROUP_X25519);
   l = gq_policy_default_suites (0x0301, &n);
   CHECK (l == NULL && n == 0);
 

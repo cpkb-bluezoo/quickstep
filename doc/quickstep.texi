@@ -349,17 +349,27 @@ per version, or a test, wants; a pinned endpoint refuses the other version
 never negotiated: RFC 9001 requires TLS 1.3, so the QUIC engine refuses
 anything else and a combined hello is not offered with QUIC.
 
-Two consequences of the combined hello are worth knowing.  The
-@code{supported_groups} list is shared by both versions, so a 1.2 server
-may choose X25519 or secp384r1 for its ECDHE key; the 1.2 client engine
-accepts those two curves for the key exchange only when its ClientHello
-also offered 1.3 (a standalone 1.2 client stays on secp256r1, as
-@ref{TLS 1.2 hardening} says).  And over DTLS a stateless listener must
+Some consequences of the combined hello are worth knowing.  The
+@code{supported_groups} and @code{signature_algorithms} lists are shared by
+both versions, so a 1.2 server may choose secp384r1 for its ECDHE key; the
+1.2 client engine accepts that only when its ClientHello also offered 1.3
+(a standalone 1.2 client offers secp256r1 and x25519, as @ref{TLS 1.2
+hardening} says).  In every case the key exchange group has to be one the hello
+listed: a ServerKeyExchange naming another is refused
+(@code{illegal_parameter}).  A resuming client's hello, with its ticket
+of up to 2 KB, is kept whole for the hand-over however large it is, over
+TCP and, in fragments, over DTLS.  Over DTLS a stateless listener must
 decide from the first datagram: a ClientHello with a cookie in its
 @code{legacy_cookie} field answers a DTLS 1.2 HelloVerifyRequest, one with
 the @code{cookie} extension a DTLS 1.3 HelloRetryRequest, and a first
-ClientHello by its @code{supported_versions}.  Without a listener the
-first datagram must hold that extension.
+ClientHello by its @code{supported_versions}.  A listener that serves
+DTLS 1.3 cannot take a first ClientHello spread over several datagrams,
+which would need the state a cookie exchange avoids (the cookie holds the
+hash of the whole message); a DTLS 1.2 listener can, as its
+HelloVerifyRequest depends only on the first fragment.  Without a listener
+a server keeps the first datagrams of a fragmented ClientHello until
+@code{supported_versions} has arrived (or eight datagrams have), rather
+than guess DTLS 1.2.
 
 @node Cipher suites
 @section Cipher suites
@@ -396,10 +406,20 @@ association is one or the other; which one is negotiated at the start
 
 @itemize @bullet
 @item
-Key exchange is ECDHE on @code{secp256r1} only.  There is no static RSA
-key transport, no finite-field Diffie-Hellman, no other curve and no
-X25519 or hybrid group on this path.  A peer that does not list
-@code{secp256r1} is refused.
+Key exchange is ECDHE on @code{secp256r1} or @code{x25519} (RFC 8422).
+There is no static RSA key transport, no finite-field Diffie-Hellman, no
+other curve and no hybrid group on this path.  A client offers both in
+@code{supported_groups}, P-256 first; a server picks the first group of its
+own preference that the client offers, secp256r1 then x25519 unless
+the @code{groups} of the configuration say otherwise (the entries that are
+one of those two, in the order given; any other group is for TLS 1.3 only
+and is ignored, and a list with nothing left means the default).  A client
+that sends no @code{supported_groups} is given secp256r1, as RFC 8422
+section 5.1.1 allows the server to choose; one that offers none of the
+server's groups is refused (@code{handshake_failure}), unless it is
+resuming, which needs no key exchange.  A client refuses a group it did not
+offer.  The group used is in @code{gq_tls_info.group}, and is 0 for a resumed
+session.
 
 @item
 Suites are the six ECDHE plus AEAD suites of the policy.  ECDSA
@@ -408,10 +428,20 @@ certificates the @code{ECDHE_RSA} suites; the server only selects a suite
 that fits its key.
 
 @item
-Signatures: ECDSA and RSA PKCS#1 v1.5 with SHA-2 are produced; the
-engine never signs with RSA-PSS, but accepts it from a peer.  There is no SHA-1, no MD5, no Ed25519 and no ML-DSA on this
-path.  A ClientHello without @code{signature_algorithms} is refused rather
-than assumed to mean SHA-1.
+Signatures: ECDSA, Ed25519 (RFC 8422 section 5.1.3, under the
+@code{ECDHE_ECDSA} suites) and RSA PKCS#1 v1.5 with SHA-2 are produced; the
+engine never signs with RSA-PSS, but accepts it from a peer.  There is no
+SHA-1, no MD5 and no ML-DSA on this path.  A ClientHello without
+@code{signature_algorithms} is refused rather than assumed to mean SHA-1.
+
+@item
+Alerts: only @code{close_notify} and an alert of fatal level end a
+connection (RFC 5246 section 7.2.2); a warning such as
+@code{unrecognized_name}, @code{no_renegotiation} or @code{user_canceled}
+is ignored.  TLS 1.3 sends the severity in the alert's type: every alert
+but @code{close_notify} and @code{user_canceled} is an error whatever its
+level field says, and @code{user_canceled} is ignored (RFC 8446 section 6),
+over DTLS too.
 
 @item
 Extended master secret (RFC 7627) is mandatory.  A peer that does not
@@ -533,8 +563,8 @@ certificates.
 @cindex DTLS 1.2
 
 DTLS 1.2 (RFC 6347) is the TLS 1.2 engine in DTLS mode, so it has exactly
-the profile of @ref{TLS 1.2 hardening}: ECDHE on @code{secp256r1} with
-AEAD suites, mandatory extended master secret and secure renegotiation
+the profile of @ref{TLS 1.2 hardening}: ECDHE on @code{secp256r1} or
+@code{x25519} with AEAD suites, mandatory extended master secret and secure renegotiation
 indication, RFC 5077 tickets, no compression, no renegotiation.  A peer
 built without RFC 5746 (wolfSSL without secure renegotiation, for
 example) is therefore refused.  What is DTLS's own is in
@@ -604,7 +634,8 @@ and a path's amplification limit applies to every unvalidated address
 Hybrid post-quantum groups are preferred (@code{X25519MLKEM768},
 @code{SecP256r1MLKEM768}, @code{SecP384r1MLKEM1024}), then X25519,
 secp256r1 and secp384r1.  There is no secp521r1, no finite-field group
-and no legacy curve.
+and no legacy curve.  TLS 1.2 and DTLS 1.2 use secp256r1 and x25519 only
+(@ref{TLS 1.2 hardening}).
 
 @node Signatures and certificates
 @section Signatures and certificates

@@ -94,6 +94,8 @@ conn_install_keys (gq_conn *c, const gq_tls_secret *s)
           gq_packet_keys_wipe (&c->early_wk);
           memcpy (c->wsec, s->secret, s->len);
           c->wsec_len = s->len;
+          /* Packets sent early (0-RTT) were not under these keys.  */
+          c->w_first_pn = c->sp[SP_APP].next_pn;
         }
     }
 }
@@ -137,6 +139,8 @@ rotate_read_keys (gq_conn *c, uint64_t pn)
 
   c->rk_prev = s->rk;
   c->have_rk_prev = 1;
+  /* Kept for reordered packets, but not for long (RFC 9001 section 6.5).  */
+  c->rk_prev_until = c->now + 3 * conn_pto_base (c, SP_APP);
   s->rk = c->rk_next;
   memcpy (c->rsec, c->rsec_next, c->rsec_len);
   c->r_phase ^= 1;
@@ -262,6 +266,7 @@ cid_store (gq_conn *c, const gq_frame *f)
             }
         break;
       }
+  conn_path_cids_retired (c);
 #undef NC
   return 0;
 }
@@ -641,6 +646,22 @@ recv_early (gq_conn *c, uint64_t now, uint8_t *pkt, const gq_long_header *h)
   return 1;
 }
 
+/* RFC 9001 section 6.6: packets that fail authentication are counted for the
+   whole connection; past the integrity limit of the AEAD the connection is
+   closed.  Returns 1 if it was.  */
+static int
+count_failed (gq_conn *c)
+{
+  const space *s = &c->sp[SP_APP];
+  uint64_t limit = s->have_rk && s->rk.aead == GQ_AEAD_CHACHA20_POLY1305
+    ? (uint64_t) 1 << 36 : (uint64_t) 1 << 52;
+
+  if (++c->aead_failed < limit)
+    return 0;
+  conn_fail (c, GQ_QERR_AEAD_LIMIT, "AEAD integrity limit reached");
+  return 1;
+}
+
 /* Handle one long-header packet.  *USED is the number of bytes it took
    (0: stop, the rest of the datagram is unusable).  Returns 1 if a packet
    was processed.  */
@@ -738,7 +759,7 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
       return 1;
     }
   if (r != GQ_OK)
-    return 0;
+    return r == GQ_ERR_CRYPTO && count_failed (c);
   if (pn < s->recv_floor || gq_ranges_contains (&s->recv, pn))
     return 1;			/* Duplicate.  */
   if (adopt)
@@ -785,6 +806,11 @@ recv_short (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t *used)
   *used = rem;
   if (!s->have_rk || s->discarded)
     return 0;
+  if (c->have_rk_prev && now >= c->rk_prev_until)
+    {
+      gq_packet_keys_wipe (&c->rk_prev);
+      c->have_rk_prev = 0;
+    }
   if (gq_short_header_parse (pkt, rem, c->cfg.cid_len, &h) != GQ_OK)
     return 0;
   if (!is_our_cid (c, h.dcid.data, h.dcid.len))
@@ -817,7 +843,11 @@ recv_short (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t *used)
       return 1;
     }
   if (r != GQ_OK)
-    goto failed;
+    {
+      if (r == GQ_ERR_CRYPTO && count_failed (c))
+        return 1;
+      goto failed;
+    }
   if (pn < s->recv_floor || gq_ranges_contains (&s->recv, pn))
     return 1;
   if (update)

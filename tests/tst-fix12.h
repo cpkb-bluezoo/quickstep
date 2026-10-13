@@ -40,7 +40,8 @@ struct ident
 
 static struct tst_cert fx_ca;
 static gq_trust *fx_trust;
-static struct ident fx_ec, fx_ec384, fx_rsa, fx_cli_ec, fx_cli_rsa;
+static struct ident fx_ec, fx_ec384, fx_ed, fx_rsa, fx_cli_ec, fx_cli_rsa,
+  fx_cli_ed;
 
 static void
 make_ident (struct ident *id, enum tst_key kind, const char *cn,
@@ -77,11 +78,15 @@ fx_setup (void)
               GNUTLS_KP_TLS_WWW_SERVER);
   make_ident (&fx_ec384, TST_ECDSA384, "ec384", "example.test",
               GNUTLS_KP_TLS_WWW_SERVER);
+  make_ident (&fx_ed, TST_ED25519, "ed", "example.test",
+              GNUTLS_KP_TLS_WWW_SERVER);
   make_ident (&fx_rsa, TST_RSA2048, "rsa", "example.test",
               GNUTLS_KP_TLS_WWW_SERVER);
   make_ident (&fx_cli_ec, TST_ECDSA256, "cli", "client.test",
               GNUTLS_KP_TLS_WWW_CLIENT);
   make_ident (&fx_cli_rsa, TST_RSA2048, "clirsa", "client.test",
+              GNUTLS_KP_TLS_WWW_CLIENT);
+  make_ident (&fx_cli_ed, TST_ED25519, "clied", "client.test",
               GNUTLS_KP_TLS_WWW_CLIENT);
 }
 

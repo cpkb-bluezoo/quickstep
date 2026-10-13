@@ -381,6 +381,42 @@ conn_path_dcid_changed (gq_conn *c)
   c->paths[c->cur_path].dcid_seq = c->dcid_seq;
 }
 
+/* The peer has retired connection IDs: no path may go on using one
+   (RFC 9000 section 5.1.2).  The current path follows the ID in use; any
+   other takes a fresh one, or shares the current one when the peer has
+   issued no more.  */
+void
+conn_path_cids_retired (gq_conn *c)
+{
+  int k, i;
+
+  for (k = 0; k < MAX_PATHS; k++)
+    {
+      pathinfo *e = &c->paths[k];
+      int live = 0;
+      pcid *f;
+
+      if (!e->used || e->dcid.len == 0 || k == c->cur_path)
+        continue;
+      for (i = 0; i < MAX_PCID; i++)
+        if (c->p[i].used && c->p[i].seq == e->dcid_seq && !c->p[i].retire)
+          live = 1;
+      if (live)
+        continue;
+      f = fresh_cid (c);
+      if (f)
+        {
+          e->dcid = f->cid;
+          e->dcid_seq = f->seq;
+        }
+      else
+        {
+          e->dcid = c->dcid;
+          e->dcid_seq = c->dcid_seq;
+        }
+    }
+}
+
 void
 conn_path_after_packet (gq_conn *c, uint64_t now, int nonprobing, int highest)
 {

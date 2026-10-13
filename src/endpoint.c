@@ -33,6 +33,7 @@
 #define MAX_ENTRY_CIDS 14
 #define MAX_ENTRY_TOKENS 20
 #define REPLY_MAX 1500
+#define MAX_GRAVES 256
 
 struct entry
 {
@@ -45,6 +46,7 @@ struct entry
   size_t index;			/* In ep->conns.  */
   gq_cid cids[MAX_ENTRY_CIDS];	/* What is registered for it.  */
   size_t n_cids;
+  gq_cid orig;			/* The ID the client invented, if registered.  */
   uint8_t toks[MAX_ENTRY_TOKENS][GQ_RESET_TOKEN_LEN];
   size_t n_toks;
 };
@@ -77,6 +79,13 @@ struct reply
   uint8_t data[REPLY_MAX];
 };
 
+/* An ID of a connection that has gone, remembered for a while.  */
+struct grave
+{
+  uint64_t until;		/* 0: unused.  */
+  gq_cid cid;
+};
+
 struct gq_endpoint
 {
   gq_endpoint_config cfg;
@@ -106,6 +115,11 @@ struct gq_endpoint
   /* Stateless reset rate limit.  */
   uint64_t reset_window;
   unsigned resets_in_window;
+  /* The IDs we issued to connections that are over, in a ring, and the
+     latest time we were told.  */
+  struct grave graves[MAX_GRAVES];
+  size_t grave_next;
+  uint64_t now;
 };
 
 /* ---- Hashing and the ID table ---- */
@@ -402,6 +416,45 @@ reset_token (void *user, const uint8_t *cid, size_t len,
 
 /* ---- Connections ---- */
 
+/* How long a closed connection's IDs are remembered: as long as a peer might
+   keep sending to it.  */
+static uint64_t
+grave_span (const gq_endpoint *ep)
+{
+  uint64_t ms = ep->cfg.conn.idle_timeout_ms;
+
+  return (ms ? ms : 30000) * 1000;
+}
+
+static void
+bury (gq_endpoint *ep, const gq_cid *c)
+{
+  struct grave *g = &ep->graves[ep->grave_next];
+
+  ep->grave_next = (ep->grave_next + 1) % MAX_GRAVES;
+  g->cid = *c;
+  g->until = ep->now + grave_span (ep);
+}
+
+/* Is this the ID of a connection that has gone?  A client that keeps
+   addressing Initial packets to the ID we chose is talking to it, not
+   starting another (RFC 9000 section 7.2).  */
+static int
+buried (const gq_endpoint *ep, const uint8_t *cid, size_t len)
+{
+  size_t i;
+
+  for (i = 0; i < MAX_GRAVES; i++)
+    {
+      const struct grave *g = &ep->graves[i];
+
+      if (g->until > ep->now && g->cid.len == len
+          && memcmp (g->cid.data, cid, len) == 0)
+        return 1;
+    }
+  return 0;
+}
+
 static void
 detach (gq_endpoint *ep, struct entry *e)
 {
@@ -411,6 +464,9 @@ detach (gq_endpoint *ep, struct entry *e)
     {
       gq_cid c = e->cids[e->n_cids - 1];
 
+      /* The client's own invention could be anyone's next.  */
+      if (!(e->orig.len == c.len && memcmp (e->orig.data, c.data, c.len) == 0))
+        bury (ep, &c);
       unregister_cid (ep, e, c.data, c.len);
     }
   while (e->n_toks)
@@ -707,8 +763,15 @@ admit (gq_endpoint *ep, uint64_t now, const gq_path *from, uint8_t *data,
     }
   /* The client's first Initials name the ID it invented (or the one we gave
      in a Retry, which is ours already).  */
-  if (gq_long_header_parse (data, len, &h) == GQ_OK)
-    register_cid (ep, e, h.dcid.data, h.dcid.len);
+  if (gq_long_header_parse (data, len, &h) == GQ_OK
+      && lookup (ep, h.dcid.data, h.dcid.len) != e)
+    {
+      register_cid (ep, e, h.dcid.data, h.dcid.len);
+      if (e->n_cids && e->cids[e->n_cids - 1].len == h.dcid.len
+          && memcmp (e->cids[e->n_cids - 1].data, h.dcid.data,
+                     h.dcid.len) == 0)
+        e->orig = e->cids[e->n_cids - 1];
+    }
   if (ep->ev.connection)
     ep->ev.connection (ep->ev.user, c);
   gq_conn_recv_path (c, now, from, data, len);
@@ -748,6 +811,7 @@ gq_endpoint_recv (gq_endpoint *ep, uint64_t now_us, const gq_path *from,
 {
   struct entry *e = NULL;
 
+  ep->now = now_us;
   if (len == 0)
     return GQ_OK;
   if (data[0] & 0x80)
@@ -757,6 +821,8 @@ gq_endpoint_recv (gq_endpoint *ep, uint64_t now_us, const gq_path *from,
 
       if (r == GQ_OK || r == GQ_ERR_UNSUPPORTED)
         e = lookup (ep, h.dcid.data, h.dcid.len);
+      if (e == NULL && r == GQ_OK && buried (ep, h.dcid.data, h.dcid.len))
+        return GQ_OK;
       if (e == NULL)
         return admit (ep, now_us, from, data, len);
     }
@@ -799,6 +865,7 @@ gq_endpoint_send (gq_endpoint *ep, uint64_t now_us, uint8_t *out, size_t cap,
                   size_t *len, gq_path *to)
 {
   *len = 0;
+  ep->now = now_us;
   if (ep->reply_n)
     {
       struct reply *r = &ep->replies[ep->reply_head];
@@ -859,6 +926,7 @@ gq_endpoint_timeout (gq_endpoint *ep)
 void
 gq_endpoint_on_timeout (gq_endpoint *ep, uint64_t now_us)
 {
+  ep->now = now_us;
   while (ep->heap_n)
     {
       struct timer t = ep->heap[0];

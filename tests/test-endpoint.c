@@ -95,6 +95,12 @@ struct net
   unsigned loss_pct;
   struct node node[MAXNODES];
   int retries, resets, dropped, total;
+  /* The first long header datagram a client sends once it has been given
+     the server's connection ID (its DCID differs from the first one's).  */
+  uint8_t first_dcid[GQ_MAX_CID_LEN];
+  size_t first_dcid_len;
+  uint8_t late[2048];
+  size_t late_len;
 };
 
 static uint8_t
@@ -305,6 +311,21 @@ enqueue (struct net *net, struct node *from, const uint8_t *d, size_t len,
   (void) index;
   if (from == &net->node[0] && (d[0] & 0xf0) == 0xf0)
     net->retries++;
+  if (from != &net->node[0] && (d[0] & 0x80) && len >= 1200 && len <= 2048
+      && net->late_len == 0 && d[5] <= GQ_MAX_CID_LEN)
+    {
+      if (net->first_dcid_len == 0)
+        {
+          net->first_dcid_len = d[5];
+          memcpy (net->first_dcid, d + 6, d[5]);
+        }
+      else if (d[5] != net->first_dcid_len
+               || memcmp (net->first_dcid, d + 6, d[5]) != 0)
+        {
+          net->late_len = len;
+          memcpy (net->late, d, len);
+        }
+    }
   if (dest == NULL || (net->loss_pct && rnd (net) % 100 < net->loss_pct))
     {
       net->dropped++;
@@ -897,6 +918,37 @@ test_idle_timeouts (void)
   net_free (net);
 }
 
+/* An Initial for a connection ID the server chose for a connection that has
+   since gone is a late packet of that connection, not a new client: taking
+   it for one would make a connection that can never decrypt it, claiming
+   the old ID, until it idled out.  */
+static void
+test_late_initial (void)
+{
+  struct net *net = net_new (NULL, 13, NULL);
+  struct capp *a;
+  gq_path from;
+  int accepted, i;
+
+  a = client_conn (net, 1, NULL);
+  CHECK (run (net, all_clients_done, 60000000));
+  CHECK (net->late_len >= 1200);
+  CHECK_EQ (net->node[0].accepted, 1);
+  gq_conn_close (a->c, net->now, 1, 0, "done");
+  for (i = 0; i < 20 && gq_endpoint_connections (net->node[0].ep); i++)
+    run (net, NULL, 500000);
+  CHECK_EQ (gq_endpoint_connections (net->node[0].ep), 0);
+  accepted = net->node[0].accepted;
+  memset (&from, 0, sizeof from);
+  from.local = net->node[0].addr;
+  from.remote = net->node[1].ext;
+  gq_endpoint_recv (net->node[0].ep, net->now, &from, net->late,
+                    net->late_len);
+  CHECK_EQ (net->node[0].accepted, accepted);
+  CHECK_EQ (gq_endpoint_connections (net->node[0].ep), 0);
+  net_free (net);
+}
+
 /* The client's address changes (a NAT rebinding): the server endpoint finds
    the connection by ID, not address, and the connection follows.  */
 static void
@@ -958,6 +1010,7 @@ main (void)
   test_limits_and_refusal ();
   test_idle_timeouts ();
   test_rebinding_through_endpoint ();
+  test_late_initial ();
   TST_DONE ();
 }
 

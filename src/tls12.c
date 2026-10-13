@@ -36,10 +36,12 @@
 #define TRY(expr) do { int r_ = (expr); if (r_ != GQ_OK) return r_; } while (0)
 
 /* Certificate types we can sign with, in preference order.  RSA is signed
-   with PKCS#1 v1.5 only; RSA-PSS is verified but never produced.  */
+   with PKCS#1 v1.5 only; RSA-PSS is verified but never produced.  A key
+   makes only one kind, so the order matters only to the peer's list.  */
 static const uint16_t sign_pref[] = {
   GQ_SIG_ECDSA_SECP256R1_SHA256,
   GQ_SIG_ECDSA_SECP384R1_SHA384,
+  GQ_SIG_ED25519,
   GQ_SIG_RSA_PKCS1_SHA256,
   GQ_SIG_RSA_PKCS1_SHA384,
   GQ_SIG_RSA_PKCS1_SHA512
@@ -50,6 +52,7 @@ static const uint16_t sign_pref[] = {
 static const uint16_t cert_sigs[] = {
   GQ_SIG_ECDSA_SECP256R1_SHA256,
   GQ_SIG_ECDSA_SECP384R1_SHA384,
+  GQ_SIG_ED25519,
   GQ_SIG_RSA_PKCS1_SHA256,
   GQ_SIG_RSA_PKCS1_SHA384,
   GQ_SIG_RSA_PKCS1_SHA512
@@ -127,6 +130,12 @@ ok_suite (unsigned s)
 }
 
 static int
+ok_group (unsigned g)
+{
+  return gq_policy_allows_group_for (GQ_TLS_1_2, g);
+}
+
+static int
 ok_sig (unsigned s)
 {
   return gq_policy_allows_sigscheme (GQ_TLS_1_2, s)
@@ -136,7 +145,8 @@ ok_sig (unsigned s)
 /* Apply the TLS 1.2 policy (and the defaults) to the preference lists.  */
 void
 g12_filter (gq_tls12 *t, const uint16_t *suites, size_t n_suites,
-            const uint16_t *sigs, size_t n_sigs)
+            const uint16_t *sigs, size_t n_sigs, const uint16_t *groups,
+            size_t n_groups)
 {
   const uint16_t *l;
   size_t n;
@@ -147,6 +157,16 @@ g12_filter (gq_tls12 *t, const uint16_t *suites, size_t n_suites,
   l = sigs ? sigs : gq_policy_default_sigschemes_for (GQ_TLS_1_2, &n);
   n = sigs ? n_sigs : n;
   filter_list (t->sigs, &t->n_sigs, T12_MAX_SIGS, l, n, ok_sig);
+  /* Groups of the configuration that TLS 1.2 cannot do (the hybrid ones)
+     are dropped; a list left with nothing means the defaults.  */
+  if (groups)
+    filter_list (t->groups, &t->n_groups, T12_MAX_GROUPS, groups, n_groups,
+                 ok_group);
+  if (t->n_groups == 0)
+    {
+      l = gq_policy_default_groups_for (GQ_TLS_1_2, &n);
+      filter_list (t->groups, &t->n_groups, T12_MAX_GROUPS, l, n, ok_group);
+    }
 }
 
 static int
@@ -231,7 +251,7 @@ g12_gen_kx (gq_tls12 *t)
 {
   int r;
 
-  unsigned group = t->kx_group ? t->kx_group : GQ_GROUP_SECP256R1;
+  unsigned group = t->kx_group;
 
   if (t->cfg.hooks.kx_generate)
     r = t->cfg.hooks.kx_generate (t->cfg.hooks.user, group,
@@ -348,7 +368,8 @@ g12_complete (gq_tls12 *t)
 {
   t->st = S12_DONE;
   t->info.cipher_suite = t->suite;
-  t->info.group = t->kx_group ? t->kx_group : GQ_GROUP_SECP256R1;
+  /* None on resumption: there was no key exchange.  */
+  t->info.group = t->resumed ? 0 : t->kx_group;
   t->info.resumed = t->resumed;
   t->info.client_auth_sent = t->server ? t->client_verified
                                        : t->info.client_auth_sent;
@@ -445,7 +466,7 @@ gq_tls12_client_new (gq_tls12 **out, const gq_tls_config *cfg,
     t->cfg.max_message_len = 65536;
   t->offered = cfg->resume;
   g12_filter (t, cfg->suites, cfg->n_suites, cfg->sigschemes,
-              cfg->n_sigschemes);
+              cfg->n_sigschemes, cfg->groups, cfg->n_groups);
   if (t->n_suites == 0 || t->n_sigs == 0)
     {
       free (t);
@@ -519,6 +540,8 @@ send_ch (gq_tls12 *t)
   p.session_id = sid;
   p.suites = t->suites;
   p.n_suites = t->n_suites;
+  p.groups = t->groups;
+  p.n_groups = t->n_groups;
   p.server_name = t->cfg.server_name;
   p.alpn = t->cfg.alpn;
   p.n_alpn = t->cfg.n_alpn;
@@ -553,7 +576,7 @@ gq_tls12_client_offer (const gq_tls_config *cfg, uint16_t *suites,
   if (t == NULL)
     return GQ_ERR_NOMEM;
   g12_filter (t, cfg->suites, cfg->n_suites, cfg->sigschemes,
-              cfg->n_sigschemes);
+              cfg->n_sigschemes, cfg->groups, cfg->n_groups);
   memcpy (suites, t->suites, t->n_suites * sizeof t->suites[0]);
   *n_suites = t->n_suites;
   memcpy (sigs, t->sigs, t->n_sigs * sizeof t->sigs[0]);
@@ -565,7 +588,9 @@ gq_tls12_client_offer (const gq_tls_config *cfg, uint16_t *suites,
 int
 gq_tls12_client_adopt (gq_tls12 *t, const uint8_t *hello, size_t len)
 {
-  size_t sid;
+  size_t sid, i;
+  gq_client_hello ch;
+  gq_slice v, list;
 
   if (t == NULL || t->server || t->st != S12_NEW || hello == NULL
       || len < 4 + 2 + 32 + 1 || hello[0] != GQ_HS_CLIENT_HELLO)
@@ -573,6 +598,35 @@ gq_tls12_client_adopt (gq_tls12 *t, const uint8_t *hello, size_t len)
   sid = hello[38];
   if (sid > 32 || 39 + sid > len)
     return GQ_ERR_INVAL;
+  if (gq_client_hello_parse ((gq_slice) { hello + 4, len - 4 }, &ch) != GQ_OK)
+    return GQ_ERR_INVAL;
+  /* What a server may sign with is what that hello listed, within what
+     TLS 1.2 can do.  */
+  if (gq_ext_find (ch.extensions, GQ_EXT_SIGNATURE_ALGORITHMS, &v)
+      && gq_list_u16 (v, 2, &list) == GQ_OK)
+    {
+      size_t keep = 0;
+
+      for (i = 0; i < t->n_sigs; i++)
+        if (gq_u16_contains (list, t->sigs[i]))
+          t->sigs[keep++] = t->sigs[i];
+      t->n_sigs = keep;
+    }
+  /* The groups of that hello which we can do bound what a TLS 1.2 server
+     may pick, as they do for a hello of our own.  Those are the ones of
+     the wide ServerKeyExchange parser.  */
+  t->n_groups = 0;
+  if (gq_ext_find (ch.extensions, GQ_EXT_SUPPORTED_GROUPS, &v)
+      && gq_list_u16 (v, 2, &list) == GQ_OK)
+    for (i = 0; i < gq_u16_count (list); i++)
+      {
+        unsigned g = gq_u16_at (list, i);
+
+        if ((g == GQ_GROUP_SECP256R1 || g == GQ_GROUP_X25519
+             || g == GQ_GROUP_SECP384R1)
+            && !g12_in_list (t->groups, t->n_groups, g))
+          t->groups[t->n_groups++] = (uint16_t) g;
+      }
   memcpy (t->client_random, hello + 6, 32);
   memcpy (t->sid, hello + 39, sid);
   t->sid_len = sid;
@@ -854,6 +908,9 @@ c_on_server_key_exchange (gq_tls12 *t, gq_slice msg, gq_slice body)
 
   if (r != GQ_OK)
     return g12_fail_parse (t, r);
+  /* The server picks from the groups we offered (RFC 8422 section 5.1.1).  */
+  if (!g12_in_list (t->groups, t->n_groups, ske.group))
+    return g12_fail (t, GQ_ALERT_ILLEGAL_PARAMETER, GQ_ERR_PROTOCOL);
   /* The scheme must be one we offered, and fit the suite's key type.  */
   if (!g12_in_list (t->sigs, t->n_sigs, ske.scheme))
     return g12_fail (t, GQ_ALERT_ILLEGAL_PARAMETER, GQ_ERR_PROTOCOL);

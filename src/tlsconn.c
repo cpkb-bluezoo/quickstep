@@ -411,7 +411,12 @@ on_record (void *u, unsigned type, const uint8_t *data, size_t len)
           finish (c, 0, GQ_ALERT_CLOSE_NOTIFY);
           return 1;
         }
-      /* Everything else ends the connection (RFC 8446 section 6).  */
+      /* user_canceled is a closure alert that should be followed by
+         close_notify: keep reading until it comes (RFC 8446 section 6.1).  */
+      if (data[1] == GQ_ALERT_USER_CANCELED)
+        return 0;
+      /* Everything else ends the connection, whatever the level field says
+         (RFC 8446 section 6).  */
       c->close_sent = 1;
       finish (c, GQ_ERR_PROTOCOL, data[1]);
       return 1;
