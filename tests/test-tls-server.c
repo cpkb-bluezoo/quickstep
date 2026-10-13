@@ -435,6 +435,108 @@ test_basic (size_t chunk)
   pair_free (p);
 }
 
+/* ---- Key log ---- */
+
+struct keylog
+{
+  char line[8][512];
+  int n;
+};
+
+static void
+keylog_line (void *u, const char *line)
+{
+  struct keylog *k = u;
+
+  if (k->n < 8)
+    snprintf (k->line[k->n], sizeof k->line[0], "%s", line);
+  k->n++;
+}
+
+/* The secret of the line with this label, checked against what the engine
+   handed its sink; the ClientHello random is returned for comparison.  */
+static int
+keylog_has (const struct keylog *k, const char *label, const gq_tls_secret *s,
+            char random[65])
+{
+  int i;
+  size_t l = strlen (label);
+
+  for (i = 0; i < k->n && i < 8; i++)
+    if (strncmp (k->line[i], label, l) == 0 && k->line[i][l] == ' ')
+      {
+        const char *r = k->line[i] + l + 1, *sec = strchr (r, ' ');
+
+        if (sec == NULL || sec - r != 64)
+          return 0;
+        memcpy (random, r, 64);
+        random[64] = 0;
+        return tst_eq_hex (s->secret, s->len, sec + 1);
+      }
+  return 0;
+}
+
+static void
+test_keylog (int hrr)
+{
+  struct pair *p = pair_new ();
+  struct keylog ck, sk;
+  static const uint16_t only_p384[] = { GQ_GROUP_SECP384R1 };
+  char cr[65], sr[65];
+  int i, n;
+
+  memset (&ck, 0, sizeof ck);
+  memset (&sk, 0, sizeof sk);
+  p->cc.keylog = keylog_line;
+  p->cc.keylog_user = &ck;
+  p->sc.keylog = keylog_line;
+  p->sc.keylog_user = &sk;
+  if (hrr)
+    {
+      p->sc.groups = only_p384;
+      p->sc.n_groups = 1;
+    }
+  pair_create (p);
+  CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+  CHECK_EQ (pump (p, 0), GQ_OK);
+  check_success (p);
+
+  /* Four secrets each, the same four lines at both ends.  */
+  CHECK_EQ (ck.n, 4);
+  CHECK_EQ (sk.n, 4);
+  for (i = 0; i < ck.n; i++)
+    {
+      int j, found = 0;
+
+      for (j = 0; j < sk.n; j++)
+        found |= strcmp (ck.line[i], sk.line[j]) == 0;
+      CHECK (found);
+    }
+  CHECK (keylog_has (&ck, "CLIENT_HANDSHAKE_TRAFFIC_SECRET",
+                     find (&p->c, GQ_LEVEL_HANDSHAKE, GQ_DIR_WRITE), cr));
+  CHECK (keylog_has (&ck, "SERVER_HANDSHAKE_TRAFFIC_SECRET",
+                     find (&p->c, GQ_LEVEL_HANDSHAKE, GQ_DIR_READ), cr));
+  CHECK (keylog_has (&ck, "CLIENT_TRAFFIC_SECRET_0",
+                     find (&p->c, GQ_LEVEL_APPLICATION, GQ_DIR_WRITE), cr));
+  CHECK (keylog_has (&ck, "SERVER_TRAFFIC_SECRET_0",
+                     find (&p->c, GQ_LEVEL_APPLICATION, GQ_DIR_READ), cr));
+  CHECK (keylog_has (&sk, "CLIENT_TRAFFIC_SECRET_0",
+                     find (&p->s, GQ_LEVEL_APPLICATION, GQ_DIR_READ), sr));
+  CHECK (strcmp (cr, sr) == 0);
+
+  /* The random is the one in the ClientHello, which the server saw: it
+     is not the server's own.  */
+  CHECK (memcmp (cr, "0000000000000000", 16) != 0);
+
+  /* A key update changes the secrets but adds no lines.  */
+  n = ck.n;
+  CHECK_EQ (gq_tls_key_update (p->c.tls, 1), GQ_OK);
+  CHECK_EQ (pump (p, 0), GQ_OK);
+  CHECK_EQ (ck.n, n);
+  CHECK_EQ (sk.n, n);
+  pair_free (p);
+}
+
 static void
 test_hrr (int cookie)
 {
@@ -1564,6 +1666,8 @@ main (void)
   test_basic (17);
   test_hrr (0);
   test_hrr (1);
+  test_keylog (0);
+  test_keylog (1);
   test_preferences ();
   test_sni_credentials ();
   test_alpn_and_quic ();

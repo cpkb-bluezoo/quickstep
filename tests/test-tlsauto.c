@@ -281,8 +281,6 @@ one_run (enum kind client, unsigned client_versions, unsigned server_versions,
       bytes_add (&first_server, s.out.p, s.out.n);
   }
   pump (&c, &s, chunk);
-  if (first_server.n && !s.out.n)
-    ;
   if (want_version == 0)
     {
       CHECK (c.closed && s.closed);

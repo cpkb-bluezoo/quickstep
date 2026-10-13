@@ -144,6 +144,7 @@ struct gq_tls
 
   gq_tls_info info;
   int alert;
+  unsigned keylogged;			/* Bit per (level, dir) already logged.  */
 };
 
 

@@ -236,6 +236,11 @@ test_weak_rsa (void)
 static void
 test_mldsa_size (void)
 {
+#if !(HAVE_DECL_GNUTLS_PK_MLDSA65 && HAVE_DECL_GNUTLS_SIGN_MLDSA65)
+  /* A GnuTLS without ML-DSA: nothing offers it.  */
+  CHECK (GQ_SIGNATURE_MAX >= 4627);
+  CHECK (!gq_sigscheme_available (GQ_SIG_MLDSA65));
+#else
   static const struct
   {
     unsigned scheme;
@@ -276,6 +281,7 @@ test_mldsa_size (void)
       gnutls_free (pem.data);
       gnutls_x509_privkey_deinit (key);
     }
+#endif
 }
 
 int

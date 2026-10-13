@@ -20,6 +20,7 @@
 # include <config.h>
 #endif
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -104,6 +105,52 @@ gqi_emit (gq_tls *t, enum gq_level level, const uint8_t *data, size_t len)
   return GQ_OK;
 }
 
+/* Report a secret to the key log, in the NSS format.  Only the first
+   secret of each level and direction is logged: a KeyUpdate's secret is
+   derived from it by whoever reads the log.  */
+static void
+keylog_secret (gq_tls *t, enum gq_level level, enum gq_dir dir,
+               const uint8_t *secret, size_t len)
+{
+  static const char hex[] = "0123456789abcdef";
+  const char *label = NULL;
+  const uint8_t *random;
+  unsigned bit = 1u << ((unsigned) level * 2 + (unsigned) dir);
+  int from_client = (t->role == ROLE_CLIENT) == (dir == GQ_DIR_WRITE);
+  char line[64 + 2 * 32 + 2 * GQ_MAX_HASH_LEN + 8], *p = line;
+  size_t i;
+
+  if (t->cfg.keylog == NULL || (t->keylogged & bit))
+    return;
+  t->keylogged |= bit;
+  if (level == GQ_LEVEL_EARLY)
+    label = "CLIENT_EARLY_TRAFFIC_SECRET";
+  else if (level == GQ_LEVEL_HANDSHAKE)
+    label = from_client ? "CLIENT_HANDSHAKE_TRAFFIC_SECRET"
+                        : "SERVER_HANDSHAKE_TRAFFIC_SECRET";
+  else if (level == GQ_LEVEL_APPLICATION)
+    label = from_client ? "CLIENT_TRAFFIC_SECRET_0"
+                        : "SERVER_TRAFFIC_SECRET_0";
+  if (label == NULL)
+    return;
+  random = t->role == ROLE_CLIENT ? t->random : t->ch_random;
+  p += sprintf (p, "%s ", label);
+  for (i = 0; i < 32; i++)
+    {
+      *p++ = hex[random[i] >> 4];
+      *p++ = hex[random[i] & 15];
+    }
+  *p++ = ' ';
+  for (i = 0; i < len; i++)
+    {
+      *p++ = hex[secret[i] >> 4];
+      *p++ = hex[secret[i] & 15];
+    }
+  *p = 0;
+  t->cfg.keylog (t->cfg.keylog_user, line);
+  gq_wipe (line, sizeof line);
+}
+
 int
 gqi_emit_secret (gq_tls *t, enum gq_level level, enum gq_dir dir,
              const uint8_t *secret)
@@ -118,6 +165,7 @@ gqi_emit_secret (gq_tls *t, enum gq_level level, enum gq_dir dir,
   s.hash = t->hash;
   s.len = t->hlen;
   memcpy (s.secret, secret, t->hlen);
+  keylog_secret (t, level, dir, secret, t->hlen);
   r = t->sink.secret (t->sink.user, &s);
   gq_wipe (&s, sizeof s);
   return r ? gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_HANDLER) : GQ_OK;
@@ -140,6 +188,7 @@ gqi_emit_secret_as (gq_tls *t, enum gq_level level, enum gq_dir dir,
   s.hash = hash;
   s.len = gq_hash_size (hash);
   memcpy (s.secret, secret, s.len);
+  keylog_secret (t, level, dir, secret, s.len);
   r = t->sink.secret (t->sink.user, &s);
   gq_wipe (&s, sizeof s);
   return r ? gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_HANDLER) : GQ_OK;
@@ -580,8 +629,10 @@ send_ch (gq_tls *t, int second)
       uint8_t th[GQ_MAX_HASH_LEN], sec[GQ_MAX_HASH_LEN];
       gq_ks ks;
 
-      gqi_suite_params (o->cipher_suite, &a, &h);
-      r = gq_hash_compute (h, buf, w.len, th, o->psk_len);
+      /* A session is offered only with a suite we offer; check anyway.  */
+      r = gqi_suite_params (o->cipher_suite, &a, &h) ? GQ_OK : GQ_ERR_INVAL;
+      if (r == GQ_OK)
+        r = gq_hash_compute (h, buf, w.len, th, o->psk_len);
       if (r == GQ_OK)
         r = gq_ks_early_v (&ks, h, o->psk, o->psk_len, t->dtls);
       if (r == GQ_OK)

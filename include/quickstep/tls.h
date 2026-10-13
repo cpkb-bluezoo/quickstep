@@ -287,6 +287,16 @@ typedef struct gq_tls_config
   /* Largest handshake message body accepted.  0 selects 65536.  */
   size_t max_message_len;
   gq_tls_hooks hooks;
+  /* Key log: if set, called with one line (no newline) of the NSS key log
+     format for each secret that Wireshark and similar tools need to decrypt
+     a capture: CLIENT_EARLY_TRAFFIC_SECRET, CLIENT_HANDSHAKE_TRAFFIC_SECRET,
+     SERVER_HANDSHAKE_TRAFFIC_SECRET, CLIENT_TRAFFIC_SECRET_0 and
+     SERVER_TRAFFIC_SECRET_0, each followed by the ClientHello random and
+     the secret in hex.  Later traffic secrets (key updates) are not logged;
+     the tools derive them.  This writes secrets in the clear: it is for
+     debugging and interoperability testing, never for production.  */
+  void (*keylog) (void *user, const char *line);
+  void *keylog_user;
 } gq_tls_config;
 
 /* Credentials a server presents: a DER chain (leaf first) and the private
@@ -377,6 +387,9 @@ typedef struct gq_tls_server_config
      stateless cookie of dtlscookie.h is used instead).  */
   int dtls;
   gq_tls_hooks hooks;
+  /* Key log, as gq_tls_config.keylog.  */
+  void (*keylog) (void *user, const char *line);
+  void *keylog_user;
 } gq_tls_server_config;
 
 /* What a DTLS server that answered ClientHello1 statelessly (with a

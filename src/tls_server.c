@@ -84,6 +84,8 @@ gq_tls_server_new (gq_tls **out, const gq_tls_server_config *cfg,
   t->cfg.transport_params_len = cfg->transport_params_len;
   t->cfg.trust = cfg->client_trust;
   t->cfg.hooks = cfg->hooks;
+  t->cfg.keylog = cfg->keylog;
+  t->cfg.keylog_user = cfg->keylog_user;
   t->cfg.max_message_len = cfg->max_message_len ? cfg->max_message_len : 65536;
 
   gqi_filter_lists (t, cfg->suites, cfg->n_suites, cfg->groups, cfg->n_groups,

@@ -40,22 +40,36 @@ INTEROP_PROGS += wolf-dtls
 endif
 endif
 
+# The endpoint for the quic-interop-runner (quic-interop-runner/README.md),
+# built here so that it is always compiled and linted; the container image
+# builds it with "make -C tests quic-interop-endpoint".  Its test needs
+# openssl only.
+if HAVE_GNUTLS
+INTEROP += quic-interop-runner/smoke.sh
+INTEROP_PROGS += quic-interop-endpoint
+endif
+
 TESTS = $(UNIT_TESTS) $(INTEROP)
 check_PROGRAMS = $(UNIT_TESTS) $(INTEROP_PROGS)
 TESTS_ENVIRONMENT = INTEROP_CLIENT=./interop-client; export INTEROP_CLIENT; \
   INTEROP_SERVER=./interop-server; export INTEROP_SERVER; \
   INTEROP_DTLS=./interop-dtls; export INTEROP_DTLS; \
   INTEROP_QUIC=./interop-quic; export INTEROP_QUIC; \
+  QUIC_INTEROP_ENDPOINT=./quic-interop-endpoint; export QUIC_INTEROP_ENDPOINT; \
   WOLF_DTLS=./wolf-dtls; export WOLF_DTLS;
 
 # It uses the library's internals, which a shared library does not export.
 test_conn_int_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
 test_conn_int_LDFLAGS = -static
 
+quic_interop_endpoint_SOURCES = quic-interop-runner/endpoint.c
 wolf_dtls_SOURCES = wolf-dtls.c
 interop_dtls_SOURCES = interop-dtls.c
 interop_quic_SOURCES = interop-quic.c
 wolf_dtls_CFLAGS = $(AM_CFLAGS) $(WOLFSSL_CFLAGS)
 wolf_dtls_LDADD = $(WOLFSSL_LIBS)
 
-EXTRA_DIST = interop-quic.sh interop-dtls.sh interop-dtls12.sh interop.sh interop-util.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h
+EXTRA_DIST = quic-interop-runner/smoke.sh quic-interop-runner/README.md \
+  quic-interop-runner/Dockerfile quic-interop-runner/run_endpoint.sh \
+  quic-interop-runner/ack_stats.py quic-interop-runner/dump_frames.py \
+  interop-quic.sh interop-dtls.sh interop-dtls12.sh interop.sh interop-util.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h

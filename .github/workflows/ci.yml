@@ -1,0 +1,23 @@
+name: CI
+
+# Builds quickstep with gcc, warnings as errors, and runs the test suite.
+# Both happen in the build stages of the interop endpoint's Dockerfile
+# (tests/quic-interop-runner/Dockerfile), which also builds the libgcrypt
+# that quickstep needs and Ubuntu 24.04 does not have: one definition of the
+# build, used here and for the image the interop workflow runs.
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  gcc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build and test with gcc
+        run: docker build --target check -f tests/quic-interop-runner/Dockerfile .

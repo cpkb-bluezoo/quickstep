@@ -60,6 +60,7 @@ Makefile
 /tests/interop-server
 /tests/interop-dtls
 /tests/interop-quic
+/tests/quic-interop-endpoint
 /tests/wolf-dtls
 
 # Manual: built by "make info", "make pdf", "make html"

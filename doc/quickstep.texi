@@ -283,7 +283,11 @@ and GnuTLS), @file{tests/interop-dtls.sh} and @file{tests/interop-dtls12.sh}
 (DTLS against wolfSSL, OpenSSL and GnuTLS) and @file{tests/interop-quic.sh}
 (QUIC against quiche: handshakes, loss, Retry, Version Negotiation, key
 update, migration, DATAGRAM, 0-RTT and concurrent clients, both
-directions).  Scripts skip themselves (exit 77) when their peers are
+directions).  @file{tests/quic-interop-runner/} holds an endpoint for the
+@uref{https://github.com/quic-interop/quic-interop-runner, QUIC interop
+runner}, with the image and the GitHub Actions workflow that run it
+against other implementations; @command{make check} runs it against itself
+over loopback.  Scripts skip themselves (exit 77) when their peers are
 missing; set @env{GQ_NO_INTEROP} to skip them, @env{GQ_INTEROP_FILTER} to
 run scenarios whose names contain a string, and @env{QUICHE_DIR} to name
 the directory holding @command{quiche-client} and @command{quiche-server}.
@@ -1259,7 +1263,7 @@ Gaps found by comparing with Gumdrop and Hopf: certificate compression
 (RFC 9849) including rotation and DTLS; ML-DSA signatures once a backend
 has them; QUIC keep-alive PING; a streams-available event when
 MAX_STREAMS raises the limit; DPLPMTUD; pacing, ECN and segmentation
-offload; the server's preferred_address; a key log hook; caching AEAD
+offload; the server's preferred_address; qlog; caching AEAD
 handles for speed; asynchronous crypto offload; and a DANE/TLSA verifier.
 Whether to send Retry by default is also open.
 @end itemize

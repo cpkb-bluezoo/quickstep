@@ -225,7 +225,9 @@ alarm_handler (int sig)
   (void) sig;
   static const char m[] = "result=fail reason=timeout\n";
 
-  (void) write (1, m, sizeof m - 1);
+  ssize_t w = write (1, m, sizeof m - 1);
+
+  (void) w;			/* If it failed, the exit status is the report.  */
   _exit (1);
 }
 

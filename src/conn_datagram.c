@@ -65,7 +65,7 @@ datagrams_free (gq_conn *c)
 size_t
 gq_conn_datagram_max (const gq_conn *c)
 {
-  uint64_t peer, room;
+  uint64_t peer, room, overhead;
 
   if (!c->have_peer_tp)
     return 0;
@@ -74,8 +74,9 @@ gq_conn_datagram_max (const gq_conn *c)
     return 0;
   /* One packet: a short header, the frame type and a two byte length.  */
   room = conn_max_datagram (c);
-  room = room > 1 + c->dcid.len + 4 + GQ_AEAD_TAG_LEN + 1 + 2
-         ? room - (1 + c->dcid.len + 4 + GQ_AEAD_TAG_LEN + 1 + 2) : 0;
+  overhead = (uint64_t) 1 + (uint64_t) c->dcid.len + 4 + GQ_AEAD_TAG_LEN
+             + 1 + 2;
+  room = room > overhead ? room - overhead : 0;
   /* The peer's limit counts the whole frame.  */
   peer = peer > 3 ? peer - 3 : 0;
   return (size_t) (peer < room ? peer : room);

@@ -52,6 +52,13 @@ struct gq_privkey
 };
 
 /* Policy scheme to GnuTLS signature algorithm.  */
+/* Older GnuTLS has no ML-DSA: its enumerators are missing (configure.ac).  */
+#if HAVE_DECL_GNUTLS_PK_MLDSA65 && HAVE_DECL_GNUTLS_SIGN_MLDSA65
+# define GQ_GNUTLS_MLDSA 1
+#else
+# define GQ_GNUTLS_MLDSA 0
+#endif
+
 static gnutls_sign_algorithm_t
 sign_algo (unsigned scheme)
 {
@@ -66,9 +73,11 @@ sign_algo (unsigned scheme)
     case GQ_SIG_RSA_PSS_RSAE_SHA384:    return GNUTLS_SIGN_RSA_PSS_RSAE_SHA384;
     case GQ_SIG_RSA_PSS_RSAE_SHA512:    return GNUTLS_SIGN_RSA_PSS_RSAE_SHA512;
     case GQ_SIG_ED25519:                return GNUTLS_SIGN_EDDSA_ED25519;
+#if GQ_GNUTLS_MLDSA
     case GQ_SIG_MLDSA44:                return GNUTLS_SIGN_MLDSA44;
     case GQ_SIG_MLDSA65:                return GNUTLS_SIGN_MLDSA65;
     case GQ_SIG_MLDSA87:                return GNUTLS_SIGN_MLDSA87;
+#endif
     default:                            return GNUTLS_SIGN_UNKNOWN;
     }
 }
@@ -93,12 +102,14 @@ key_fits (unsigned pk, unsigned bits, unsigned scheme)
       return pk == GNUTLS_PK_RSA && bits >= MIN_RSA_BITS;
     case GQ_SIG_ED25519:
       return pk == GNUTLS_PK_EDDSA_ED25519;
+#if GQ_GNUTLS_MLDSA
     case GQ_SIG_MLDSA44:
       return pk == GNUTLS_PK_MLDSA44;
     case GQ_SIG_MLDSA65:
       return pk == GNUTLS_PK_MLDSA65;
     case GQ_SIG_MLDSA87:
       return pk == GNUTLS_PK_MLDSA87;
+#endif
     default:
       return 0;
     }
@@ -129,32 +140,40 @@ datum_of (const void *p, size_t n)
   return d;
 }
 
+#if GQ_GNUTLS_MLDSA
+/* Ask the backend for an ML-DSA-65 key, once; it fails if unimplemented.  */
+static int
+mldsa_usable (void)
+{
+  static int probed, ok;
+  gnutls_x509_privkey_t k;
+
+  if (!probed)
+    {
+      ok = 0;
+      if (gnutls_x509_privkey_init (&k) >= 0)
+        {
+          ok = gnutls_x509_privkey_generate (k, GNUTLS_PK_MLDSA65, 0, 0) >= 0;
+          gnutls_x509_privkey_deinit (k);
+        }
+      probed = 1;
+    }
+  return ok;
+}
+#else
+static int
+mldsa_usable (void)
+{
+  return 0;
+}
+#endif
+
 int
 gq_sigscheme_available (unsigned scheme)
 {
-  static int mldsa_probed, mldsa_ok;
-  gnutls_pk_algorithm_t pk;
-  gnutls_x509_privkey_t k;
-  int r;
-
   if (!allowed_any (scheme))
     return 0;
-  if (!is_mldsa (scheme))
-    return 1;
-  if (!mldsa_probed)
-    {
-      /* Ask the backend for an ML-DSA-65 key; it fails if unimplemented.  */
-      pk = GNUTLS_PK_MLDSA65;
-      mldsa_ok = 0;
-      if (gnutls_x509_privkey_init (&k) >= 0)
-        {
-          r = gnutls_x509_privkey_generate (k, pk, 0, 0);
-          mldsa_ok = r >= 0;
-          gnutls_x509_privkey_deinit (k);
-        }
-      mldsa_probed = 1;
-    }
-  return mldsa_ok;
+  return is_mldsa (scheme) ? mldsa_usable () : 1;
 }
 
 int
