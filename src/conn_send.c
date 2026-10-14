@@ -732,7 +732,9 @@ static size_t
 hdr_len_for (const gq_conn *c, int sp, int early, size_t payload_len,
              size_t pn_len, uint64_t pn)
 {
-  uint8_t tmp[128];
+  /* The longest long header: both connection IDs at 20 bytes, a token of
+     512 (the most conn_int.h keeps), the lengths and the packet number.  */
+  uint8_t tmp[1 + 4 + 1 + 20 + 1 + 20 + 2 + 512 + 8 + 4];
   size_t h = 0;
 
   if (sp == SP_APP && !early)

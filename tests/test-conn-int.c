@@ -586,6 +586,72 @@ test_server_first_flight_padded (void)
   pair_free (p);
 }
 
+/* The first datagram a server sends to a client's new address (RFC 9000
+   section 9.3) carries the PATH_CHALLENGE, even when the packets it has in
+   flight, all lost with the old address, fill the congestion window.  Only
+   an ack-eliciting packet could carry it, so it used to wait for loss
+   detection to make room, and an ACK-only packet (the answer to the
+   client's PING) went first.  */
+struct first_to
+{
+  const gq_addr *ext;
+  int seen, challenged;
+  gq_conn *srv;
+};
+
+static void
+first_to_tap (struct net *n, int from, const gq_path *to, void *user)
+{
+  struct first_to *f = user;
+
+  (void) n;
+  if (from != 1 || to == NULL || f->seen || !addr_same (&to->remote, f->ext))
+    return;
+  f->seen = 1;
+  /* The challenge was written into this very datagram if the path's count
+     of challenges sent is not zero.  */
+  f->challenged = f->srv->paths[f->srv->cur_path].chal_sent > 0;
+}
+
+static void
+test_challenge_first_on_new_path (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  struct sbuf *s;
+  struct first_to f;
+  int i, k = 0;
+
+  memset (&cfg, 0, sizeof cfg);
+  p = pair_new_paths (&cfg, &cfg, 130);
+  settle (p);
+  s = start_transfer (p, 40000000);
+  run (&p->net, NULL, 400000);
+  CHECK (!s->fin && s->n > 0);
+  memset (&f, 0, sizeof f);
+  f.ext = &p->net.m[3].ext;
+  f.srv = p->srv.c;
+  p->net.tap = first_to_tap;
+  p->net.tap_user = &f;
+  p->net.out_map[0] = 3;
+  p->net.m[3].alive_in = 1;
+  p->net.m[0].alive_in = 0;
+  /* What the server had sent to the old address and not yet delivered is
+     lost with it: its window stays full of packets that will never be
+     acknowledged.  */
+  for (i = 0; i < p->net.nq; i++)
+    if (p->net.q[i].to == 1)
+      p->net.q[k++] = p->net.q[i];
+  p->net.nq = k;
+  /* The client probes with a PING, which the server answers at once.  */
+  p->cli.c->sp[SP_APP].probes = 1;
+  CHECK (run (&p->net, transfer_done, 60000000));
+  CHECK (f.seen);
+  CHECK (f.challenged);
+  CHECK_EQ (s->n, 40000000);
+  pair_free (p);
+}
+
 int
 main (void)
 {
@@ -605,6 +671,7 @@ main (void)
   test_persistent_congestion_over_several_rounds ();
   test_stream_frames_after_the_end ();
   test_server_first_flight_padded ();
+  test_challenge_first_on_new_path ();
   TST_DONE ();
 }
 

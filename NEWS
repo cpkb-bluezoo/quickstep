@@ -13,6 +13,17 @@ quickstep.pc.  The C API (gq_ / GQ_) is unchanged.
 * Noteworthy changes in development (unreleased)
 
 ** Initial development.
+** A client can send a token of up to 512 bytes in its Initial packets.  A
+token over 100 bytes (quic-go's Retry token is about 110) overflowed a
+buffer in the length calculation of the packet header, so the first flight
+after such a Retry could not be built and the connection failed with
+"cannot build packet".
+** A server that moves to a new peer address (RFC 9000 section 9.3) now
+sends the PATH_CHALLENGE in the first packet to it.  The congestion window
+can be full of packets lost with the old address, and only an ack-eliciting
+packet carries a challenge, so an ACK-only packet used to go first and the
+challenge waited for loss detection; the path switch now grants a probe
+packet, which the window does not bar.
 ** TLS key log: gq_tls_config.keylog and gq_tls_server_config.keylog take a
 callback that receives each handshake secret as a line of the NSS key log
 format (CLIENT_HANDSHAKE_TRAFFIC_SECRET and the rest, for QUIC and TLS 1.3

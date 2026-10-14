@@ -439,6 +439,13 @@ conn_path_after_packet (gq_conn *c, uint64_t now, int nonprobing, int highest)
       && !c->paths[idx].need_challenge)
     start_validation (c, &c->paths[idx], now);
   switch_to (c, idx);
+  /* What is in flight went to the old address and may never be
+     acknowledged, so the window the new path starts with can be full
+     before it has sent anything.  The challenge must still be the first
+     thing it gets (RFC 9000 section 9.3), and only an ack-eliciting
+     packet carries one: send a probe, which the window does not bar.  */
+  if (c->paths[idx].need_challenge && c->sp[SP_APP].probes == 0)
+    c->sp[SP_APP].probes = 1;
 }
 
 void

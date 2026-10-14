@@ -125,6 +125,10 @@ struct net
     uint64_t to_bytes, from_bytes;	/* Seen at the server side.  */
   } m[6];
   int out_map[3];
+  /* Called for every datagram a connection sends, with the path it is for
+     (NULL without path simulation), before the network sees it.  */
+  void (*tap) (struct net *, int from, const gq_path *to, void *user);
+  void *tap_user;
   int hold;			/* Stash datagrams to EXT-0 instead of sending.  */
   struct pkt *held[8];
   int n_held;
@@ -449,6 +453,8 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len,
   int has_from = 0;
 
   memset (&src, 0, sizeof src);
+  if (n->tap)
+    n->tap (n, from, n->paths ? to : NULL, n->tap_user);
   if (n->paths && to)
     {
       int i, j;
@@ -1072,6 +1078,33 @@ test_tokens (void)
   exchange (q);
   CHECK (q->net.replies >= 1);
   pair_free (q);
+}
+
+/* Tokens from other implementations are longer than ours: quic-go's Retry
+   token is about 110 bytes, and a client must put whatever it is given (up
+   to 512 bytes) in its Initial packets.  The server takes an unknown token
+   for none and asks for a Retry, and the handshake then completes.  */
+static void
+test_long_token (void)
+{
+  static const size_t lens[] = { 100, 101, 117, 200, 400, 512 };
+  gq_conn_config cfg;
+  size_t i;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.wall_seconds = sim_wall;
+  for (i = 0; i < sizeof lens / sizeof lens[0]; i++)
+    {
+      uint8_t junk[512];
+      struct pair *q;
+
+      memset (junk, 0x5a, sizeof junk);
+      q = pair_new_admit (&cfg, 0, 60 + (uint32_t) i, 1, junk, lens[i]);
+      CHECK (gq_conn_state (q->cli.c) == GQ_CONN_HANDSHAKE);
+      exchange (q);
+      CHECK (q->net.replies >= 1);
+      pair_free (q);
+    }
 }
 
 /* Anything that is not a first Initial is dropped without an answer, and
@@ -2322,6 +2355,7 @@ main (void)
   test_retry (GQ_VERSION_2, 0, 41);
   test_retry (0, 20, 42);
   test_tokens ();
+  test_long_token ();
   test_retry_tamper ();
   test_admit_input ();
   test_compat ();
