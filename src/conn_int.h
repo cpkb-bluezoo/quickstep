@@ -130,6 +130,9 @@ typedef struct pcid
   uint64_t seq;
   gq_cid cid;
   uint8_t token[GQ_RESET_TOKEN_LEN];
+  uint8_t has_token;		/* The peer gave one for this ID: a client
+				   gives none for its first (RFC 9000
+				   section 18.2), and zeros are no token.  */
   uint8_t used;
   uint8_t retire;		/* 0: active, 1: RETIRE to send, 2: sent.  */
 } pcid;

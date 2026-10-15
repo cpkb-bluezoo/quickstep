@@ -24,6 +24,14 @@ can be full of packets lost with the old address, and only an ack-eliciting
 packet carries a challenge, so an ACK-only packet used to go first and the
 challenge waited for loss detection; the path switch now grants a probe
 packet, which the window does not bar.
+** A connection no longer ends with a spurious "stateless reset" when a
+datagram that ends in zeros reaches it.  A client's first connection ID has
+no stateless reset token (RFC 9000 section 18.2), but the connection kept
+an all-zero token for it and compared every undecryptable datagram's last
+16 bytes with it.  neqo, quic-go and ngtcp2 pad Initial datagrams with raw
+zero bytes, so a retransmitted Initial reaching an established connection
+killed it, and under heavy packet loss those peers' handshake loss and
+corruption runs failed.
 ** TLS key log: gq_tls_config.keylog and gq_tls_server_config.keylog take a
 callback that receives each handshake secret as a line of the NSS key log
 format (CLIENT_HANDSHAKE_TRAFFIC_SECRET and the rest, for QUIC and TLS 1.3

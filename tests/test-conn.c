@@ -1107,6 +1107,55 @@ test_long_token (void)
     }
 }
 
+/* A client that advertises no stateless reset token (ours and most others
+   do not) has none recorded, and a datagram that ends in zeros is not a
+   stateless reset from it.  Some clients (neqo, quic-go, ngtcp2) pad their
+   Initial datagrams with raw zero bytes after the packet; when such a
+   datagram is retransmitted to a connection that is already established,
+   the padding reads as a short header packet that cannot be decrypted, and
+   its all-zero tail used to match the all-zero token of a peer that sent
+   none, ending the connection.  */
+static void
+test_zero_tail_is_not_a_reset (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  gq_cid ids[8];
+  uint8_t dg[200];
+  size_t n, len;
+
+  memset (&cfg, 0, sizeof cfg);
+  p = pair_new (&cfg, &cfg, 0, 90);
+  exchange (p);
+  n = gq_conn_local_cids (p->srv.c, ids, 8);
+  CHECK (n >= 1);
+  /* A short header packet for the server's connection, nothing it can
+     decrypt, and a tail of zeros as long as any padding.  */
+  memset (dg, 0, sizeof dg);
+  dg[0] = 0x40;
+  memcpy (dg + 1, ids[0].data, ids[0].len);
+  len = 1 + ids[0].len + 60;
+  CHECK_EQ (gq_conn_recv (p->srv.c, p->net.now, dg, len), GQ_OK);
+  CHECK (gq_conn_state (p->srv.c) == GQ_CONN_ESTABLISHED);
+  CHECK_EQ (p->srv.closed, 0);
+  /* And it carries on: another request is answered.  */
+  {
+    uint64_t id;
+    struct sbuf *s;
+
+    CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+    s = sb_get (&p->cli, id);
+    s->out_total = 20;
+    s->out_fin = 1;
+    p->srv.respond = 3000;
+    run (&p->net, NULL, 2000000);
+    CHECK_EQ (s->n, 3000);
+  }
+  CHECK_EQ (p->cli.bad + p->srv.bad, 0);
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  pair_free (p);
+}
+
 /* Anything that is not a first Initial is dropped without an answer, and
    unknown versions get Version Negotiation.  */
 static void
@@ -2356,6 +2405,7 @@ main (void)
   test_retry (0, 20, 42);
   test_tokens ();
   test_long_token ();
+  test_zero_tail_is_not_a_reset ();
   test_retry_tamper ();
   test_admit_input ();
   test_compat ();

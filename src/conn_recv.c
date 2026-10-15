@@ -235,6 +235,7 @@ cid_store (gq_conn *c, const gq_frame *f)
   slot->cid.len = NC->cid_len;
   memcpy (slot->cid.data, NC->cid, NC->cid_len);
   memcpy (slot->token, NC->reset_token, GQ_RESET_TOKEN_LEN);
+  slot->has_token = 1;
   conn_peer_token (c, slot->token);
   if (NC->retire_prior_to > c->peer_retire_prior)
     c->peer_retire_prior = NC->retire_prior_to;
@@ -510,7 +511,8 @@ stateless_reset_check (gq_conn *c, const uint8_t *data, size_t len)
   if (len < GQ_STATELESS_RESET_MIN_LEN)
     return 0;
   for (i = 0; i < MAX_PCID; i++)
-    if (c->p[i].used && gq_stateless_reset_match (data, len, c->p[i].token))
+    if (c->p[i].used && c->p[i].has_token
+        && gq_stateless_reset_match (data, len, c->p[i].token))
       {
         gq_conn_close_info info;
 

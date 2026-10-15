@@ -437,6 +437,7 @@ conn_apply_peer_params (gq_conn *c)
   if (gq_tp_has (p, GQ_TP_STATELESS_RESET_TOKEN))
     {
       memcpy (c->p[0].token, p->stateless_reset_token, GQ_RESET_TOKEN_LEN);
+      c->p[0].has_token = 1;
       conn_peer_token (c, c->p[0].token);
     }
   idle = p->max_idle_timeout * 1000;
