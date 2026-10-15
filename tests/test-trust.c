@@ -3,16 +3,16 @@
    This file is part of quickstep.
 
    quickstep is free software: you can redistribute it and/or modify it
-   under the terms of the GNU Lesser General Public License as published
+   under the terms of the GNU General Public License as published
    by the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version.
 
    quickstep is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   Lesser General Public License for more details.
+   General Public License for more details.
 
-   You should have received a copy of the GNU Lesser General Public
+   You should have received a copy of the GNU General Public
    License along with this program.  If not, see
    <https://www.gnu.org/licenses/>.  */
 
@@ -20,7 +20,6 @@
 # include <config.h>
 #endif
 
-#include <time.h>
 
 #include <quickstep/status.h>
 #include <quickstep/trust.h>
@@ -96,7 +95,6 @@ main (void)
   gq_trust *t, *empty;
   enum gq_cert_error why;
   gq_slice junk = { (const uint8_t *) "not a certificate", 17 };
-  size_t count = 0;
   int r;
 
   CHECK_EQ (make_cert (&ca, "Test CA", NULL, NULL, -3600, 86400,
@@ -154,9 +152,6 @@ main (void)
     else
       fprintf (stderr, "note: cannot generate RSA-1024 here; skipped\n");
   }
-
-  /* The system store loads without error (contents vary by host).  */
-  CHECK_EQ (gq_trust_add_system (empty, &count), GQ_OK);
 
   gq_trust_free (t);
   gq_trust_free (empty);

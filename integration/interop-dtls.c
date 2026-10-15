@@ -3,27 +3,27 @@
    This file is part of quickstep.
 
    quickstep is free software: you can redistribute it and/or modify it
-   under the terms of the GNU Lesser General Public License as published
+   under the terms of the GNU General Public License as published
    by the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version.
 
    quickstep is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   Lesser General Public License for more details.
+   General Public License for more details.
 
-   You should have received a copy of the GNU Lesser General Public
+   You should have received a copy of the GNU General Public
    License along with this program.  If not, see
    <https://www.gnu.org/licenses/>.  */
 
 /* A small DTLS 1.3 (or, with --dtls12, DTLS 1.2) client and server over
    real UDP sockets, built on gq_dtls or gq_dtls12, for testing quickstep against an independent implementation
-   (tests/wolf-dtls.c, wolfSSL).  A test tool, not part of the library.
+   (integration/wolf-dtls.c, wolfSSL).  A test tool, not part of the library.
 
    interop-dtls client HOST PORT --ca FILE [options]
    interop-dtls server PORT --cert FILE --key FILE [options]
 
-   Prints machine-readable lines that tests/interop-dtls.sh checks.  Exit
+   Prints machine-readable lines that integration/interop-dtls.sh checks.  Exit
    status: 0 success, 1 usage or I/O error, 2 DTLS failure.  */
 
 #ifdef HAVE_CONFIG_H

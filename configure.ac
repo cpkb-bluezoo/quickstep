@@ -5,16 +5,16 @@ dnl
 dnl This file is part of quickstep.
 dnl
 dnl quickstep is free software: you can redistribute it and/or modify it
-dnl under the terms of the GNU Lesser General Public License as published
+dnl under the terms of the GNU General Public License as published
 dnl by the Free Software Foundation, either version 3 of the License, or
 dnl (at your option) any later version.
 dnl
 dnl quickstep is distributed in the hope that it will be useful, but
 dnl WITHOUT ANY WARRANTY; without even the implied warranty of
 dnl MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-dnl Lesser General Public License for more details.
+dnl General Public License for more details.
 dnl
-dnl You should have received a copy of the GNU Lesser General Public
+dnl You should have received a copy of the GNU General Public
 dnl License along with this program.  If not, see
 dnl <https://www.gnu.org/licenses/>.
 
@@ -97,7 +97,7 @@ AC_SUBST([GNUTLS_PC_REQUIRES])
 AM_CONDITIONAL([HAVE_GNUTLS], [test "x$with_gnutls" != xno])
 
 dnl wolfSSL is an optional test dependency: an independent DTLS 1.3 peer for
-dnl the interoperability tests (tests/interop-dtls.sh).  The library itself
+dnl the interoperability tests (integration/interop-dtls.sh).  The library itself
 dnl never uses it.
 AC_ARG_WITH([wolfssl],
   [AS_HELP_STRING([--with-wolfssl],
@@ -129,5 +129,6 @@ AC_CONFIG_FILES([Makefile
                  po/Makefile.in
                  doc/Makefile
                  tests/Makefile
+                 integration/Makefile
                  quickstep.pc])
 AC_OUTPUT

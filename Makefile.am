@@ -5,26 +5,36 @@
 ## This file is part of quickstep.
 ##
 ## quickstep is free software: you can redistribute it and/or modify it
-## under the terms of the GNU Lesser General Public License as published
+## under the terms of the GNU General Public License as published
 ## by the Free Software Foundation, either version 3 of the License, or
 ## (at your option) any later version.
 ##
 ## quickstep is distributed in the hope that it will be useful, but
 ## WITHOUT ANY WARRANTY; without even the implied warranty of
 ## MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-## Lesser General Public License for more details.
+## General Public License for more details.
 ##
-## You should have received a copy of the GNU Lesser General Public
+## You should have received a copy of the GNU General Public
 ## License along with this program.  If not, see
 ## <https://www.gnu.org/licenses/>.
 
 ACLOCAL_AMFLAGS = -I m4
 SUBDIRS = po src doc tests
+## The integration suite is built and run only on request (check-integration
+## below), so "make", "make check" and "make install" never enter it; it is
+## still configured, distributed and cleaned.
+DIST_SUBDIRS = $(SUBDIRS) integration
 
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = quickstep.pc
 
-EXTRA_DIST = COPYING.LESSER HACKING build-aux/config.rpath
+EXTRA_DIST = HACKING build-aux/config.rpath
+
+## The integration suite (integration/) is not part of "make check": it uses
+## real sockets, processes, files and the clock, and needs other programs.
+.PHONY: check-integration
+check-integration:
+	cd integration && $(MAKE) $(AM_MAKEFLAGS) check
 
 ## The committed ChangeLog is a placeholder (see its own text); a release
 ## tarball gets a real one generated from the git history instead, newest

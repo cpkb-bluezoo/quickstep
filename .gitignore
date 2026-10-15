@@ -56,12 +56,14 @@ Makefile
 /test-suite.log
 /tests/test-*
 !/tests/test-*.c
-/tests/interop-client
-/tests/interop-server
-/tests/interop-dtls
-/tests/interop-quic
-/tests/quic-interop-endpoint
-/tests/wolf-dtls
+/integration/interop-client
+/integration/interop-server
+/integration/interop-dtls
+/integration/interop-quic
+/integration/quic-interop-endpoint
+/integration/wolf-dtls
+/integration/integ-files
+.dirstamp
 
 # Manual: built by "make info", "make pdf", "make html"
 /doc/*.info

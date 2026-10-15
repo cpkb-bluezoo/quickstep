@@ -31,8 +31,12 @@ alike) so that Wireshark can decrypt a capture.
 ** An endpoint for the quic-interop-runner (tests/quic-interop-runner/): a
 client and server speaking hq-interop, a Dockerfile that builds it with gcc
 on the runner's Ubuntu base, and a GitHub Actions workflow that runs the
-runner's matrix against other QUIC implementations.  Part of make check as
-a loopback smoke test.
+runner's matrix against other QUIC implementations.  It has a loopback
+smoke test in the integration suite.
+** The tests are split.  make check runs only unit tests, which are
+deterministic and use no real I/O or clock; the interop scripts, the
+quic-interop-runner smoke test and the tests of file and system trust store
+loading moved to integration/ and run with make check-integration.
 ** TLS 1.2 and DTLS 1.2 negotiate x25519 as well as secp256r1 for ECDHE
 (RFC 8422): a client offers both, P-256 first, and the server picks the
 first group of its own preference (the configured groups that TLS 1.2 can

@@ -3,24 +3,22 @@
    This file is part of quickstep.
 
    quickstep is free software: you can redistribute it and/or modify it
-   under the terms of the GNU Lesser General Public License as published
+   under the terms of the GNU General Public License as published
    by the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version.
 
    quickstep is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   Lesser General Public License for more details.
+   General Public License for more details.
 
-   You should have received a copy of the GNU Lesser General Public
+   You should have received a copy of the GNU General Public
    License along with this program.  If not, see
    <https://www.gnu.org/licenses/>.  */
 
 #ifdef HAVE_CONFIG_H
 # include <config.h>
 #endif
-
-#include <unistd.h>
 
 #include <quickstep/status.h>
 #include <quickstep/policy.h>
@@ -176,30 +174,6 @@ test_policy_and_errors (void)
   CHECK_EQ (gq_privkey_from_pem (&k, "not a key", 9), GQ_ERR_CERT);
   CHECK_EQ (gq_pubkey_from_cert (&p, (const uint8_t *) "junk", 4),
             GQ_ERR_CERT);
-  CHECK_EQ (gq_privkey_from_pem_file (&k, "/nonexistent/key.pem"),
-            GQ_ERR_INVAL);
-
-  /* Load from a file.  */
-  {
-    char path[] = "/tmp/gq-key-XXXXXX";
-    int fd = mkstemp (path);
-    gnutls_datum_t pem;
-
-    CHECK (fd >= 0);
-    if (fd >= 0)
-      {
-        CHECK_EQ (gnutls_x509_privkey_export2_pkcs8 (c.key, GNUTLS_X509_FMT_PEM,
-                                                        NULL, GNUTLS_PKCS_PLAIN,
-                                                        &pem), 0);
-        CHECK_EQ ((size_t) write (fd, pem.data, pem.size), (size_t) pem.size);
-        close (fd);
-        CHECK_EQ (gq_privkey_from_pem_file (&k, path), GQ_OK);
-        CHECK (gq_privkey_supports (k, GQ_SIG_ECDSA_SECP256R1_SHA256));
-        gq_privkey_free (k);
-        gnutls_free (pem.data);
-        unlink (path);
-      }
-  }
 
   gq_privkey_free (priv);
   gq_pubkey_free (pub);

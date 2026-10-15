@@ -15,11 +15,12 @@ everything needed to be one of those implementations:
 | `Dockerfile` | Builds libgcrypt, quickstep and the endpoint with gcc (warnings are errors), then puts them on the simulator's endpoint base image |
 | `run_endpoint.sh` | Container entrypoint: simulator routing, then the endpoint |
 | `ack_stats.py`, `dump_frames.py` | Read the runner's packet captures: ACK-only packet counts, and a packet-by-packet decode (see below) |
-| `smoke.sh` | The endpoint against itself over loopback, once per test case; part of `make check` |
+| `smoke.sh` | The endpoint against itself over loopback, once per test case; part of `make check-integration` |
 
 The matrix is run by the `QUIC interop` GitHub Actions workflow
 (`.github/workflows/quic-interop.yml`), on demand only. It is not part of
-the `CI` workflow, which builds quickstep with gcc and runs `make check`.
+the `CI` workflow, which builds quickstep with gcc and runs the unit and
+integration tests.
 
 ## The runner's contract
 
@@ -66,7 +67,7 @@ packet captures and the analyses below take its place.
 From the repository root (the Dockerfile needs the sources):
 
 ```bash
-docker build -f tests/quic-interop-runner/Dockerfile -t quickstep-interop .
+docker build -f integration/quic-interop-runner/Dockerfile -t quickstep-interop .
 ```
 
 Podman works the same way (`podman build ...`). The public runner needs a
@@ -104,8 +105,8 @@ verdict in `output.txt`, the endpoint consoles under `server/` and
 
 ## Running the endpoint without Docker
 
-`make check` builds the endpoint (`tests/quic-interop-endpoint`) and
-runs `smoke.sh`, which starts a server and a client of it on loopback for
+`make check-integration` builds the endpoint
+(`integration/quic-interop-endpoint`) and runs `smoke.sh`, which starts a server and a client of it on loopback for
 each test case with a certificate pair it makes with openssl. To run one
 by hand, the same `INTEROP_*` variables replace the fixed container paths
 and port:

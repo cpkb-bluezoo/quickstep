@@ -121,9 +121,15 @@ Licence
 -------
 
 quickstep is free software: you can redistribute it and/or modify it under
-the terms of the GNU Lesser General Public License as published by the
-Free Software Foundation, either version 3 of the License, or (at your
-option) any later version.  See COPYING.LESSER and COPYING.
+the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option)
+any later version.  See COPYING.
+
+It is released under the GPL, not the LGPL: a program that links against
+libquickstep is a combined work and must itself be distributed under the
+GPL, or a licence compatible with it, when it is distributed.  The
+libraries it builds on, libgcrypt and GnuTLS, are LGPL version 2.1 or later
+and are compatible with this.
 
 Copyright is held by the authors until assigned to the Free Software
 Foundation.  Contributions will need a copyright assignment before they

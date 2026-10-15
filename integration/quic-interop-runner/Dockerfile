@@ -1,10 +1,11 @@
 # syntax=docker/dockerfile:1
 #
-# quickstep endpoint for the quic-interop-runner
+# quickstep endpoint for the quic-interop-runner, and the build the CI workflow
+# uses (the check and integration targets below)
 # (https://github.com/quic-interop/quic-interop-runner). Build from the
 # repository root, so that the sources are in the context:
 #
-#   docker build -f tests/quic-interop-runner/Dockerfile -t quickstep-interop .
+#   docker build -f integration/quic-interop-runner/Dockerfile -t quickstep-interop .
 #
 # The public runner needs linux/amd64; on Apple silicon add
 # --platform linux/amd64, or use buildx for a multi-platform image.
@@ -17,7 +18,7 @@ FROM ubuntu:24.04 AS build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
          autoconf autopoint automake build-essential ca-certificates curl \
-         bzip2 gettext libgnutls28-dev libtool openssl pkg-config \
+         bzip2 gettext libgnutls28-dev libtool gnutls-bin openssl pkg-config \
          texinfo \
     && rm -rf /var/lib/apt/lists/*
 
@@ -61,17 +62,19 @@ ENV CC=gcc PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 RUN ./autogen.sh \
     && ./configure --disable-shared --without-wolfssl \
     && make -C src -j"$(nproc)" CFLAGS="-g -O2 -Werror" \
-    && make -C tests quic-interop-endpoint CFLAGS="-g -O2 -Werror" \
-    && strip -o /quickstep-interop tests/quic-interop-endpoint
+    && make -C integration quic-interop-endpoint CFLAGS="-g -O2 -Werror" \
+    && strip -o /quickstep-interop integration/quic-interop-endpoint
 
-# ---- Check: the whole test suite, for the CI workflow ----------------------
-# Not part of the image; "docker build --target check" runs it. It needs the
-# build stage's tree, so the endpoint above is built in the same pass.
+# ---- Check: the unit tests, for the CI workflow ---------------------------
+# Not part of the image; "docker build --target check" runs it.
 FROM build AS check
-# Compile the tests in parallel, then run them one at a time: several of
-# them use fixed port ranges.
-RUN make -j"$(nproc)" -C tests check TESTS= CFLAGS="-g -O2 -Werror" \
-    && make -C tests check CFLAGS="-g -O2 -Werror"
+RUN make -j"$(nproc)" -C tests check CFLAGS="-g -O2 -Werror"
+
+# ---- Integration: the integration suite, for the CI workflow ---------------
+# "docker build --target integration".  The interop scripts that need quiche
+# or wolfSSL skip themselves.  One at a time: they use fixed port ranges.
+FROM build AS integration
+RUN make check-integration CFLAGS="-g -O2 -Werror"
 
 # ---- Runtime: the simulator's endpoint base plus quickstep's libraries ----
 FROM martenseemann/quic-network-simulator-endpoint:latest
@@ -88,7 +91,7 @@ ENV LD_LIBRARY_PATH=/usr/local/lib
 
 WORKDIR /quickstep
 COPY --from=build /quickstep-interop ./quickstep-interop
-COPY tests/quic-interop-runner/run_endpoint.sh ./
+COPY integration/quic-interop-runner/run_endpoint.sh ./
 RUN chmod +x run_endpoint.sh
 
 ENTRYPOINT ["./run_endpoint.sh"]

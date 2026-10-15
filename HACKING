@@ -13,7 +13,7 @@ no tabs beyond what GNU indent produces.  Every public symbol starts with
 gq_ (types and functions) or GQ_ (macros, enumerators).  The library
 exports nothing else.
 
-Every source file carries the LGPLv3+ notice used in the existing files.
+Every source file carries the GPLv3+ notice used in the existing files.
 
 Push-parsing contract (required for every codec)
 ------------------------------------------------
@@ -53,14 +53,31 @@ output, not just the exit status.
 Testing
 -------
 
-  make check
-  make distcheck      # before every release
+  make check              # unit tests
+  make check-integration  # integration tests
+  make distcheck          # before every release
 
-make check also runs tests/interop.sh, which needs openssl and (optionally)
-gnutls-serv and gnutls-cli on the PATH and is skipped otherwise.  It tests
-our client against their servers (interop-client) and their clients against
-our server (interop-server).  Set GQ_NO_INTEROP=1 to
-skip it, or OPENSSL / GNUTLS_SERV to choose the binaries.
+make check runs unit tests only (tests/): deterministic, in-process, with
+no sockets, files, child processes or wall clock (the engines take their
+clock as a hook, and the loopback tests run on a virtual one), and fast
+enough to run on every change.  Anything that needs real I/O, another
+program, the host's own files or trust store, or the real clock goes in the
+integration suite (integration/), which make check-integration builds and
+runs and make check never touches:
+
+  interop.sh          TLS against OpenSSL and GnuTLS (interop-client and
+                      interop-server are our side); needs openssl and
+                      optionally gnutls-serv and gnutls-cli
+  interop-dtls.sh,
+  interop-dtls12.sh   DTLS 1.3 and 1.2 against wolfSSL, OpenSSL and GnuTLS
+  interop-quic.sh     QUIC against quiche (QUICHE_DIR names its programs)
+  quic-interop-runner/smoke.sh
+                      the quic-interop-runner endpoint against itself
+  integ-files         key loading from a file, the system trust store
+
+Each skips itself (exit 77) when what it needs is missing.  Set
+GQ_NO_INTEROP=1 to skip the interop scripts, or OPENSSL / GNUTLS_SERV to
+choose the binaries.
 
 Copyright assignment
 --------------------
@@ -68,7 +85,7 @@ Copyright assignment
 The project intends to become part of the GNU system with copyright
 assigned to the Free Software Foundation.  Until then, keep the notice
 "Copyright (C) YEAR Name" in each file, and do not incorporate code
-whose licence is not compatible with LGPLv3+.
+whose licence is not compatible with GPLv3+.
 
 Documentation and translation
 

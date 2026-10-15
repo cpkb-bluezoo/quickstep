@@ -3,16 +3,16 @@
    This file is part of quickstep.
 
    quickstep is free software: you can redistribute it and/or modify it
-   under the terms of the GNU Lesser General Public License as published
+   under the terms of the GNU General Public License as published
    by the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version.
 
    quickstep is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   Lesser General Public License for more details.
+   General Public License for more details.
 
-   You should have received a copy of the GNU Lesser General Public
+   You should have received a copy of the GNU General Public
    License along with this program.  If not, see
    <https://www.gnu.org/licenses/>.  */
 
@@ -29,7 +29,6 @@
 #include <quickstep/dtlsrec.h>
 #include <quickstep/dtlshs.h>
 
-#include <time.h>
 
 #include "tst-util.h"
 
@@ -141,6 +140,17 @@ ev_closed (void *u, int error, int alert)
 static const gq_tls_session *g_resume;
 
 /* CLIENT and SERVER are the version flags each end is allowed.  */
+/* The engines' wall clock, and the time the session below was received:
+   fixed, so that nothing depends on the date.  */
+#define TEST_NOW_MS UINT64_C (1700000000000)
+
+static uint64_t
+test_now_ms (void *user)
+{
+  (void) user;
+  return TEST_NOW_MS;
+}
+
 static struct net *
 net_new (unsigned client, unsigned server, int front)
 {
@@ -163,6 +173,7 @@ net_new (unsigned client, unsigned server, int front)
   cc.server_name = "example.test";
   cc.trust = fx_trust;
   cc.resume = g_resume;
+  cc.hooks.now_ms = test_now_ms;
   ev.user = &n->s[0];
   CHECK_EQ (gq_dtlsauto_client_new (&n->s[0].a, &cc, &ev, NULL, client),
             GQ_OK);
@@ -173,6 +184,7 @@ net_new (unsigned client, unsigned server, int front)
   creds.key = fx_ec.key;
   memset (&n->sc, 0, sizeof n->sc);
   n->sc.credentials = creds;
+  n->sc.hooks.now_ms = test_now_ms;
   ev.user = &n->s[1];
   n->sev = ev;
   n->sver = server;
@@ -472,7 +484,7 @@ big_ticket (int front, int lose)
   sess.hash = GQ_HASH_SHA256;
   sess.psk_len = 32;
   sess.lifetime = 7200;
-  sess.received_ms = (uint64_t) time (NULL) * 1000;
+  sess.received_ms = TEST_NOW_MS;
   g_resume = &sess;
   one (BOTH, D12, front, lose, 0xfefd);
   /* A listener answering statelessly for DTLS 1.3 cannot take a ClientHello1

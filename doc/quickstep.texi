@@ -67,7 +67,7 @@ Documentation License''.
 
 quickstep is an engine for QUIC (RFC 9000) and the TLS 1.3 handshake it
 depends on, and also for TLS 1.2 and 1.3 over TCP and DTLS 1.2 and 1.3
-over UDP.  It is released under the GNU Lesser General Public License,
+over UDP.  It is released under the GNU General Public License,
 version 3 or any later version.
 
 For QUIC it provides versions 1 and 2 with compatible version negotiation,
@@ -172,7 +172,7 @@ present.
 
 If a second library is ever required for post-quantum support it goes
 behind @file{crypto.h} as another backend, selected at configure time,
-and must be licence-compatible with the LGPL version 3 or later.
+and must be licence-compatible with the GPL version 3 or later.
 
 @node Trust
 @section Trust: X.509 behind an interface
@@ -274,20 +274,25 @@ is restricted by @code{-export-symbols-regex '^gq_'}.
 @node Testing
 @section Testing
 
-@command{make check} runs a unit test per module (RFC vectors where they
-exist), loopback tests that pair engines and connections over a
-simulated network with a virtual clock (loss, reordering, duplication,
-corruption, NAT rebinding), and interoperability scripts against
-independent implementations: @file{tests/interop.sh} (TLS against OpenSSL
-and GnuTLS), @file{tests/interop-dtls.sh} and @file{tests/interop-dtls12.sh}
-(DTLS against wolfSSL, OpenSSL and GnuTLS) and @file{tests/interop-quic.sh}
+@command{make check} runs the unit tests: a test per module (RFC vectors
+where they exist), and loopback tests that pair engines and connections
+over a simulated network with a virtual clock (loss, reordering,
+duplication, corruption, NAT rebinding).  They are deterministic and use
+no sockets, files, programs or wall clock, so they are fast.
+
+@command{make check-integration} runs the integration suite in
+@file{integration/}, which uses real I/O and other programs:
+interoperability scripts against
+independent implementations: @file{integration/interop.sh} (TLS against OpenSSL
+and GnuTLS), @file{integration/interop-dtls.sh} and @file{integration/interop-dtls12.sh}
+(DTLS against wolfSSL, OpenSSL and GnuTLS) and @file{integration/interop-quic.sh}
 (QUIC against quiche: handshakes, loss, Retry, Version Negotiation, key
 update, migration, DATAGRAM, 0-RTT and concurrent clients, both
-directions).  @file{tests/quic-interop-runner/} holds an endpoint for the
+directions).  @file{integration/quic-interop-runner/} holds an endpoint for the
 @uref{https://github.com/quic-interop/quic-interop-runner, QUIC interop
 runner}, with the image and the GitHub Actions workflow that run it
-against other implementations; @command{make check} runs it against itself
-over loopback.  Scripts skip themselves (exit 77) when their peers are
+against other implementations; the integration suite runs it against
+itself over loopback.  Scripts skip themselves (exit 77) when their peers are
 missing; set @env{GQ_NO_INTEROP} to skip them, @env{GQ_INTEROP_FILTER} to
 run scenarios whose names contain a string, and @env{QUICHE_DIR} to name
 the directory holding @command{quiche-client} and @command{quiche-server}.
@@ -558,7 +563,7 @@ client authentication.  DTLS 1.2 is @ref{DTLS 1.2}.
 @end itemize
 
 Verified against wolfSSL 5.9 as an independent DTLS 1.3 peer in both
-directions (@file{tests/interop-dtls.sh}), including cookies, hybrid
+directions (@file{integration/interop-dtls.sh}), including cookies, hybrid
 groups, fragmentation, packet loss, KeyUpdate, resumption and client
 certificates.
 
@@ -611,7 +616,7 @@ transcript excludes the first hello and the request.
 @end itemize
 
 Verified in both directions against OpenSSL 3, GnuTLS 3.8 and wolfSSL
-(@file{tests/interop-dtls12.sh}), including cookies, fragmentation and
+(@file{integration/interop-dtls12.sh}), including cookies, fragmentation and
 packet loss, resumption and client certificates.
 
 @node QUIC policy

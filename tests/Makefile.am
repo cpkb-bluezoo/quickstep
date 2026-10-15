@@ -3,16 +3,16 @@
 ## This file is part of quickstep.
 ##
 ## quickstep is free software: you can redistribute it and/or modify it
-## under the terms of the GNU Lesser General Public License as published
+## under the terms of the GNU General Public License as published
 ## by the Free Software Foundation, either version 3 of the License, or
 ## (at your option) any later version.
 ##
 ## quickstep is distributed in the hope that it will be useful, but
 ## WITHOUT ANY WARRANTY; without even the implied warranty of
 ## MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-## Lesser General Public License for more details.
+## General Public License for more details.
 ##
-## You should have received a copy of the GNU Lesser General Public
+## You should have received a copy of the GNU General Public
 ## License along with this program.  If not, see
 ## <https://www.gnu.org/licenses/>.
 
@@ -26,50 +26,11 @@ UNIT_TESTS = test-varint test-frame test-crypto test-policy test-trust \
   test-resume test-tickets test-early test-tls12ks test-record12 test-tls12 \
   test-tls12conn test-dtlsrec test-dtlshs test-dtls test-dtls12rec test-dtls12 test-ranges test-stream test-tlsauto test-dtlsauto test-quiclb test-conn test-conn-int test-token test-endpoint
 
-# Interoperability against independent servers (skipped if none installed).
-if HAVE_GNUTLS
-INTEROP = interop.sh interop-quic.sh
-INTEROP_PROGS = interop-client interop-server interop-dtls interop-quic
-endif
-
-# DTLS 1.3 against wolfSSL, if it is installed with DTLS 1.3.
-if HAVE_WOLFSSL
-if HAVE_GNUTLS
-INTEROP += interop-dtls.sh interop-dtls12.sh
-INTEROP_PROGS += wolf-dtls
-endif
-endif
-
-# The endpoint for the quic-interop-runner (quic-interop-runner/README.md),
-# built here so that it is always compiled and linted; the container image
-# builds it with "make -C tests quic-interop-endpoint".  Its test needs
-# openssl only.
-if HAVE_GNUTLS
-INTEROP += quic-interop-runner/smoke.sh
-INTEROP_PROGS += quic-interop-endpoint
-endif
-
-TESTS = $(UNIT_TESTS) $(INTEROP)
-check_PROGRAMS = $(UNIT_TESTS) $(INTEROP_PROGS)
-TESTS_ENVIRONMENT = INTEROP_CLIENT=./interop-client; export INTEROP_CLIENT; \
-  INTEROP_SERVER=./interop-server; export INTEROP_SERVER; \
-  INTEROP_DTLS=./interop-dtls; export INTEROP_DTLS; \
-  INTEROP_QUIC=./interop-quic; export INTEROP_QUIC; \
-  QUIC_INTEROP_ENDPOINT=./quic-interop-endpoint; export QUIC_INTEROP_ENDPOINT; \
-  WOLF_DTLS=./wolf-dtls; export WOLF_DTLS;
+TESTS = $(UNIT_TESTS)
+check_PROGRAMS = $(UNIT_TESTS)
 
 # It uses the library's internals, which a shared library does not export.
 test_conn_int_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
 test_conn_int_LDFLAGS = -static
 
-quic_interop_endpoint_SOURCES = quic-interop-runner/endpoint.c
-wolf_dtls_SOURCES = wolf-dtls.c
-interop_dtls_SOURCES = interop-dtls.c
-interop_quic_SOURCES = interop-quic.c
-wolf_dtls_CFLAGS = $(AM_CFLAGS) $(WOLFSSL_CFLAGS)
-wolf_dtls_LDADD = $(WOLFSSL_LIBS)
-
-EXTRA_DIST = quic-interop-runner/smoke.sh quic-interop-runner/README.md \
-  quic-interop-runner/Dockerfile quic-interop-runner/run_endpoint.sh \
-  quic-interop-runner/ack_stats.py quic-interop-runner/dump_frames.py \
-  interop-quic.sh interop-dtls.sh interop-dtls12.sh interop.sh interop-util.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h
+EXTRA_DIST = tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h
