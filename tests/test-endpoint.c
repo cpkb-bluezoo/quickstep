@@ -59,6 +59,7 @@ struct capp
   size_t out_total[4], out_done[4];
   int stream_used[4];
   int connected, closed, done, mig;
+  int pref_events, pref_take;	/* Offers of a preferred address; take up.  */
   gq_conn_close_info ci;
   gq_tls_session sess;
   int have_sess, early_bytes, early_result;
@@ -207,6 +208,8 @@ struct net
      ahead of it in a datagram of its own, with the Initial's datagram
      emptied of it.  */
   int early_first, early_split;
+  gq_addr addr2;		/* The server's preferred address.  */
+  uint64_t bytes_addr2;		/* Sent to it.  */
 };
 
 static uint8_t
@@ -282,6 +285,22 @@ ev_migrated (void *u, const gq_path *p)
 }
 
 static void
+ev_preferred (void *u, const gq_preferred_address *pa)
+{
+  struct capp *a = u;
+  gq_path np;
+
+  (void) pa;
+  a->pref_events++;
+  if (!a->pref_take)
+    return;
+  np.local = a->node->addr;
+  np.remote = a->node->net->addr2;
+  a->pref_take = gq_conn_migrate_preferred (a->c, a->node->net->now, &np)
+                 == GQ_OK ? 0 : -1;
+}
+
+static void
 ev_ticket (void *u, const gq_tls_ticket *t, uint32_t version)
 {
   struct capp *a = u;
@@ -310,6 +329,7 @@ fill_events (gq_conn_events *e, struct capp *a)
   e->stream_data = ev_data;
   e->closed = ev_closed;
   e->migrated = ev_migrated;
+  e->preferred_address = ev_preferred;
   e->ticket = ev_ticket;
   e->early_data_result = ev_early_result;
 }
@@ -397,6 +417,8 @@ node_by_addr (struct net *net, const gq_addr *a)
 {
   int i;
 
+  if (net->addr2.len && same (&net->addr2, a))
+    return &net->node[0];
   for (i = 0; i < MAXNODES; i++)
     if (net->node[i].ep && same (&net->node[i].ext, a))
       return &net->node[i];
@@ -487,6 +509,14 @@ enqueue (struct net *net, struct node *from, const uint8_t *d, size_t len,
   memcpy (p->d, d, len);
   p->from.local = dest->addr;
   p->from.remote = from->ext;	/* What the receiver sees.  */
+  /* By the server's second address, to it or from it.  */
+  if (net->addr2.len && same (&net->addr2, &to->remote))
+    {
+      p->from.local = net->addr2;
+      net->bytes_addr2 += len;
+    }
+  if (from == &net->node[0] && net->addr2.len && same (&net->addr2, &to->local))
+    p->from.remote = net->addr2;
 }
 
 static void
@@ -663,6 +693,7 @@ net_new (const gq_endpoint_config *server_cfg, uint32_t seed,
   net->rng = seed;
   net->node[0].net = net->node[1].net = net->node[2].net = net;
   net->node[0].addr = net->node[0].ext = mkaddr ("SRV:443");
+  net->addr2 = mkaddr ("SRV2:443");
   net->node[1].addr = net->node[1].ext = mkaddr ("CLI-1");
   net->node[2].addr = net->node[2].ext = mkaddr ("CLI-2");
   net->node[0].respond = net->node[1].respond = net->node[2].respond = 20000;
@@ -923,6 +954,114 @@ test_ecn (void)
   CHECK (st.ecn_marked_sent > 0);
   CHECK (st.ecn_ect0_received > 0);
   CHECK_EQ (st.ecn_ce_received, 0);
+  net_free (net);
+}
+
+/* The server's offer, made to the first client only.  */
+static gq_addr g_pref_for;
+static unsigned g_pref_calls;
+
+static int
+pref_hook (void *u, const gq_path *client, gq_preferred_address *out)
+{
+  (void) u;
+  g_pref_calls++;
+  if (!same (&client->remote, &g_pref_for))
+    return 0;
+  memset (out, 0, sizeof *out);
+  memset (out->ipv4, 0x0a, 4);
+  out->ipv4_port = 443;
+  return 1;
+}
+
+/* An endpoint offers a preferred address to the clients it chooses, routes
+   what comes to the connection ID that goes with it, and answers for it with
+   a stateless reset when it has lost the connection.  */
+static void
+test_preferred_address (void)
+{
+  gq_endpoint_config sc;
+  gq_endpoint_events se;
+  struct net *net;
+  struct capp *a, *b;
+  gq_path cur;
+  uint64_t before;
+  gq_endpoint *old;
+  static const uint8_t k[32] = { 7, 8, 9 };
+  int i;
+
+  memset (&sc, 0, sizeof sc);
+  memcpy (sc.reset_key, k, 32);
+  sc.have_reset_key = 1;
+  sc.conn.preferred_address = pref_hook;
+  net = net_new (&sc, 9, NULL);
+  g_pref_for = net->node[1].ext;
+  g_pref_calls = 0;
+  a = client_conn (net, 1, NULL);		/* Offered, and takes it up.  */
+  a->pref_take = 1;
+  b = client_conn (net, 2, NULL);		/* Not offered.  */
+  CHECK (run (net, all_clients_done, 60000000));
+  CHECK_EQ (g_pref_calls, 2);			/* Once for each connection.  */
+  CHECK_EQ (a->pref_events, 1);
+  CHECK_EQ (a->pref_take, 0);
+  CHECK_EQ (b->pref_events, 0);
+  CHECK_EQ (gq_conn_get_path (a->c, &cur), GQ_OK);
+  CHECK (same (&cur.remote, &net->addr2));
+  CHECK_EQ (gq_conn_get_path (b->c, &cur), GQ_OK);
+  CHECK (same (&cur.remote, &net->node[0].addr));
+  CHECK_EQ (a->mig, 1);
+  CHECK_EQ (b->mig, 0);
+  CHECK_EQ (a->closed + b->closed, 0);
+  CHECK (net->bytes_addr2 > 0);
+  CHECK_EQ (gq_endpoint_connections (net->node[0].ep), 2);
+  /* More goes by the second address and none of it is lost.  */
+  before = net->bytes_addr2;
+  {
+    uint64_t id;
+
+    uint8_t d[5];
+    size_t j;
+
+    CHECK_EQ (gq_conn_stream_open (a->c, 1, &id), GQ_OK);
+    for (j = 0; j < sizeof d; j++)
+      d[j] = pat (id, j);
+    gq_conn_stream_write (a->c, id, d, sizeof d);
+    run (net, NULL, 1000000);
+    CHECK (net->bytes_addr2 > before);
+    CHECK_EQ (a->closed, 0);
+  }
+  /* The server forgets everything and starts again with the same reset
+     key: the client's next packet, to the second address and the connection
+     ID that came with it, draws a stateless reset whose token is the one it
+     was given with the address.  */
+  old = net->node[0].ep;
+  memset (&se, 0, sizeof se);
+  se.user = &net->node[0];
+  se.accept = ep_refuse;
+  sc.server = &scfg;
+  sc.conn.preferred_address = NULL;
+  sc.conn.wall_seconds = sim_wall;
+  sc.conn.wall_user = net;
+  sc.conn.qlog = esink_cb;
+  sc.conn.qlog_user = &net->qs[0];
+  net->node[0].ep = NULL;
+  gq_endpoint_free (old);
+  CHECK_EQ (gq_endpoint_new (&net->node[0].ep, &sc, &se), GQ_OK);
+  {
+    uint64_t id;
+
+    uint8_t d[5];
+    size_t j;
+
+    CHECK_EQ (gq_conn_stream_open (a->c, 1, &id), GQ_OK);
+    for (j = 0; j < sizeof d; j++)
+      d[j] = pat (id, j);
+    gq_conn_stream_write (a->c, id, d, sizeof d);
+    for (i = 0; i < 20 && !a->closed; i++)
+      run (net, NULL, 500000);
+  }
+  CHECK_EQ (a->closed, 1);
+  CHECK (a->ci.source == GQ_CLOSE_RESET);
   net_free (net);
 }
 
@@ -1263,6 +1402,7 @@ main (void)
   test_many_connections ();
   test_early_data ();
   test_ecn ();
+  test_preferred_address ();
   test_retry ();
   test_version_negotiation ();
   test_stateless_reset ();
