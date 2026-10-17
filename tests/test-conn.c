@@ -124,6 +124,9 @@ struct net
   struct app *app[2];
   int dropped;
   int drop_index;		/* Drop this datagram only (or -1).  */
+  int c2s_allow;		/* If not 0: only this many of the client's
+				   datagrams get through, then none.  */
+  int c2s_passed;
   /* Path simulation: the server S, the client's local addresses L[i], and
      the external addresses a NAT presents for them.  The client's outgoing
      datagrams appear from m[out_map[i]].ext; a datagram to the client is
@@ -632,7 +635,8 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len,
       n->mtu_drops++;
       return;
     }
-  if (index == n->drop_index || lossy (n))
+  if (index == n->drop_index || lossy (n)
+      || (from == 0 && n->c2s_allow && n->c2s_passed++ >= n->c2s_allow))
     {
       n->dropped++;
       return;
@@ -998,6 +1002,8 @@ fill_events (gq_conn_events *e, struct app *a)
 static const uint16_t *g_cgroups;
 static size_t g_n_cgroups;
 static const struct ident *g_server_ident;	/* NULL: fx_ec.  */
+static const gq_slice *g_server_chain;	/* With it: a longer chain.  */
+static size_t g_server_n_chain;
 
 /* The ceiling on datagram size the connections get when the test does not
    say: 1200, so that the tests that do not concern path MTU discovery see
@@ -1024,8 +1030,9 @@ pair_new (const gq_conn_config *ccfg, const gq_conn_config *scfg,
   p->ccfg.trust = fx_trust;
   p->ccfg.alpn = alpn_list;
   p->ccfg.n_alpn = 1;
-  p->scfg.credentials.chain = (g_server_ident ? g_server_ident : &fx_ec)->chain;
-  p->scfg.credentials.n_chain = 1;
+  p->scfg.credentials.chain = g_server_chain
+    ? g_server_chain : (g_server_ident ? g_server_ident : &fx_ec)->chain;
+  p->scfg.credentials.n_chain = g_server_chain ? g_server_n_chain : 1;
   p->scfg.credentials.key = (g_server_ident ? g_server_ident : &fx_ec)->key;
   p->scfg.alpn = alpn_list;
   p->scfg.n_alpn = 1;
@@ -1303,6 +1310,349 @@ test_mldsa_handshake (void)
             pair_free (p);
           }
       tst_free_mldsa_cert (&ml);
+    }
+}
+
+
+/* ---- Large flights: ML-DSA's sizes ---- */
+
+/* A handshake of the chain CHAIN (N_CHAIN certificates, signed with KEY of
+   ID, or the default server identity) is run until both ends are connected
+   or BUDGET microseconds have passed; the latency is 10 ms each way, so the
+   round trip is 20 ms.  Fills *CLIENT_RTT and *SERVER_RTT with the times at
+   which each end connected, in round trips (0: it never did).  The pair is
+   returned.  */
+static struct pair *
+run_flight (const struct ident *id, const gq_slice *chain, size_t n_chain,
+            const gq_conn_config *cfg, unsigned loss, int reorder,
+            uint32_t seed, uint64_t budget, double *client_rtt,
+            double *server_rtt)
+{
+  struct pair *p;
+  uint64_t t0, tc = 0, ts = 0, end;
+
+  g_server_ident = id;
+  g_server_chain = chain;
+  g_server_n_chain = n_chain;
+  p = pair_new (cfg, cfg, loss, seed);
+  g_server_ident = NULL;
+  g_server_chain = NULL;
+  p->net.reorder = reorder;
+  t0 = p->net.now;
+  end = t0 + budget;
+  while (p->net.now < end && !(p->cli.connected && p->srv.connected))
+    {
+      run (&p->net, NULL, 1000);
+      if (p->cli.connected && !tc)
+        tc = p->net.now;
+      if (p->srv.connected && !ts)
+        ts = p->net.now;
+    }
+  *client_rtt = tc ? (double) (tc - t0) / 20000 : 0;
+  *server_rtt = ts ? (double) (ts - t0) / 20000 : 0;
+  return p;
+}
+
+/* What a big flight costs.  The server may send only three times what it
+   has received until the client's address is validated (RFC 9000 section
+   8.1), and the client's first flight is one or two Initial datagrams, so
+   whatever is beyond 3.6 or 7.2 KB of server flight waits for the client's
+   reply: one round trip more.  The classical flights fit; the ML-DSA ones
+   of a leaf and an intermediate, 8 to 15 KB of chain, do not, and take 2
+   round trips, not 1 (a client sees the server's Finished at 1 round trip
+   when everything fits).  Not more: once the address is validated the
+   window (12000 bytes) takes the rest in one go.  */
+static void
+test_flight_cost (int mode)
+{
+  static const unsigned schemes[] = { GQ_SIG_MLDSA44, GQ_SIG_MLDSA65,
+                                      GQ_SIG_MLDSA87 };
+  static const uint32_t versions[] = { GQ_VERSION_1, GQ_VERSION_2 };
+  static struct tst_mlchain ch;
+  static struct ident id;
+  double c, s;
+  size_t i, v;
+  struct pair *p;
+  gq_conn_config cfg;
+
+  for (v = 0; v < 2; v++)
+    {
+      memset (&cfg, 0, sizeof cfg);
+      cfg.version = versions[v];
+
+      /* The flights that fit, for comparison.  */
+      p = run_flight (&fx_ec, NULL, 1, &cfg, 0, 0, 1, 2000000, &c, &s);
+      CHECK (c > 0.9 && c <= 1.1);
+      CHECK (s > 1.4 && s <= 1.6);
+      pair_free (p);
+      p = run_flight (&fx_rsa, NULL, 1, &cfg, 0, 0, 1, 2000000, &c, &s);
+      CHECK (c > 0.9 && c <= 1.1);
+      pair_free (p);
+
+      for (i = 0; i < 3; i++)
+        {
+          CHECK_EQ (tst_make_mldsa_chain (&ch, schemes[i], &fx_ca,
+                                          "example.test", mode), 0);
+          memset (&id, 0, sizeof id);
+          id.key = ch.key;
+          id.chain[0] = ch.chain[0];
+          /* The bigger the parameter set, the bigger the flight: ML-DSA-44's
+             chain is 7.9 KB, ML-DSA-87's 14.9 KB, and with the
+             CertificateVerify folded into the leaf (a classical leaf has no
+             room for it otherwise) 11 to 21 KB.  */
+          CHECK (ch.total > 7000 && ch.total < 26000);
+          p = run_flight (&id, ch.chain, 2, &cfg, 0, 0, 1, 2000000, &c, &s);
+          CHECK (c >= 1.9 && c <= 2.1);	/* One more than the classical.  */
+          CHECK (s >= 2.4 && s <= 2.6);
+          CHECK (p->cli.connected && p->srv.connected);
+          pair_free (p);
+          tst_free_mldsa_chain (&ch);
+        }
+    }
+}
+
+/* The limit itself.  The client's datagrams stop arriving after the first
+   (ALLOW of them); the server keeps retransmitting its flight on its timer
+   and must never send more than three times what it received.  */
+static void
+test_flight_amplification (int mode)
+{
+  static const unsigned schemes[] = { GQ_SIG_MLDSA44, GQ_SIG_MLDSA65,
+                                      GQ_SIG_MLDSA87 };
+  static struct tst_mlchain ch;
+  static struct ident id;
+  size_t i;
+  int allow;
+
+  for (allow = 1; allow <= 2; allow++)
+    for (i = 0; i < 4; i++)
+      {
+        struct pair *p;
+        gq_conn_config cfg;
+        gq_conn_stats st;
+        const struct ident *use = &fx_ec;
+        const gq_slice *chain = NULL;
+        size_t n = 1;
+
+        memset (&cfg, 0, sizeof cfg);
+        if (i < 3)
+          {
+            CHECK_EQ (tst_make_mldsa_chain (&ch, schemes[i], &fx_ca,
+                                            "example.test", mode), 0);
+            memset (&id, 0, sizeof id);
+            id.key = ch.key;
+            id.chain[0] = ch.chain[0];
+            use = &id;
+            chain = ch.chain;
+            n = 2;
+          }
+        g_server_ident = use;
+        g_server_chain = chain;
+        g_server_n_chain = n;
+        p = pair_new (&cfg, &cfg, 0, 3);
+        g_server_ident = NULL;
+        g_server_chain = NULL;
+        p->net.c2s_allow = allow;
+        run (&p->net, NULL, 5000000);	/* Five seconds: many timeouts.  */
+        gq_conn_get_stats (p->srv.c, &st);
+        CHECK (st.bytes_received > 0 && st.bytes_sent > 0);
+        CHECK (st.bytes_sent <= 3 * st.bytes_received);
+        if (i < 3)
+          {
+            /* The flight is far bigger than the allowance, so the handshake
+               cannot have completed.  */
+            CHECK (!p->cli.connected && !p->srv.connected);
+          }
+        pair_free (p);
+        if (i < 3)
+          tst_free_mldsa_chain (&ch);
+      }
+}
+
+
+/* Each of the first datagrams of a big flight lost in turn.  The server's
+   packets after the lost one are all ones the client cannot read when it is
+   the head of the ServerHello that is gone (it has no Handshake keys), so
+   they fill the server's congestion window without ever being acknowledged;
+   the lost part of the ServerHello still has to be sent again, by a probe,
+   and the handshake complete.  */
+static void
+test_flight_lost_datagram (int mode)
+{
+  static struct tst_mlchain ch;
+  static struct ident id;
+  unsigned drop;
+
+  CHECK_EQ (tst_make_mldsa_chain (&ch, GQ_SIG_MLDSA87, &fx_ca, "example.test",
+                                  mode), 0);
+  memset (&id, 0, sizeof id);
+  id.key = ch.key;
+  id.chain[0] = ch.chain[0];
+  for (drop = 2; drop <= 14; drop++)
+    {
+      struct pair *p;
+      gq_conn_config cfg;
+      double c, s;
+
+      memset (&cfg, 0, sizeof cfg);
+      g_server_ident = &id;
+      g_server_chain = ch.chain;
+      g_server_n_chain = 2;
+      p = pair_new (&cfg, &cfg, 0, 1);
+      g_server_ident = NULL;
+      g_server_chain = NULL;
+      p->net.drop_index = (int) drop;
+      (void) c; (void) s;
+      run (&p->net, both_connected, 30000000);
+      if (!(p->cli.connected && p->srv.connected))
+        fprintf (stderr, "flight: datagram %u lost: handshake did not "
+                 "complete\n", drop);
+      CHECK (p->cli.connected && p->srv.connected);
+      pair_free (p);
+    }
+  tst_free_mldsa_chain (&ch);
+}
+
+/* Whole handshakes with such flights, with the loss, burst loss and
+   reordering a path may have, on both QUIC versions: all complete.  */
+static void
+test_flight_loss (int mode)
+{
+  static const unsigned schemes[] = { GQ_SIG_MLDSA44, GQ_SIG_MLDSA65,
+                                      GQ_SIG_MLDSA87 };
+  static const uint32_t versions[] = { GQ_VERSION_1, GQ_VERSION_2 };
+  static const unsigned losses[] = { 0, 3, 8 };
+  static struct tst_mlchain ch;
+  static struct ident id;
+  size_t i, v, l;
+  uint32_t seed;
+
+  for (i = 0; i < 3; i++)
+    {
+      CHECK_EQ (tst_make_mldsa_chain (&ch, schemes[i], &fx_ca, "example.test",
+                                      mode), 0);
+      memset (&id, 0, sizeof id);
+      id.key = ch.key;
+      id.chain[0] = ch.chain[0];
+      for (v = 0; v < 2; v++)
+        for (l = 0; l < 3; l++)
+          for (seed = 1; seed <= 4; seed++)
+            {
+              struct pair *p;
+              gq_conn_config cfg;
+              double c, s;
+
+              memset (&cfg, 0, sizeof cfg);
+              cfg.version = versions[v];
+              p = run_flight (&id, ch.chain, 2, &cfg, losses[l], seed & 1,
+                              seed * 7 + (uint32_t) (i * 3 + v), 60000000, &c,
+                              &s);
+              if (!(p->cli.connected && p->srv.connected))
+                fprintf (stderr, "flight: set %zu v%zu loss %u%% seed %u did "
+                         "not complete\n", i, v + 1, losses[l], seed);
+              CHECK (p->cli.connected && p->srv.connected);
+              CHECK (gq_conn_is_established (p->cli.c));
+              CHECK (gq_conn_is_established (p->srv.c));
+              pair_free (p);
+            }
+      tst_free_mldsa_chain (&ch);
+    }
+}
+
+
+
+
+/* A ClientHello that takes more than one Initial datagram: three post-quantum
+   groups, the first with a 1665 byte share, and X25519's share as well.
+   The server reads it from CRYPTO frames in two Initial packets, whichever
+   of the datagrams is lost, and answers with a big flight.  */
+struct hello_obs
+{
+  int client_big;		/* Datagrams of 1200 bytes or more from the
+				   client before the server's first.  */
+  int server_seen;
+};
+
+static void
+hello_snoop (struct net *n, int from, const uint8_t *d, size_t len, int ecn,
+             void *user)
+{
+  struct hello_obs *o = user;
+
+  (void) n; (void) d; (void) ecn;
+  if (from == 1)
+    o->server_seen = 1;
+  else if (!o->server_seen && len >= 1200)
+    o->client_big++;
+}
+
+static void
+test_big_client_hello (int mode)
+{
+  static const uint16_t groups[] = { GQ_GROUP_SECP384R1_MLKEM1024,
+                                     GQ_GROUP_X25519_MLKEM768,
+                                     GQ_GROUP_X25519 };
+  static struct tst_mlchain ch;
+  static struct ident id;
+  int drop;
+  uint32_t seed;
+
+  CHECK_EQ (tst_make_mldsa_chain (&ch, GQ_SIG_MLDSA65, &fx_ca, "example.test",
+                                  mode), 0);
+  memset (&id, 0, sizeof id);
+  id.key = ch.key;
+  id.chain[0] = ch.chain[0];
+  g_cgroups = groups;
+  g_n_cgroups = 3;
+  for (drop = -1; drop <= 7; drop++)
+    for (seed = 1; seed <= (drop < 0 ? 6u : 1u); seed++)
+      {
+        struct pair *p;
+        gq_conn_config cfg;
+        struct hello_obs obs = { 0, 0 };
+
+        memset (&cfg, 0, sizeof cfg);
+        g_server_ident = &id;
+        g_server_chain = ch.chain;
+        g_server_n_chain = 2;
+        p = pair_new (&cfg, &cfg, drop < 0 ? 5 : 0, seed);
+        g_server_ident = NULL;
+        g_server_chain = NULL;
+        p->net.snoop = hello_snoop;
+        p->net.snoop_user = &obs;
+        p->net.drop_index = drop;
+        run (&p->net, both_connected, 60000000);
+        if (!(p->cli.connected && p->srv.connected))
+          fprintf (stderr, "hello: datagram %d lost, seed %u: handshake did "
+                   "not complete\n", drop, seed);
+        CHECK (p->cli.connected && p->srv.connected);
+        CHECK (obs.client_big >= 2);	/* It did not fit one.  */
+        pair_free (p);
+      }
+  g_cgroups = NULL;
+  g_n_cgroups = 0;
+  tst_free_mldsa_chain (&ch);
+}
+
+/* All of the above for both kinds of chain: the one with a classical leaf
+   padded to the ML-DSA sizes, which any GnuTLS validates, and, where this
+   one validates ML-DSA keys, the one with a real ML-DSA key in the leaf.  */
+static void
+test_flights (void)
+{
+  int real = tst_mldsa_ready (tst_gnutls_validates_mldsa (),
+                              "the large flights with real ML-DSA keys");
+  int mode;
+
+  for (mode = TST_CHAIN_ML; mode <= TST_CHAIN_CLASSIC; mode++)
+    {
+      if (mode == TST_CHAIN_ML && !real)
+        continue;
+      test_flight_cost (mode);
+      test_flight_amplification (mode);
+      test_flight_lost_datagram (mode);
+      test_flight_loss (mode);
+      test_big_client_hello (mode);
     }
 }
 
@@ -3323,6 +3673,7 @@ main (void)
   test_handshake (GQ_VERSION_1, 0, 4);
   test_handshake (GQ_VERSION_2, 0, 2);
   test_handshake (0, 20, 3);
+  test_flights ();
   test_lost_handshake_datagram ();
   test_mldsa_handshake ();
   test_requests (0, 11, 1, 20, 100, NULL, NULL, 0);

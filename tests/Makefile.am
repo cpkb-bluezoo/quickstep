@@ -31,6 +31,10 @@ check_PROGRAMS = $(UNIT_TESTS)
 
 # It uses the library's own ML-DSA module, which a shared library does not
 # export.
+test_tlsconn_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
+test_tlsconn_LDFLAGS = -static
+test_dtls_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
+test_dtls_LDFLAGS = -static
 test_conn_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
 test_conn_LDFLAGS = -static
 test_tls_server_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src

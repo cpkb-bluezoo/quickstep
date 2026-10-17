@@ -696,6 +696,17 @@ on_loss_timeout (gq_conn *c, uint64_t now)
   conn_pmtu_on_pto (c);
   s = &c->sp[sp];
   s->probes = 2;
+  /* An earlier space with crypto data waiting for room is probed too.  What
+     was declared lost there goes out again only when the congestion window
+     has room, and the window can be full of the later space's packets that
+     the peer cannot read until that very data arrives: a server whose
+     ServerHello lost its head has sent its Handshake flight to a client
+     without keys, and nothing it sent is acknowledged.  The probe is not
+     held by the window (RFC 9002 section 6.2.4), and gets the data across.  */
+  for (i = 0; i < (size_t) sp; i++)
+    if (!c->sp[i].discarded && c->sp[i].have_wk
+        && gq_sstream_pending (&c->sp[i].cs, UINT64_MAX))
+      c->sp[i].probes = 2;
   /* Retransmit what the oldest outstanding packet carried: it is the one
      most likely to be lost.  */
   for (i = 0; i < s->n_sent; i++)

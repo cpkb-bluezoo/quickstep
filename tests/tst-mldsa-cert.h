@@ -42,7 +42,7 @@
 struct tst_mlident
 {
   unsigned scheme;
-  uint8_t cert[8192];		/* ML-DSA-87's key alone is 2592 bytes.  */
+  uint8_t cert[16384];		/* ML-DSA-87's key alone is 2592 bytes.  */
   size_t cert_len;
   gq_slice chain[1];
   gq_privkey *key;
@@ -52,7 +52,7 @@ struct tst_mlident
 /* A growing DER buffer.  */
 struct tst_der
 {
-  uint8_t b[8192];
+  uint8_t b[16384];
   size_t n;
 };
 
@@ -161,9 +161,10 @@ tst_mldsa_seed_pem (unsigned scheme, const uint8_t seed[GQI_MLDSA_SEED_LEN],
    issued by the classical (ECDSA) CA, valid from NOT_BEFORE to NOT_AFTER
    seconds from now.  Returns 0, or a nonzero value on failure.  */
 static inline int
-tst_make_mldsa_cert (struct tst_mlident *id, unsigned scheme, const char *cn,
-                     const char *san, int client, const struct tst_cert *ca,
-                     long not_before, long not_after)
+tst_make_mldsa_cert_pad (struct tst_mlident *id, unsigned scheme,
+                         const char *cn, const char *san, int client,
+                         const struct tst_cert *ca, long not_before,
+                         long not_after, size_t pad)
 {
   static const uint8_t ecdsa_sha256[] = {
     0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02
@@ -249,6 +250,19 @@ tst_make_mldsa_cert (struct tst_mlident *id, unsigned scheme, const char *cn,
     tst_der_hdr (&e, 0x04, v.n);
     tst_der_put (&e, v.b, v.n);
     tst_der_wrap (&ext, 0x30, &e);
+    if (pad)
+      {
+        /* 1.3.6.1.4.1.55555.1, not critical, PAD bytes of nothing.  */
+        static const uint8_t pad_oid[] = { 0x06, 0x09, 0x2b, 0x06, 0x01, 0x04,
+                                           0x01, 0x83, 0xb2, 0x03, 0x01 };
+
+        e.n = 0;
+        tst_der_put (&e, pad_oid, sizeof pad_oid);
+        tst_der_hdr (&e, 0x04, pad);
+        memset (e.b + e.n, 0x5a, pad);
+        e.n += pad;
+        tst_der_wrap (&ext, 0x30, &e);
+      }
   }
 
   /* TBSCertificate.  */
@@ -314,12 +328,125 @@ tst_make_mldsa_cert (struct tst_mlident *id, unsigned scheme, const char *cn,
   return 0;
 }
 
+static inline int
+tst_make_mldsa_cert (struct tst_mlident *id, unsigned scheme, const char *cn,
+                     const char *san, int client, const struct tst_cert *ca,
+                     long not_before, long not_after)
+{
+  return tst_make_mldsa_cert_pad (id, scheme, cn, san, client, ca, not_before,
+                                  not_after, 0);
+}
+
 static inline void
 tst_free_mldsa_cert (struct tst_mlident *id)
 {
   gq_privkey_free (id->key);
   gq_wipe (id->seed, sizeof id->seed);
   id->key = NULL;
+}
+
+/* A server chain the size of one made with ML-DSA throughout: a leaf and an
+   intermediate CA, 2 certificates, issued under ROOT.  A chain with real
+   ML-DSA signatures needs a GnuTLS with a backend to be validated, so the
+   signatures are the classical ones and the sizes are made up with padding
+   (a private extension, tst-x509.h).  MODE says how:
+
+   TST_CHAIN_KEY      the leaf has a real ML-DSA key of SCHEME and nothing
+                      else is padded (the chain of 4 to 8 KB, as it would be
+                      with a classical CA);
+   TST_CHAIN_ML       the leaf has the real key, and padding makes both
+                      certificates, and the CertificateVerify that will be
+                      sent, as big as with ML-DSA signatures throughout;
+   TST_CHAIN_CLASSIC  as ML, but the leaf has an ECDSA key too, padded for
+                      the size of the key as well, so that no ML-DSA is used
+                      at all and any GnuTLS validates it: the same flight,
+                      for a test of size alone.
+
+   A full flight is the 14 KB of the ML-DSA-65 case: the two certificates of
+   about 5.5 KB each, and the 3309 byte CertificateVerify.  */
+enum { TST_CHAIN_KEY, TST_CHAIN_ML, TST_CHAIN_CLASSIC };
+
+struct tst_mlchain
+{
+  struct tst_cert inter;
+  struct tst_mlident leaf;	/* The leaf, whatever its key.  */
+  struct tst_cert gleaf;	/* ...and the GnuTLS side of it (CLASSIC).  */
+  int classic;
+  uint8_t inter_der[16384];
+  size_t inter_len;
+  gq_slice chain[2];
+  gq_privkey *key;		/* The leaf's (owned by LEAF).  */
+  size_t total;			/* The size of the two certificates.  */
+};
+
+static inline int
+tst_make_mldsa_chain (struct tst_mlchain *c, unsigned scheme,
+                      const struct tst_cert *root, const char *san, int mode)
+{
+  size_t pk = gqi_mldsa_pk_len (scheme), sg = gqi_mldsa_sig_len (scheme);
+  size_t lpad = 0, ipad = 0;
+  gnutls_datum_t d, pem;
+
+  if (mode != TST_CHAIN_KEY)
+    {
+      ipad = pk + sg - 163;		/* A key and a signature, for ECDSA's.  */
+      lpad = sg - 72;			/* The leaf's own signature.  */
+      if (mode == TST_CHAIN_CLASSIC)
+        lpad += pk - 91 + sg;		/* ...its key, and the CertificateVerify.  */
+    }
+  memset (c, 0, sizeof *c);
+  if (tst_make_cert_pad (&c->inter, TST_ECDSA256, "Intermediate CA", NULL, root,
+                         -3600, 86400, GNUTLS_DIG_SHA256,
+                         GNUTLS_KP_TLS_WWW_SERVER, ipad) != 0)
+    return -1;
+  if (mode == TST_CHAIN_CLASSIC)
+    {
+      c->classic = 1;
+      if (tst_make_cert_pad (&c->gleaf, TST_ECDSA256, "padded", san, &c->inter,
+                             -3600, 86400, GNUTLS_DIG_SHA256,
+                             GNUTLS_KP_TLS_WWW_SERVER, lpad) != 0)
+        return -1;
+      if (gnutls_x509_crt_export2 (c->gleaf.crt, GNUTLS_X509_FMT_DER, &d) < 0)
+        return -1;
+      if (d.size > sizeof c->leaf.cert)
+        return -1;
+      memcpy (c->leaf.cert, d.data, d.size);
+      c->leaf.cert_len = d.size;
+      gnutls_free (d.data);
+      c->leaf.chain[0] = (gq_slice) { c->leaf.cert, c->leaf.cert_len };
+      if (gnutls_x509_privkey_export2_pkcs8 (c->gleaf.key, GNUTLS_X509_FMT_PEM,
+                                             NULL, GNUTLS_PKCS_PLAIN, &pem) < 0)
+        return -1;
+      if (gq_privkey_from_pem (&c->leaf.key, pem.data, pem.size) != GQ_OK)
+        return -1;
+      gnutls_free (pem.data);
+    }
+  else if (tst_make_mldsa_cert_pad (&c->leaf, scheme, "mldsa", san, 0,
+                                    &c->inter, -3600, 86400, lpad) != 0)
+    return -1;
+  if (gnutls_x509_crt_export2 (c->inter.crt, GNUTLS_X509_FMT_DER, &d) < 0)
+    return -1;
+  c->inter_len = d.size;
+  memcpy (c->inter_der, d.data, d.size);
+  gnutls_free (d.data);
+  c->chain[0] = c->leaf.chain[0];
+  c->chain[1] = (gq_slice) { c->inter_der, c->inter_len };
+  c->key = c->leaf.key;
+  c->total = c->leaf.cert_len + c->inter_len;
+  return 0;
+}
+
+static inline void
+tst_free_mldsa_chain (struct tst_mlchain *c)
+{
+  if (c->classic)
+    {
+      gq_privkey_free (c->leaf.key);
+      tst_free_cert (&c->gleaf);
+    }
+  else
+    tst_free_mldsa_cert (&c->leaf);
+  tst_free_cert (&c->inter);
 }
 
 /* Does the GnuTLS in use validate a classical CA's certificate for an ML-DSA

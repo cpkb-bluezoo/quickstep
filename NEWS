@@ -13,6 +13,16 @@ quickstep.pc.  The C API (gq_ / GQ_) is unchanged.
 * Noteworthy changes in development (unreleased)
 
 ** Initial development.
+** QUIC: a handshake could stall when the packet holding the start of the
+server's ServerHello was lost and the server's flight was big enough to fill
+its congestion window with packets the client cannot read without it.  The
+lost data was queued but never sent, because only data of the space the
+timer was for could be sent past the window.  A timeout now also probes an
+earlier space with data waiting.  Handshakes with the big flights of ML-DSA
+(8 to 21 KB) now complete under loss, reordering and any lost datagram, in
+QUIC, DTLS 1.3 and TLS over TCP, and the manual states what they cost: in
+QUIC one round trip more than a classical handshake, where the server's
+flight is beyond three times the client's first.
 ** ML-DSA (FIPS 204) signatures work whatever GnuTLS the library is built
 with: they are libgcrypt's (1.12.0 and later, the build floor), where they
 had needed a GnuTLS with the leancrypto backend, which few have.  The

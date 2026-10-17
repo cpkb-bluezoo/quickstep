@@ -45,6 +45,7 @@ main (void)
 #else
 
 #include "tst-fix12.h"
+#include "tst-mldsa-cert.h"
 
 #define MAXQ 512
 
@@ -62,6 +63,7 @@ struct side
   char app[64][80];		/* Application messages received.  */
   int n_app;
   int sent;			/* Datagrams this side produced.  */
+  uint64_t connected_at;	/* When the handshake completed.  */
 };
 
 struct pkt
@@ -145,6 +147,7 @@ ev_connected (void *u, const gq_tls_info *i)
   struct side *s = u;
 
   s->connected = 1;
+  s->connected_at = s->net->now;
   s->info = *i;
   return 0;
 }
@@ -170,9 +173,21 @@ ev_closed (void *u, int error, int alert)
   s->close_alert = alert;
 }
 
+/* Any chain will do: the validation of one with an ML-DSA key in it is
+   GnuTLS's, and an older one cannot (tst_gnutls_validates_mldsa).  */
+static int
+accept_chain (void *u, const gq_slice *chain, size_t n, const char *name)
+{
+  (void) u; (void) chain; (void) n; (void) name;
+  return 0;
+}
+
 struct opts
 {
   struct ident *server_id;
+  const gq_slice *chain;	/* Its whole chain, if longer than one.  */
+  size_t n_chain;
+  int no_validate;		/* The client accepts any chain (a callback).  */
   const uint16_t *csuites;
   size_t n_csuites;
   const uint16_t *cgroups;
@@ -229,14 +244,17 @@ net_new (const struct opts *o)
       cc.client_key = o->client_id->key;
     }
   ev.user = &n->s[0];
+  if (o->no_validate)
+    ev.verify_peer = accept_chain;
   CHECK_EQ (gq_dtls_client_new (&n->s[0].d, &cc, &ev, &o->params), GQ_OK);
+  ev.verify_peer = NULL;
 
   if (!o->no_server)
     {
       memset (&sc, 0, sizeof sc);
       memset (&creds, 0, sizeof creds);
-      creds.chain = sid->chain;
-      creds.n_chain = 1;
+      creds.chain = o->chain ? o->chain : sid->chain;
+      creds.n_chain = o->chain ? o->n_chain : 1;
       creds.key = sid->key;
       sc.credentials = creds;
       sc.groups = o->sgroups;
@@ -978,6 +996,127 @@ test_pure_groups (void)
       }
 }
 
+/* ---- Large flights: ML-DSA's sizes ---- */
+
+struct lossy
+{
+  uint32_t st;
+  unsigned pct;
+};
+
+static int
+lose_seeded (struct net *n, int from, int index, void *u)
+{
+  struct lossy *l = u;
+
+  (void) n; (void) from; (void) index;
+  l->st = l->st * 1664525u + 1013904223u;
+  return (unsigned) ((l->st >> 12) % 100) < l->pct;
+}
+
+/* A DTLS 1.3 handshake whose server flight (two certificates of 4 to 15
+   KB, a CertificateVerify of up to 4.6 KB) takes ten to twenty datagrams
+   and is retransmitted as a whole, with the ACKs of RFC 9147 section 7:
+   clean, with loss, with reordering and with duplication, behind the
+   cookie listener and without.  The client accepts any chain by a
+   callback if VALIDATE is 0: the chain is the thing under test, not what
+   GnuTLS thinks of it.  */
+static void
+flights (int mode, int validate)
+{
+  static const unsigned schemes[] = { GQ_SIG_MLDSA44, GQ_SIG_MLDSA65,
+                                      GQ_SIG_MLDSA87 };
+  static struct tst_mlchain ch;
+  static struct ident id;
+  size_t i, k;
+  int cookie;
+  /* Loss percent, reorder, duplicate.  */
+  static const struct { unsigned loss; int reorder, dup; } modes[] = {
+    { 0, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 5, 0, 0 }, { 15, 0, 0 },
+    { 10, 1, 1 }
+  };
+
+  for (i = 0; i < 3; i++)
+    {
+      CHECK_EQ (tst_make_mldsa_chain (&ch, schemes[i], &fx_ca, "example.test",
+                                      mode), 0);
+      memset (&id, 0, sizeof id);
+      id.key = ch.key;
+      id.chain[0] = ch.chain[0];
+      for (cookie = 0; cookie < 2; cookie++)
+        for (k = 0; k < sizeof modes / sizeof modes[0]; k++)
+          {
+            unsigned seed;
+
+            for (seed = 1; seed <= (modes[k].loss ? 4u : 1u); seed++)
+              {
+                struct opts o;
+                struct net *n;
+                struct lossy l = { seed * 2654435761u, modes[k].loss };
+
+                memset (&o, 0, sizeof o);
+                o.server_id = &id;
+                o.chain = ch.chain;
+                o.n_chain = 2;
+                o.no_validate = !validate;
+                o.cookie = cookie;
+                o.params.max_retransmits = 12;	/* Loss, not death.  */
+                n = net_new (&o);
+                n->reorder = modes[k].reorder;
+                n->dup_all = modes[k].dup;
+                if (modes[k].loss)
+                  {
+                    n->lose = lose_seeded;
+                    n->lose_user = &l;
+                  }
+                if (!handshake (n, 600000))
+                  fprintf (stderr, "dtls flight: set %zu cookie %d loss %u%% "
+                           "reorder %d dup %d seed %u: no handshake\n", i,
+                           cookie, modes[k].loss, modes[k].reorder,
+                           modes[k].dup, seed);
+                n->lose = NULL;
+                if (n->s[0].connected && n->s[1].connected)
+                  {
+                    run (n, 20000);
+                    expect_ok (n);
+                    exchange (n, 3, !modes[k].reorder);
+                    /* A clean path needs no retransmission: the server's
+                       flight is more than ten datagrams.  */
+                    if (!modes[k].loss && !modes[k].reorder && !modes[k].dup)
+                      {
+                        CHECK (n->s[1].sent >= 10);
+                        /* The whole flight is within one round trip of
+                           20 ms (nothing paces or limits it, unlike
+                           QUIC), and the cookie costs one more.  */
+                        CHECK (n->s[0].connected_at - 1000
+                               <= (cookie ? 45u : 25u));
+                        CHECK (n->s[1].connected_at - 1000
+                               <= (cookie ? 55u : 35u));
+                      }
+                  }
+                else
+                  CHECK (0);
+                net_free (n);
+              }
+          }
+      tst_free_mldsa_chain (&ch);
+    }
+}
+
+static void
+test_mldsa_flights (void)
+{
+  int real = tst_mldsa_ready (tst_gnutls_validates_mldsa (),
+                              "the large flights with real ML-DSA keys");
+
+  flights (TST_CHAIN_CLASSIC, 1);	/* Any GnuTLS validates it.  */
+  flights (TST_CHAIN_CLASSIC, 0);
+  flights (TST_CHAIN_ML, 0);		/* A real key, accepted by a callback.  */
+  if (real)
+    flights (TST_CHAIN_ML, 1);
+}
+
+
 static void
 test_cookie_loss (void)
 {
@@ -1454,6 +1593,7 @@ main (void)
   fx_setup ();
   test_cookie_handshake ();
   test_pure_groups ();
+  test_mldsa_flights ();
   test_cookie_loss ();
   test_listener ();
   test_handshakes ();

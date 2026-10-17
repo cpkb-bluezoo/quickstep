@@ -37,6 +37,7 @@ main (void)
 #else
 
 #include "tst-x509.h"
+#include "tst-mldsa-cert.h"
 #include "tst-tlspeer.h"
 
 /* ---- Fixtures (one CA and server certificate) ---- */
@@ -414,6 +415,192 @@ test_handshake_and_data (size_t chunk, int style)
   side_free (s);
 }
 
+/* ---- Large flights: ML-DSA's sizes, over a byte stream ---- */
+
+/* A client and a server connection, and what each has written for the
+   other.  */
+struct tc_end
+{
+  gq_tlsconn *c;
+  struct bytes out, app;
+  int connected, closed, err;
+};
+
+static int
+tc_write (void *u, const uint8_t *d, size_t n)
+{
+  bytes_add (&((struct tc_end *) u)->out, d, n);
+  return 0;
+}
+
+static int
+tc_data (void *u, const uint8_t *d, size_t n)
+{
+  bytes_add (&((struct tc_end *) u)->app, d, n);
+  return 0;
+}
+
+static int
+tc_connected (void *u, const gq_tls_info *i)
+{
+  (void) i;
+  ((struct tc_end *) u)->connected = 1;
+  return 0;
+}
+
+static void
+tc_closed (void *u, int error, int alert)
+{
+  struct tc_end *e = u;
+
+  (void) alert;
+  e->closed++;
+  e->err = error;
+}
+
+/* Move what each side wrote to the other, CHUNK bytes at a time (0: all),
+   until neither has anything to say.  Returns the first error.  */
+static int
+tc_run (struct tc_end *cl, struct tc_end *sv, size_t chunk)
+{
+  int r = GQ_OK;
+
+  for (;;)
+    {
+      struct tc_end *from[2] = { cl, sv }, *to[2] = { sv, cl };
+      int k, moved = 0;
+
+      for (k = 0; k < 2 && r == GQ_OK; k++)
+        {
+          size_t off = 0, n = from[k]->out.n;
+          uint8_t *copy;
+
+          if (n == 0)
+            continue;
+          copy = malloc (n);
+          memcpy (copy, from[k]->out.p, n);
+          from[k]->out.n = 0;
+          moved = 1;
+          while (off < n && r == GQ_OK)
+            {
+              size_t m = chunk && n - off > chunk ? chunk : n - off;
+
+              r = gq_tlsconn_receive (to[k]->c, copy + off, m);
+              off += m;
+            }
+          free (copy);
+        }
+      if (!moved || r != GQ_OK)
+        return r;
+    }
+}
+
+/* One handshake over a stream with the chain CH (N certificates), the
+   client taking messages of up to CLIENT_MAX bytes (0: the default), and
+   fed in CHUNK byte pieces.  Returns the status of the exchange; on success
+   data is exchanged each way to show the connection works.  */
+static int
+tc_flight (const struct tst_mlchain *ch, size_t client_max, size_t chunk)
+{
+  struct tc_end cl, sv;
+  gq_tls_config cc;
+  gq_tls_server_config sc;
+  gq_tlsconn_events ce, se;
+  static uint8_t msg[40000];
+  int r;
+  size_t i;
+
+  memset (&cl, 0, sizeof cl);
+  memset (&sv, 0, sizeof sv);
+  memset (&cc, 0, sizeof cc);
+  memset (&sc, 0, sizeof sc);
+  memset (&ce, 0, sizeof ce);
+  memset (&se, 0, sizeof se);
+  cc.server_name = "example.test";
+  cc.trust = trust;
+  cc.max_message_len = client_max;
+  sc.credentials.chain = ch->chain;
+  sc.credentials.n_chain = 2;
+  sc.credentials.key = ch->key;
+  ce.user = &cl;
+  se.user = &sv;
+  ce.write = se.write = tc_write;
+  ce.data = se.data = tc_data;
+  ce.connected = se.connected = tc_connected;
+  ce.closed = se.closed = tc_closed;
+  CHECK_EQ (gq_tlsconn_client_new (&cl.c, &cc, &ce), GQ_OK);
+  CHECK_EQ (gq_tlsconn_server_new (&sv.c, &sc, &se), GQ_OK);
+  CHECK_EQ (gq_tlsconn_start (cl.c), GQ_OK);
+  r = tc_run (&cl, &sv, chunk);
+  if (r == GQ_OK)
+    {
+      CHECK (cl.connected && sv.connected);
+      CHECK (gq_tlsconn_is_connected (cl.c) && gq_tlsconn_is_connected (sv.c));
+      /* Data each way, after a handshake of several records.  */
+      for (i = 0; i < sizeof msg; i++)
+        msg[i] = (uint8_t) (i * 7);
+      CHECK_EQ (gq_tlsconn_send (cl.c, msg, sizeof msg), GQ_OK);
+      CHECK_EQ (gq_tlsconn_send (sv.c, msg, sizeof msg), GQ_OK);
+      CHECK_EQ (tc_run (&cl, &sv, chunk), GQ_OK);
+      CHECK (sv.app.n == sizeof msg && memcmp (sv.app.p, msg, sizeof msg) == 0);
+      CHECK (cl.app.n == sizeof msg && memcmp (cl.app.p, msg, sizeof msg) == 0);
+    }
+  gq_tlsconn_free (cl.c);
+  gq_tlsconn_free (sv.c);
+  free (cl.out.p); free (cl.app.p); free (sv.out.p); free (sv.app.p);
+  return r;
+}
+
+/* The Certificate message of the chain: 4 bytes of header, the request
+   context (1), the list (3), and for each certificate its length (3), its
+   bytes and its (empty) extensions (2).  */
+static size_t
+certificate_message_len (const struct tst_mlchain *ch)
+{
+  return 4 + 1 + 3 + (3 + ch->chain[0].len + 2) + (3 + ch->chain[1].len + 2);
+}
+
+static void
+flights_over_tcp (int mode)
+{
+  static const unsigned schemes[] = { GQ_SIG_MLDSA44, GQ_SIG_MLDSA65,
+                                      GQ_SIG_MLDSA87 };
+  static const size_t chunks[] = { 0, 1460, 17, 1 };
+  static struct tst_mlchain ch;
+  size_t i, k, cert;
+
+  for (i = 0; i < 3; i++)
+    {
+      CHECK_EQ (tst_make_mldsa_chain (&ch, schemes[i], &ca, "example.test",
+                                      mode), 0);
+      cert = certificate_message_len (&ch);
+      /* The records hold 16 KiB, so the biggest of them spans two.  */
+      for (k = 0; k < sizeof chunks / sizeof chunks[0]; k++)
+        CHECK_EQ (tc_flight (&ch, 0, chunks[k]), GQ_OK);
+
+      /* max_message_len is the length of the body of a message: the
+         Certificate message just fits at its own length, and not at one
+         less (illegal_parameter, section 4.2 of RFC 8446 not allowing a
+         peer to be made to buffer more than it chose to).  */
+      CHECK_EQ (tc_flight (&ch, cert - 4, 0), GQ_OK);
+      CHECK_EQ (tc_flight (&ch, cert - 5, 0), GQ_ERR_PROTOCOL);
+      CHECK_EQ (tc_flight (&ch, cert - 5, 1), GQ_ERR_PROTOCOL);
+      tst_free_mldsa_chain (&ch);
+    }
+}
+
+static void
+test_flights_over_tcp (void)
+{
+  int real = tst_mldsa_ready (tst_gnutls_validates_mldsa (),
+                              "the large flights with real ML-DSA keys");
+
+  flights_over_tcp (TST_CHAIN_CLASSIC);
+  if (real)
+    flights_over_tcp (TST_CHAIN_ML);
+}
+
+
 static void
 test_rekey_by_count (void)
 {
@@ -595,6 +782,7 @@ main (void)
   test_handshake_and_data (1, 1);
   test_handshake_and_data (13, 2);
   test_rekey_by_count ();
+  test_flights_over_tcp ();
   test_failures ();
   TST_DONE ();
 }

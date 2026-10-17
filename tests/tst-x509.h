@@ -76,11 +76,20 @@ struct tst_cert
 /* Create a certificate for a fresh KIND key.  SAN NULL makes a CA.
    ISSUER NULL self-signs.  NOT_BEFORE/NOT_AFTER are seconds relative to
    now.  Returns 0 on success or a GnuTLS error.  */
+/* The OID of the extension that pads a certificate to a size (a private
+   one: 1.3.6.1.4.1.55555.1, non-critical).  */
+#define TST_PAD_OID "1.3.6.1.4.1.55555.1"
+
+/* As tst_make_cert_eku, with PAD bytes of padding in an extension nobody
+   reads, to give a certificate the size it would have with a bigger key and
+   signature than the ones it has (the post-quantum sizes, for a test of a
+   handshake's size, without the algorithms that need a backend).  */
 static inline int
-tst_make_cert_eku (struct tst_cert *out, enum tst_key kind, const char *cn,
+tst_make_cert_pad (struct tst_cert *out, enum tst_key kind, const char *cn,
                    const char *san, const struct tst_cert *issuer,
                    long not_before, long not_after,
-                   gnutls_digest_algorithm_t dig, const char *eku)
+                   gnutls_digest_algorithm_t dig, const char *eku,
+                   size_t pad)
 {
   time_t now = time (NULL);
   unsigned char serial[4] = { 1, 2, 3, 4 };
@@ -135,9 +144,32 @@ tst_make_cert_eku (struct tst_cert *out, enum tst_key kind, const char *cn,
                                             GNUTLS_FSAN_SET);
       gnutls_x509_crt_set_key_purpose_oid (out->crt, eku, 0);
     }
+  if (pad)
+    {
+      unsigned char *buf = calloc (1, pad);
+
+      if (buf == NULL)
+        return GNUTLS_E_MEMORY_ERROR;
+      memset (buf, 0x5a, pad);
+      r = gnutls_x509_crt_set_extension_by_oid (out->crt, TST_PAD_OID, buf, pad,
+                                                0);
+      free (buf);
+      if (r < 0)
+        return r;
+    }
   if (issuer == NULL)
     return gnutls_x509_crt_sign2 (out->crt, out->crt, out->key, dig, 0);
   return gnutls_x509_crt_sign2 (out->crt, issuer->crt, issuer->key, dig, 0);
+}
+
+static inline int
+tst_make_cert_eku (struct tst_cert *out, enum tst_key kind, const char *cn,
+                   const char *san, const struct tst_cert *issuer,
+                   long not_before, long not_after,
+                   gnutls_digest_algorithm_t dig, const char *eku)
+{
+  return tst_make_cert_pad (out, kind, cn, san, issuer, not_before, not_after,
+                            dig, eku, 0);
 }
 
 /* Server certificate (serverAuth).  */
