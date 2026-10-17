@@ -38,6 +38,9 @@ int test_conn_main (void);
 
 #include "../src/conn_int.h"
 
+/* The spin bit forge puts in its packets.  */
+static int forge_spin;
+
 /* Seal FR (N frames) as a 1-RTT packet from FROM to TO, with FROM's keys and
    next packet number.  FROM is not asked to send anything itself.  BAD flips
    a bit of the tag.  FROM_PATH, if not NULL, is where it appears to come
@@ -58,9 +61,9 @@ forge (gq_conn *from, gq_conn *to, uint64_t now, const gq_path *from_path,
     }
   while (len < 8)
     pl[len++] = 0;
-  CHECK_EQ (gq_short_header_build (from->dcid.data, from->dcid.len, 0,
-                                   from->w_phase, pn, 4, pkt, sizeof pkt,
-                                   &hdr), GQ_OK);
+  CHECK_EQ (gq_short_header_build (from->dcid.data, from->dcid.len,
+                                   forge_spin, from->w_phase, pn, 4, pkt,
+                                   sizeof pkt, &hdr), GQ_OK);
   memcpy (pkt + hdr, pl, len);
   CHECK_EQ (gq_packet_seal (&s->wk, pn, pkt, hdr - 4, 4, len, sizeof pkt,
                             &out), GQ_OK);
@@ -764,6 +767,318 @@ test_qlog_clock_going_back (void)
   pair_free (p);
 }
 
+/* What an observer on the path sees of the spin bit in each direction
+   (0: the client's packets, 1: the server's).  */
+#define SPIN_GAPS 512
+struct spin_obs
+{
+  int armed;
+  struct
+  {
+    unsigned pkts, edges, ngaps;
+    int last;
+    uint64_t last_edge;
+    uint64_t gap[SPIN_GAPS];
+  } d[2];
+};
+
+static void
+spin_snoop (struct net *n, int from, const uint8_t *dg, size_t len,
+            void *user)
+{
+  struct spin_obs *o = user;
+  int bit;
+
+  if (!o->armed || len == 0 || (dg[0] & 0x80))
+    return;				/* Not a 1-RTT packet.  */
+  bit = (dg[0] >> 5) & 1;
+  if (o->d[from].pkts++ > 0 && bit != o->d[from].last)
+    {
+      if (o->d[from].edges++ > 0 && o->d[from].ngaps < SPIN_GAPS)
+        o->d[from].gap[o->d[from].ngaps++] = n->now - o->d[from].last_edge;
+      o->d[from].last_edge = n->now;
+    }
+  o->d[from].last = bit;
+}
+
+/* The mean gap between the edges of one direction, in microseconds.  */
+static uint64_t
+spin_mean_gap (const struct spin_obs *o, int dir)
+{
+  uint64_t sum = 0;
+  unsigned i;
+
+  for (i = 0; i < o->d[dir].ngaps; i++)
+    sum += o->d[dir].gap[i];
+  return o->d[dir].ngaps ? sum / o->d[dir].ngaps : 0;
+}
+
+/* A bulk transfer over a 100 ms round trip with both ends configured as CFG
+   and the server's response RESP bytes.  OBS sees every datagram; the
+   qlogs, in P, are left for the caller.  */
+static struct pair *
+spin_transfer (const gq_conn_config *cfg, struct spin_obs *obs, size_t resp)
+{
+  struct pair *p;
+  struct sbuf *s;
+  uint64_t id;
+
+  p = pair_new (cfg, cfg, 0, 61);
+  p->qlog_sink[0].keep = p->qlog_sink[1].keep = 1;
+  p->net.latency = 50000;
+  p->srv.respond = resp;
+  CHECK (run (&p->net, both_connected, 30000000));
+  run (&p->net, NULL, 500000);
+  memset (obs, 0, sizeof *obs);
+  obs->armed = 1;
+  p->net.snoop = spin_snoop;
+  p->net.snoop_user = obs;
+  CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+  s = sb_get (&p->cli, id);
+  s->out_total = 10;
+  s->out_fin = 1;
+  CHECK (wait_for_stream (p, s, resp, 120000000));
+  CHECK_EQ (p->cli.bad + p->srv.bad, 0);
+  return p;
+}
+
+/* As spin_transfer, but for a pair with the bit on at both ends: each
+   connection is drawn at random to have it off one time in eight, so try
+   again until there is one.  */
+static struct pair *
+spin_pair (const gq_conn_config *cfg, struct spin_obs *obs, size_t resp)
+{
+  int tries;
+
+  for (tries = 0; tries < 100; tries++)
+    {
+      struct pair *p = spin_transfer (cfg, obs, resp);
+
+      if (p->cli.c->spin_on && p->srv.c->spin_on)
+        return p;
+      pair_free (p);
+    }
+  CHECK (0);
+  return spin_transfer (cfg, obs, resp);
+}
+
+/* RFC 9000 section 17.4: with the spin bit on, the value in each direction
+   toggles once per round trip, so an observer can time it.  */
+static void
+test_spin_bit (void)
+{
+  gq_conn_config cfg;
+  struct spin_obs obs;
+  struct pair *p;
+  int dir;
+  const uint64_t rtt = 100000;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.initial_max_data = 100u << 20;
+  cfg.initial_max_stream_data = 100u << 20;
+  /* Every connection is drawn at random to have it off one time in eight,
+     so look for a pair that has it on at both ends.  */
+  p = spin_pair (&cfg, &obs, 4000000);
+  for (dir = 0; dir < 2; dir++)
+    {
+      unsigned i;
+
+      CHECK (obs.d[dir].pkts > 50);
+      CHECK (obs.d[dir].edges >= 6);
+      /* Time between edges is a round trip at the least, and not much more
+         with a steady stream of packets both ways.  */
+      for (i = 0; i < obs.d[dir].ngaps; i++)
+        CHECK (obs.d[dir].gap[i] >= rtt);
+      CHECK (spin_mean_gap (&obs, dir) < rtt * 3 / 2);
+    }
+  pair_free (p);
+}
+
+/* Switched off by configuration, the bit is random in each packet: it
+   changes about every other packet, and not once a round trip.  */
+static void
+test_spin_bit_disabled (void)
+{
+  gq_conn_config cfg;
+  struct spin_obs obs;
+  struct pair *p;
+  int dir;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.initial_max_data = 100u << 20;
+  cfg.initial_max_stream_data = 100u << 20;
+  cfg.disable_spin_bit = 1;
+  p = spin_transfer (&cfg, &obs, 4000000);
+  for (dir = 0; dir < 2; dir++)
+    {
+      CHECK (obs.d[dir].pkts >= 100);
+      CHECK (obs.d[dir].edges >= obs.d[dir].pkts / 4);
+      CHECK (obs.d[dir].edges <= obs.d[dir].pkts * 3 / 4);
+      CHECK (spin_mean_gap (&obs, dir) < 50000);
+    }
+  /* Nothing to report: the value we send is not a state.  */
+  CHECK_EQ (qsink_count (&p->qlog_sink[0], "quic:spin_bit_updated"), 0);
+  CHECK_EQ (qsink_count (&p->qlog_sink[1], "quic:spin_bit_updated"), 0);
+  pair_free (p);
+}
+
+/* RFC 9000 section 17.4: the connection is without the bit for a random
+   selection of at least one in sixteen, whatever the draw, and the
+   configuration turns it off for every one.  */
+static void
+test_spin_bit_selection (void)
+{
+  gq_conn_config cfg;
+  unsigned draw, off = 0;
+
+  memset (&cfg, 0, sizeof cfg);
+  for (draw = 0; draw < 256; draw++)
+    if (!conn_spin_enabled (&cfg, draw))
+      off++;
+  CHECK (off >= 256 / 16);
+  CHECK (off <= 256 / 4);		/* Most connections still spin.  */
+  cfg.disable_spin_bit = 1;
+  for (draw = 0; draw < 256; draw++)
+    CHECK (!conn_spin_enabled (&cfg, draw));
+}
+
+/* Seal a PING from FROM to TO with the spin bit SPIN, as if from PATH.  */
+static void
+spin_ping (gq_conn *from, gq_conn *to, uint64_t now, const gq_path *path,
+           int spin)
+{
+  gq_frame f;
+
+  memset (&f, 0, sizeof f);
+  f.type = GQ_FRAME_PING;
+  forge_spin = spin;
+  forge (from, to, now, path, &f, 1, 0);
+  forge_spin = 0;
+}
+
+/* A server echoes the bit of the highest-numbered packet it has received
+   from the client, so an old one that turns up late changes nothing; a
+   client sends the opposite; and a change of path starts again, as a new
+   path is a new thing to observe.  */
+static void
+test_spin_bit_rules (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  gq_conn *cli, *srv;
+  space *cs;
+  uint64_t pn;
+  gq_path np, to_srv, to_cli;
+  int tries;
+
+  memset (&cfg, 0, sizeof cfg);
+  for (tries = 0;; tries++)
+    {
+      p = pair_new_paths (&cfg, &cfg, 62);
+      settle (p);
+      if ((p->cli.c->spin_on && p->srv.c->spin_on) || tries == 99)
+        break;
+      pair_free (p);
+    }
+  CHECK (p->cli.c->spin_on && p->srv.c->spin_on);
+  to_srv.local = p->net.S;
+  to_srv.remote = p->net.m[0].ext;
+  to_cli.local = p->net.L[0];
+  to_cli.remote = p->net.S;
+  cli = p->cli.c;
+  srv = p->srv.c;
+  cs = &cli->sp[SP_APP];
+
+  /* The server follows the client's bit...  */
+  spin_ping (cli, srv, p->net.now, &to_srv, 1);
+  CHECK_EQ (srv->spin_val, 1);
+  spin_ping (cli, srv, p->net.now, &to_srv, 0);
+  CHECK_EQ (srv->spin_val, 0);
+  /* ...but not from a packet older than the newest.  */
+  pn = cs->next_pn;
+  cs->next_pn = pn + 10;
+  spin_ping (cli, srv, p->net.now, &to_srv, 1);	/* pn + 10, newest.  */
+  CHECK_EQ (srv->spin_val, 1);
+  cs->next_pn = pn + 5;
+  spin_ping (cli, srv, p->net.now, &to_srv, 0);	/* Older: ignored.  */
+  CHECK_EQ (srv->spin_val, 1);
+  cs->next_pn = pn + 11;
+
+  /* The client sends the inverse of the server's.  */
+  spin_ping (srv, cli, p->net.now, &to_cli, 0);
+  CHECK_EQ (cli->spin_val, 1);
+  spin_ping (srv, cli, p->net.now, &to_cli, 1);
+  CHECK_EQ (cli->spin_val, 0);
+
+  /* A packet from a path the server has not seen moves it there, and the
+     spin state restarts from zero rather than carrying the old path's.  */
+  spin_ping (cli, srv, p->net.now, &to_srv, 1);
+  CHECK_EQ (srv->spin_val, 1);
+  np.local = p->net.S;
+  np.remote = p->net.m[3].ext;
+  spin_ping (cli, srv, p->net.now, &np, 1);
+  CHECK_EQ (srv->migrations, 1);
+  CHECK_EQ (srv->spin_val, 0);
+  pair_free (p);
+}
+
+/* The 1-RTT packets in the log carry the bit; spin_bit_updated reports each
+   change of the value we send, and only changes.  */
+static void
+test_spin_bit_qlog (void)
+{
+  gq_conn_config cfg;
+  struct spin_obs obs;
+  struct pair *p;
+  int end;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.initial_max_data = 100u << 20;
+  cfg.initial_max_stream_data = 100u << 20;
+  p = spin_pair (&cfg, &obs, 1000000);
+  for (end = 0; end < 2; end++)
+    {
+      const struct qsink *k = &p->qlog_sink[end];
+      size_t i, n = qsink_count (k, "quic:spin_bit_updated"), onertt = 0;
+      int prev = 0;
+      static const char *const ev[] = { "quic:packet_sent",
+                                        "quic:packet_received" };
+      int e;
+
+      CHECK (n >= 4);
+      for (i = 0; i < n; i++)
+        {
+          qline q;
+          int now;
+
+          CHECK (qsink_nth (k, "quic:spin_bit_updated", i, &q));
+          now = qline_is (&q, "state", "true");
+          CHECK (now || qline_is (&q, "state", "false"));
+          CHECK (now != prev);
+          prev = now;
+          qline_free (&q);
+        }
+      for (e = 0; e < 2; e++)
+        for (i = 0; i < qsink_count (k, ev[e]); i++)
+          {
+            qline q;
+
+            CHECK (qsink_nth (k, ev[e], i, &q));
+            if (qline_is (&q, "header.packet_type", "1RTT"))
+              {
+                onertt++;
+                CHECK (qline_get (&q, "header.spin_bit") != NULL);
+              }
+            else
+              CHECK (qline_get (&q, "header.spin_bit") == NULL);
+            qline_free (&q);
+          }
+      CHECK (onertt > 50);
+      CHECK_EQ (k->bad_event + k->bad_line, 0);
+    }
+  pair_free (p);
+}
+
 int
 main (void)
 {
@@ -787,6 +1102,11 @@ main (void)
   test_window_unused_does_not_grow ();
   test_pacing_deadline ();
   test_qlog_clock_going_back ();
+  test_spin_bit_selection ();
+  test_spin_bit_rules ();
+  test_spin_bit ();
+  test_spin_bit_disabled ();
+  test_spin_bit_qlog ();
   TST_DONE ();
 }
 

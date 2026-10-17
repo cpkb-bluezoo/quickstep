@@ -253,6 +253,9 @@ struct gq_conn
   uint8_t w_phase_acked;
   uint64_t rk_prev_until;	/* When the previous phase's read keys go.  */
   uint64_t aead_failed;		/* Packets that failed authentication.  */
+  uint8_t spin_on;		/* The spin bit is in use (else random).  */
+  uint8_t spin_val;		/* The value the next packet carries.  */
+  uint64_t spin_bits, spin_nbits;	/* Random bits for when it is off.  */
   uint64_t key_updates;
 
   /* Timing.  */
@@ -337,6 +340,13 @@ struct gq_conn
 
 /* conn.c */
 void conn_fail (gq_conn *c, uint64_t code, const char *reason);
+
+/* The latency spin bit (conn.c).  */
+int conn_spin_enabled (const gq_conn_config *cfg, unsigned draw);
+void conn_spin_draw (gq_conn *c);
+void conn_spin_reset (gq_conn *c);
+void conn_spin_received (gq_conn *c, int bit, int highest);
+int conn_spin_value (gq_conn *c);
 void conn_enter_closing (gq_conn *c, gq_conn_close_info *info, int draining);
 int conn_server_start (gq_conn *c, const uint8_t *odcid, size_t odcid_len,
                        const uint8_t *client_scid, size_t client_scid_len);
@@ -366,6 +376,7 @@ void ql_peer_validated (gq_conn *c);
 void ql_closed (gq_conn *c, int source, int application, uint64_t error,
                 const uint8_t *reason, size_t reason_len, const char *trigger);
 void ql_cid_check (gq_conn *c);
+void ql_spin_bit_updated (gq_conn *c, int state);
 void ql_rx_cid (gq_conn *c, const uint8_t *cid, size_t len);
 void ql_version_information (gq_conn *c, const uint32_t *client,
                              size_t nclient, const uint32_t *server,

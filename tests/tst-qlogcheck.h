@@ -419,7 +419,7 @@ static const char *const qc_milli_keys[] = {
 static const char *const qc_bool_keys[] = {
   "fin", "key_phase_bit", "spin_bit", "disable_active_migration",
   "resumption_allowed", "early_data_enabled", "retry_required", "done",
-  "grease_quic_bit", "reset_stream_at", NULL
+  "grease_quic_bit", "reset_stream_at", "state", NULL
 };
 static const char *const qc_hex_keys[] = {
   "dcid", "scid", "version", "connection_id", "stateless_reset_token", "data",

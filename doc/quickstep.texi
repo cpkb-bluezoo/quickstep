@@ -997,11 +997,10 @@ text, which it cannot know; without it the events carry none, as the draft
 allows.
 
 @heading What is logged
-Every event of the draft except these.  The spin bit, path MTU discovery,
-ECN and the buffering of packets that arrive before their keys are not
-implemented (see the issues for each), so @code{spin_bit_updated},
-@code{mtu_updated}, @code{ecn_state_updated} and @code{packet_buffered} have
-nothing to say.  @code{frames_created}, @code{frames_parsed} and
+Every event of the draft except these.  Path MTU discovery, ECN and the
+buffering of packets that arrive before their keys are not implemented (see
+the issues for each), so @code{mtu_updated}, @code{ecn_state_updated} and
+@code{packet_buffered} have nothing to say.  @code{frames_created}, @code{frames_parsed} and
 @code{frames_processed} would repeat what @code{packet_sent} and
 @code{packet_received} already carry, which the draft advises against.  A
 lost packet lists the frames it carried as far as they were kept, and the
@@ -1227,6 +1226,16 @@ connection ID.  A client keeps accepting datagrams from the server's
 address on any of its sockets, because a server goes on using the old path
 until it has validated the new one; datagrams from other addresses are
 ignored.  Events report path_validated, path_failed and migrated.
+
+@heading The spin bit
+The latency spin bit (RFC 9000 section 17.4) lets an observer on the path
+measure the round trip time: a server sends the bit of the newest 1-RTT
+packet it has received from the client, and a client the opposite.  A
+connection does not use it one time in eight, which is more than the one in
+sixteen the RFC requires, and again when it moves to another path, which
+starts it from the beginning; it then sends a random bit in each packet
+and ignores the one it receives.  Set @code{disable_spin_bit} in
+@code{gq_conn_config} to do that for every connection.
 
 @heading Not done
 The server's preferred_address, multipath, and choosing among several

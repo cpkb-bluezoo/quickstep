@@ -237,6 +237,7 @@ switch_to (gq_conn *c, int idx)
   /* A new path: forget what we knew about the old one's capacity
      (RFC 9000 section 9.4).  */
   cc_init (c);
+  conn_spin_reset (c);
   c->have_rtt = 0;
   c->srtt = CONN_INITIAL_RTT (c);
   c->rttvar = CONN_INITIAL_RTT (c) / 2;

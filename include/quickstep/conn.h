@@ -247,6 +247,13 @@ typedef struct gq_conn_config
   size_t cid_len;			/* Our connection IDs; 0: 8.  */
   unsigned active_cid_limit;		/* 0: 4 (2 to 8).  */
   int disable_active_migration;
+  /* The latency spin bit (RFC 9000 section 17.4).  Zero, the default, is
+     the RFC's behaviour: it is on for most connections and, as the RFC
+     requires, off for a random one in every eight, and again drawn afresh
+     when the connection moves to another path.  Nonzero turns it off for
+     every connection; the bit is then sent as a random value in each
+     packet, which reveals nothing, and what the peer sends is ignored.  */
+  int disable_spin_bit;
   /* Unreliable DATAGRAM frames (RFC 9221).  MAX_DATAGRAM_FRAME_SIZE is the
      largest frame we accept, advertised to the peer; 0 (the default)
      switches DATAGRAM off.  DATAGRAM_QUEUE bounds the bytes waiting to be

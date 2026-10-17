@@ -55,6 +55,7 @@ typedef struct pk
   size_t qf_len, qf_cap, qraw, pad;
   unsigned qf_n;
   const char *qtrigger;
+  int spin;			/* The spin bit it was sealed with.  */
 } pk;
 
 /* Start keeping what the log wants of the packet in slot SLOT of the
@@ -827,8 +828,11 @@ seal (gq_conn *c, uint64_t now, pk *p, uint64_t pn, size_t pn_len, uint8_t *out,
   int r;
 
   if (p->sp == SP_APP && !p->early)
-    r = gq_short_header_build (c->dcid.data, c->dcid.len, 0, c->w_phase, pn,
-                               pn_len, out, cap, &hdr);
+    {
+      p->spin = conn_spin_value (c);
+      r = gq_short_header_build (c->dcid.data, c->dcid.len, p->spin,
+                                 c->w_phase, pn, pn_len, out, cap, &hdr);
+    }
   else
     r = gq_long_header_build (p->early ? GQ_PKT_ZERO_RTT
                               : p->sp == SP_INITIAL ? GQ_PKT_INITIAL
@@ -868,6 +872,8 @@ log_sent (gq_conn *c, pk *p, uint64_t pn, size_t pnl, size_t w, uint32_t did,
     {
       h.have_key_phase = 1;
       h.key_phase = c->w_phase;
+      h.have_spin = 1;
+      h.spin = (unsigned) p->spin;
     }
   else
     {

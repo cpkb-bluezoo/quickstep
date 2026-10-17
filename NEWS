@@ -31,11 +31,19 @@ draft-ietf-quic-qlog-quic-events: set gq_conn_config.qlog (see
 quickstep/qlog.h) and each event arrives as a connection, a time, a name
 and a line of key=value fields, for awk and the other text tools.  The
 detail is chosen with qlog_importance and qlog_raw; secrets are never
-logged.  Every event of the draft is reported except the spin bit, path MTU
-discovery, ECN and the buffering of packets, which the library does not do
-yet, and the three that repeat what the packet events carry.  An endpoint
+logged.  Every event of the draft is reported except path MTU discovery,
+ECN and the buffering of packets, which the library does not do yet, and
+the three that repeat what the packet events carry.  An endpoint
 reports the events that belong to no connection through the same callback.
 gq_conn_original_dcid names a log by the draft's convention.
+** The latency spin bit (RFC 9000 section 17.4) is implemented, so an
+observer on the path can measure the round trip time: a server echoes the
+bit of the newest packet it has received and a client sends its opposite.
+It is off, and the bit sent at random in each packet, for one connection in
+eight (the RFC requires one in sixteen) and when the connection moves to a
+new path, which starts again.  Set gq_conn_config.disable_spin_bit to turn
+it off for every connection.  qlog reports spin_bit_updated and the bit in
+1-RTT packets.
 ** The interop endpoint writes a log for each connection into QLOGDIR, which
 the runner sets, and qlog-lint checks such files against the draft; the
 interop workflow runs it on what each run wrote.

@@ -230,6 +230,89 @@ conn_enter_closing (gq_conn *c, gq_conn_close_info *info, int draining)
     }
 }
 
+/* ---- The latency spin bit (RFC 9000 section 17.4) ---- */
+
+/* The RFC requires that it be off for a random selection of at least one in
+   sixteen paths or connection IDs, so that an observer cannot rely on it,
+   and RFC 9312 suggests one in eight.  DRAW is a random byte.  */
+int
+conn_spin_enabled (const gq_conn_config *cfg, unsigned draw)
+{
+  return !cfg->disable_spin_bit && (draw & 0xff) % 8 != 0;
+}
+
+/* Decide afresh whether this connection spins: when it starts, and when it
+   goes to another path.  */
+void
+conn_spin_draw (gq_conn *c)
+{
+  uint8_t draw = 0;
+
+  if (gq_random (&draw, 1) != GQ_OK)
+    draw = 0;			/* No randomness: stay out of it.  */
+  c->spin_on = conn_spin_enabled (&c->cfg, draw);
+}
+
+/* The value the next 1-RTT packet carries is V.  It is reported only when
+   it differs from the last one.  */
+static void
+spin_set (gq_conn *c, int v)
+{
+  if (c->spin_val == v)
+    return;
+  c->spin_val = (uint8_t) v;
+  if (c->spin_on)
+    ql_spin_bit_updated (c, v);
+}
+
+/* A new path starts from the beginning: the bit of the last one says
+   nothing about this one's round trip.  */
+void
+conn_spin_reset (gq_conn *c)
+{
+  spin_set (c, 0);
+  conn_spin_draw (c);
+}
+
+/* A 1-RTT packet with the spin bit BIT arrived.  Only the highest-numbered
+   one counts, as an older one that was reordered would end a period early.
+   A server echoes the bit and a client inverts it.  Without the bit, what
+   the peer sends is not looked at (section 17.4).  */
+void
+conn_spin_received (gq_conn *c, int bit, int highest)
+{
+  if (!c->spin_on || !highest)
+    return;
+  spin_set (c, c->role == GQ_ROLE_SERVER ? bit : !bit);
+}
+
+/* The bit for a 1-RTT packet about to be sent: the state, or a random value
+   when the bit is off, which looks like a connection whose peer spins at
+   random.  */
+int
+conn_spin_value (gq_conn *c)
+{
+  int v;
+
+  if (c->spin_on)
+    return c->spin_val;
+  if (c->spin_nbits == 0)
+    {
+      uint8_t b[8];
+      unsigned i;
+
+      c->spin_bits = 0;		/* If there is no randomness: always 0.  */
+      if (gq_random (b, sizeof b) == GQ_OK)
+        for (i = 0; i < sizeof b; i++)
+          c->spin_bits = c->spin_bits << 8 | b[i];
+      c->spin_nbits = 64;
+    }
+  v = (int) (c->spin_bits & 1);
+  c->spin_bits >>= 1;
+  c->spin_nbits--;
+  return v;
+}
+
 void
 conn_fail (gq_conn *c, uint64_t code, const char *reason)
 {
@@ -809,6 +892,7 @@ conn_alloc (enum gq_role role, const gq_conn_config *config,
   if (config)
     c->cfg = *config;
   fill_defaults (&c->cfg);
+  conn_spin_draw (c);
   conn_path_init (c, &c->cfg.path);
   if (events)
     c->ev = *events;

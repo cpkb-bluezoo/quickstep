@@ -1340,6 +1340,18 @@ ql_tuple_assigned (gq_conn *c, int idx, int abandoned)
   qlog_end (c, QE_TUPLE_ASSIGNED);
 }
 
+/* The spin bit we send changed to STATE.  */
+void
+ql_spin_bit_updated (gq_conn *c, int state)
+{
+  qkv *w;
+
+  if ((w = qlog_begin (c, QE_SPIN_BIT_UPDATED, NULL)) == NULL)
+    return;
+  qkv_bool (w, "state", state);
+  qlog_end (c, QE_SPIN_BIT_UPDATED);
+}
+
 /* A step in a migration, or the probing before one, on path slot IDX.  */
 void
 ql_migration (gq_conn *c, const char *state, int idx)

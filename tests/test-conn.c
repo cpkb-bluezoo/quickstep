@@ -133,6 +133,11 @@ struct net
      (NULL without path simulation), before the network sees it.  */
   void (*tap) (struct net *, int from, const gq_path *to, void *user);
   void *tap_user;
+  /* Called with the bytes of every datagram a connection sends, as an
+     observer on the path would see them.  */
+  void (*snoop) (struct net *, int from, const uint8_t *d, size_t len,
+                 void *user);
+  void *snoop_user;
   int hold;			/* Stash datagrams to EXT-0 instead of sending.  */
   struct pkt *held[8];
   int n_held;
@@ -484,6 +489,8 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len,
   memset (&src, 0, sizeof src);
   if (n->tap)
     n->tap (n, from, n->paths ? to : NULL, n->tap_user);
+  if (n->snoop)
+    n->snoop (n, from, d, len, n->snoop_user);
   if (n->paths && to)
     {
       int i, j;

@@ -41,10 +41,10 @@
    included.  Secrets are never logged: key_updated names the key and its
    phase but carries no key bytes.
 
-   Every event of the draft is produced but these.  The spin bit, path MTU
-   discovery, ECN and the buffering of packets that arrive before their keys
-   are not implemented, so spin_bit_updated, mtu_updated, ecn_state_updated
-   and packet_buffered have nothing to report.  frames_created, frames_parsed
+   Every event of the draft is produced but these.  Path MTU discovery, ECN
+   and the buffering of packets that arrive before their keys are not
+   implemented, so mtu_updated, ecn_state_updated and packet_buffered have
+   nothing to report.  frames_created, frames_parsed
    and frames_processed repeat what packet_sent and packet_received carry,
    which the draft advises against.
 

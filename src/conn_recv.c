@@ -1104,6 +1104,8 @@ recv_short (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t *used)
       q.pn_len = (unsigned) pn_len;
       q.have_key_phase = 1;
       q.key_phase = (pkt[0] >> 2) & 1;
+      q.have_spin = 1;
+      q.spin = (pkt[0] >> 5) & 1;
       q.have_dcid = 1;
       q.dcid = h.dcid.data;
       q.dcid_len = h.dcid.len;
@@ -1113,6 +1115,7 @@ recv_short (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t *used)
   if (process_payload (c, SP_APP, pkt + poff, plen, &ae, &nonprobing) != 0)
     return 1;
   note_received (c, SP_APP, pn, ae, now);
+  conn_spin_received (c, (pkt[0] >> 5) & 1, highest);
   conn_path_after_packet (c, now, nonprobing, highest);
   return 1;
 failed:
