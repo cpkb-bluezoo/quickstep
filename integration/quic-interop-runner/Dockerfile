@@ -89,6 +89,16 @@ RUN ldconfig
 # ours must win.
 ENV LD_LIBRARY_PATH=/usr/local/lib
 
+# The congestion controller the endpoint runs: cubic, newreno, or empty for the
+# library's default (CUBIC).  The runner gives the container only its own
+# variables, so the choice is made when the image is built:
+#   docker build --build-arg CONGESTION_CONTROL=newreno ...
+# It goes in a file that run_endpoint.sh reads, not in an ENV: a layer that only
+# expands an ARG is reused from a cache (podman does) even when the ARG has
+# changed, and a comparison run would silently test the wrong controller.
+ARG CONGESTION_CONTROL=
+RUN printf '%s' "$CONGESTION_CONTROL" > /congestion_control
+
 WORKDIR /quickstep
 COPY --from=build /quickstep-interop ./quickstep-interop
 COPY integration/quic-interop-runner/run_endpoint.sh ./

@@ -145,10 +145,21 @@ names contain `text`.
 peer implementation runs the whole suite twice, with quickstep as server
 and as client, and appends the runner's result matrices to the job
 summary. Logs and the runner's JSON results are uploaded as artifacts
-named `quic-interop-<peer>`. Run it from the Actions tab; the `peers` and
-`tests` inputs narrow it down, and `ref` builds the endpoint from another
-quickstep commit, branch or tag (a full commit SHA, not `sha^`) while the
-workflow itself stays at the commit it was dispatched from.
+named `quic-interop-<peer>`. Run it from the Actions tab.
+
+By default every implementation in the runner's `implementations_quic.json`
+is a peer. The list is read from the runner when the workflow runs, so a
+new implementation is tested without a change here. A peer that is only a
+client (chrome) is run against quickstep as server only, and one that is
+only a server (nginx, haproxy) against quickstep as client only. The
+inputs narrow or change a run:
+
+| Input | Effect |
+|-------|--------|
+| `peers` | Comma-separated names to test instead of all of them. A name the runner does not list fails the run rather than shrinking it |
+| `tests` | Test cases to run (empty: the whole suite) |
+| `congestion_control` | `cubic` (the default) or `newreno`: the controller the quickstep endpoint runs. It is chosen when the image is built (`--build-arg CONGESTION_CONTROL=...`), because the runner gives a container only its own environment variables; the entrypoint passes it to the endpoint as `QUICKSTEP_CC`. Run the workflow once with each to compare them |
+| `ref` | Builds the endpoint from another quickstep commit, branch or tag (a full commit SHA, not `sha^`) while the workflow itself stays at the commit it was dispatched from |
 
 ## What gets logged
 
@@ -159,9 +170,11 @@ artifact, under `logs/quickstep-server/` or `logs/quickstep-client/`:
   (`sim/`);
 - `endpoint.log` in the `server/` or `client/` directory, quickstep's console:
   its connection events, requests, and a `STATS` line per connection with the
-  library's own counters: duration, packets and bytes sent and received,
-  packets lost, smoothed and minimum RTT, congestion window, slow-start
-  threshold, congestion events, PTO count, key updates, and (client)
+  library's own counters: the congestion controller (`cc=`), duration,
+  packets and bytes sent and received, packets lost, smoothed and minimum
+  RTT, congestion window, slow-start threshold, congestion events, pacing
+  rate in bits per second (0 until the first RTT sample), PTO count, key
+  updates, and (client)
   application bytes and goodput in kbit/s. It is the quick way to see loss,
   stalls and rough performance without opening a capture;
 - `frames.tsv` in each case directory (`dump_frames.py`): one row per QUIC

@@ -176,6 +176,38 @@ env_or (const char *name, const char *fallback)
   return v && *v ? v : fallback;
 }
 
+/* The congestion controller, from QUICKSTEP_CC: "cubic", "newreno", or unset
+   for the library's default.  The runner passes the container only its own
+   variables, so the image sets this (Dockerfile, CONGESTION_CONTROL).  An
+   unknown value is an error rather than a silent default, so that a
+   mistyped workflow input does not test the wrong thing.  */
+static int
+congestion_control (void)
+{
+  const char *v = getenv ("QUICKSTEP_CC");
+
+  if (v == NULL || *v == '\0')
+    return GQ_CC_DEFAULT;
+  if (!strcmp (v, "cubic"))
+    return GQ_CC_CUBIC;
+  if (!strcmp (v, "newreno"))
+    return GQ_CC_NEWRENO;
+  fprintf (stderr, "unknown QUICKSTEP_CC \"%s\" (cubic or newreno)\n", v);
+  exit (1);
+}
+
+static const char *
+congestion_control_name (void)
+{
+  switch (congestion_control ())
+    {
+    case GQ_CC_NEWRENO:
+      return "newreno";
+    default:
+      return "cubic";
+    }
+}
+
 static uint64_t
 now_us (void)
 {
@@ -715,12 +747,12 @@ log_stats (struct cs *cs, const char *when)
     return;
   cs->stats_logged = 1;
   gq_conn_get_stats (cs->c, &st);
-  say ("STATS %s duration_ms=%llu packets_sent=%llu packets_received=%llu"
+  say ("STATS %s cc=%s duration_ms=%llu packets_sent=%llu packets_received=%llu"
           " packets_lost=%llu bytes_sent=%llu bytes_received=%llu"
           " srtt_us=%llu min_rtt_us=%llu rttvar_us=%llu cwnd=%llu"
           " ssthresh=%llu bytes_in_flight=%llu congestion_events=%llu"
-          " pto_count=%u key_updates=%llu",
-          when, (unsigned long long) ms,
+          " pacing_rate_bps=%llu pto_count=%u key_updates=%llu",
+          when, congestion_control_name (), (unsigned long long) ms,
           (unsigned long long) st.packets_sent,
           (unsigned long long) st.packets_received,
           (unsigned long long) st.packets_lost,
@@ -730,7 +762,8 @@ log_stats (struct cs *cs, const char *when)
           (unsigned long long) st.rttvar_us, (unsigned long long) st.cwnd,
           (unsigned long long) st.ssthresh,
           (unsigned long long) st.bytes_in_flight,
-          (unsigned long long) st.congestion_events, st.pto_count,
+          (unsigned long long) st.congestion_events,
+          (unsigned long long) st.pacing_rate_bps, st.pto_count,
           (unsigned long long) st.key_updates);
   if (!cs->r->server && ms > 0)
     say (" app_bytes=%zu goodput_kbps=%llu", cs->received,
@@ -881,6 +914,7 @@ run_server (struct run *r, const char *cert, const char *key)
 
   memset (&ec, 0, sizeof ec);
   ec.conn.initial_rtt_us = INITIAL_RTT_US;
+  ec.conn.congestion_control = congestion_control ();
   ec.server = &sc;
   /* Only the retry case may send a Retry: handshake fails if one arrives.  */
   ec.admit.require_retry = r->tc == TC_RETRY;
@@ -1125,6 +1159,7 @@ client_session (struct run *r, const gq_trust *trust, size_t first,
     }
   memset (&cc, 0, sizeof cc);
   cc.initial_rtt_us = INITIAL_RTT_US;
+  cc.congestion_control = congestion_control ();
   /* Open in v1 whatever else is offered, as the runner checks; the v2 case
      lists v2 first among what the server may switch us to.  */
   if (r->tc == TC_V2)
@@ -1310,6 +1345,8 @@ main (void)
     }
   if (getenv ("INTEROP_LOG") && *getenv ("INTEROP_LOG"))
     logfile = fopen (getenv ("INTEROP_LOG"), "a");
+  /* A bad QUICKSTEP_CC fails at once, not after a handshake is under way.  */
+  (void) congestion_control ();
   signal (SIGPIPE, SIG_IGN);
   signal (SIGTERM, on_signal);
   signal (SIGINT, on_signal);

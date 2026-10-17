@@ -22,6 +22,13 @@ if [ "$ROLE" = "client" ]; then
     echo "REQUESTS=$REQUESTS"
 fi
 
+# The congestion controller was chosen when the image was built
+# (CONGESTION_CONTROL in the Dockerfile); QUICKSTEP_CC set by hand wins.
+if [ -z "$QUICKSTEP_CC" ]; then
+    QUICKSTEP_CC=$(cat /congestion_control 2>/dev/null || true)
+fi
+export QUICKSTEP_CC
+
 # The endpoint copies its console to INTEROP_LOG, which the runner keeps with
 # the traces and the key log; exec keeps its exit status, which the runner
 # reads (127: unsupported).
