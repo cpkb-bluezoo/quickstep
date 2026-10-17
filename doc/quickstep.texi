@@ -847,6 +847,26 @@ of RFC 9000 section 3.  Both use @file{ranges.h}, a bounded sorted set of
 half-open ranges, so a peer cannot make their bookkeeping grow without
 limit.
 
+@heading Packets that come before their keys
+Datagrams can be reordered, so a Handshake or 1-RTT packet can arrive before
+the handshake data that gives the keys to read it (the server's flight
+arriving with its Initial last, the client's 1-RTT packet ahead of its
+Finished), and a 0-RTT packet before the ClientHello.  RFC 9001 section 5.7
+lets an endpoint drop them, which costs the peer a retransmission.  Instead
+a connection holds up to @code{gq_conn_config.max_buffered_packets} (16 by
+default; negative for none) of them, if their connection IDs, and for a
+Handshake packet the version, are ones the connection could have, and reads
+them, in the order they came and as of the time they came, when the keys
+arrive.  Past the limit a packet is dropped (qlog @code{rejected}); what is
+still unreadable when its keys are discarded, or the connection ends, is
+freed.  A held packet counts towards the amplification limit when it arrives,
+and not again.  Each can take a datagram's worth of memory.  An endpoint
+holds, up to eight datagrams for a second, 0-RTT packets for a connection that
+does not exist yet, and gives them to it when the client's Initial makes it.
+qlog has @code{packet_buffered} (trigger @code{keys_unavailable}) when a
+packet is held and @code{keys_available} on its @code{packet_received}
+later; @code{gq_conn_stats} counts @code{packets_buffered}.
+
 @heading What a connection does
 The TLS 1.3 engine runs in QUIC mode; its output is queued as CRYPTO data
 per packet number space and its secrets become packet keys.  Received
@@ -1054,10 +1074,8 @@ text, which it cannot know; without it the events carry none, as the draft
 allows.
 
 @heading What is logged
-Every event of the draft except these.  The buffering of packets that
-arrive before their keys is not implemented (see the issue), so
-@code{packet_buffered} has nothing to say.  @code{frames_created}, @code{frames_parsed} and
-@code{frames_processed} would repeat what @code{packet_sent} and
+Every event of the draft except @code{frames_created},
+@code{frames_parsed} and @code{frames_processed}, which would repeat what @code{packet_sent} and
 @code{packet_received} already carry, which the draft advises against.  A
 lost packet lists the frames it carried as far as they were kept, and the
 simple stream states (@code{open}, @code{closed}) are used unless the

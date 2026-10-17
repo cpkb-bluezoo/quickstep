@@ -265,6 +265,13 @@ typedef struct gq_conn_config
      every connection; the bit is then sent as a random value in each
      packet, which reveals nothing, and what the peer sends is ignored.  */
   int disable_spin_bit;
+  /* Packets that arrive before the keys to read them (RFC 9001 section
+     5.7): a Handshake or 1-RTT packet ahead of the handshake data that
+     brings its keys, a 0-RTT packet ahead of the Initial.  At most this many
+     are held, per connection, and tried again when the keys come, instead of
+     being dropped for the peer to send again.  0: 16.  Negative: none are
+     held.  Each takes up to a datagram's worth of memory.  */
+  int max_buffered_packets;
   /* Unreliable DATAGRAM frames (RFC 9221).  MAX_DATAGRAM_FRAME_SIZE is the
      largest frame we accept, advertised to the peer; 0 (the default)
      switches DATAGRAM off.  DATAGRAM_QUEUE bounds the bytes waiting to be
@@ -621,6 +628,8 @@ typedef struct gq_conn_stats
      the search for a larger one has ended.  */
   uint64_t max_datagram_size;
   int pmtu_done;
+  /* Packets held for want of the keys to read them, in all.  */
+  uint64_t packets_buffered;
 } gq_conn_stats;
 
 void gq_conn_get_stats (const gq_conn *c, gq_conn_stats *st);

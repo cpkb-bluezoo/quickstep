@@ -839,6 +839,8 @@ ql_packet_received (gq_conn *c, const qlog_hdr *h, size_t raw_len,
   if (vn)
     versions_out (w, "supported_versions", vn, n_vn);
   packet_tail (w, raw_len, payload_len, c->ql.dgram_id);
+  if (c->ql.rx_trigger)
+    qkv_str (w, "trigger", c->ql.rx_trigger);
   qlog_end (c, QE_PACKET_RECEIVED);
 }
 
@@ -1360,6 +1362,23 @@ ql_tuple_assigned (gq_conn *c, int idx, int abandoned)
       endpoint_out (c, w, "tuple_local", &e->p.local, NULL);
     }
   qlog_end (c, QE_TUPLE_ASSIGNED);
+}
+
+/* A packet that cannot be read yet is held (RFC 9001 section 5.7).  */
+void
+ql_packet_buffered (gq_conn *c, const qlog_hdr *h, size_t raw_len)
+{
+  qkv *w;
+
+  if ((w = qlog_begin (c, QE_PACKET_BUFFERED, NULL)) == NULL)
+    return;
+  qlog_header (w, h, 0);
+  qkv_push (w, "raw");
+  qkv_u64 (w, "length", raw_len);
+  qkv_pop (w);
+  qkv_u64 (w, "datagram_id", c->ql.dgram_id);
+  qkv_str (w, "trigger", "keys_unavailable");
+  qlog_end (c, QE_PACKET_BUFFERED);
 }
 
 /* The datagram size changed from OLD (0: not given) to NEW, or, with DONE,

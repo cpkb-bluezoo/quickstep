@@ -31,9 +31,8 @@ draft-ietf-quic-qlog-quic-events: set gq_conn_config.qlog (see
 quickstep/qlog.h) and each event arrives as a connection, a time, a name
 and a line of key=value fields, for awk and the other text tools.  The
 detail is chosen with qlog_importance and qlog_raw; secrets are never
-logged.  Every event of the draft is reported except the buffering of
-packets, which the library does not do yet, and the three that repeat what
-the packet events carry.  An endpoint
+logged.  Every event of the draft is reported except the three that repeat
+what the packet events carry.  An endpoint
 reports the events that belong to no connection through the same callback.
 gq_conn_original_dcid names a log by the draft's convention.
 ** The latency spin bit (RFC 9000 section 17.4) is implemented, so an
@@ -67,6 +66,14 @@ search is made again on a change of path and after a black hole, and every
 600 seconds when it ended short of the ceiling; a lost probe is not
 congestion.  gq_conn_stats gains max_datagram_size and pmtu_done, and qlog
 reports mtu_updated and is_mtu_probe_packet.
+** Packets that arrive before the keys to read them (RFC 9001 section 5.7)
+are held and read when the keys come, instead of being dropped for the peer
+to send again: a Handshake or 1-RTT packet ahead of the handshake data that
+brings its keys, and a 0-RTT packet ahead of the ClientHello or of the
+Initial that makes the connection (the endpoint holds those for a second).
+gq_conn_config.max_buffered_packets bounds it, 16 by default and negative
+for none; gq_conn_stats gains packets_buffered, and qlog reports
+packet_buffered and the keys_available trigger of packet_received.
 ** The interop endpoint writes a log for each connection into QLOGDIR, which
 the runner sets, and qlog-lint checks such files against the draft; the
 interop workflow runs it on what each run wrote.

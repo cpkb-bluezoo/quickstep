@@ -641,6 +641,105 @@ stateless_reset_check (gq_conn *c, const uint8_t *data, size_t len)
   return 0;
 }
 
+/* ---- Packets that came before their keys (RFC 9001 section 5.7) ---- */
+
+/* Keep the packet PKT (LEN bytes, of the datagram of DGRAM) of KIND, which
+   cannot be read yet, to be tried again when the keys come.  Q is what the
+   log is told of its header.  Returns 1 if it is held; 0 if packets are not
+   held at all, 2 if the limit has been reached: the caller drops it.  A
+   packet only gets here once its connection IDs are plausible.  */
+static int
+hold (gq_conn *c, uint64_t now, int kind, const uint8_t *pkt, size_t len,
+      size_t dgram, const qlog_hdr *q)
+{
+  held_pkt *h;
+
+  if (c->cfg.max_buffered_packets <= 0 || c->replaying)
+    return 0;
+  if (c->n_held >= (unsigned) c->cfg.max_buffered_packets)
+    return 2;
+  if (c->n_held == c->cap_held)
+    {
+      unsigned cap = c->cap_held ? c->cap_held * 2 : 4;
+      held_pkt *nv = realloc (c->held, cap * sizeof *nv);
+
+      if (nv == NULL)
+        return 2;
+      c->held = nv;
+      c->cap_held = cap;
+    }
+  h = &c->held[c->n_held];
+  memset (h, 0, sizeof *h);
+  h->d = malloc (len);
+  if (h->d == NULL)
+    return 2;
+  memcpy (h->d, pkt, len);
+  h->len = len;
+  h->dgram = dgram;
+  h->at = now;
+  h->dgram_id = c->ql.dgram_id;
+  h->kind = (uint8_t) kind;
+  h->ecn = c->rx_ecn;
+  if (c->rx_known)
+    {
+      h->from = c->rx;
+      h->has_from = 1;
+    }
+  c->n_held++;
+  c->packets_buffered++;
+  ql_packet_buffered (c, q, len);
+  return 1;
+}
+
+/* What to say of a held packet that is let go: the header is not read.  */
+static void
+drop_held (gq_conn *c, const held_pkt *h, const char *trigger)
+{
+  qlog_hdr q;
+
+  if (!QLOG_ON (c, QE_PACKET_DROPPED))
+    return;
+  memset (&q, 0, sizeof q);
+  q.type = h->kind == HELD_APP ? "1RTT" : h->kind == HELD_EARLY ? "0RTT"
+                                                               : "handshake";
+  c->ql.dgram_id = h->dgram_id;
+  ql_packet_dropped (c, &q, h->len, trigger);
+}
+
+/* The keys for packets of KIND will not come (0: all kinds): let them go.  */
+void
+conn_held_drop (gq_conn *c, int kind)
+{
+  unsigned i = 0;
+
+  while (i < c->n_held)
+    {
+      held_pkt *h = &c->held[i];
+
+      if (kind && h->kind != kind)
+        {
+          i++;
+          continue;
+        }
+      drop_held (c, h, "key_unavailable");
+      free (h->d);
+      memmove (h, h + 1, (c->n_held - i - 1) * sizeof *h);
+      c->n_held--;
+    }
+}
+
+void
+conn_held_free (gq_conn *c)
+{
+  unsigned i;
+
+  for (i = 0; i < c->n_held; i++)
+    free (c->held[i].d);
+  free (c->held);
+  c->held = NULL;
+  c->n_held = c->cap_held = 0;
+}
+
 /* Client: a Retry packet (RFC 9000 section 17.2.5).  Restart the Initial
    flight with the server's token and connection ID.  */
 static int
@@ -807,7 +906,7 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
 {
   gq_long_header h;
   space *s;
-  int sp, r, ae, adopt = 0;
+  int sp, r, ae, adopt = 0, future = 0;
   uint64_t pn;
   size_t poff, plen;
   gq_packet_keys ck, sk;
@@ -866,12 +965,18 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
          version negotiation: a server still hears the client's first
          version until the client has switched, and a client hears the
          server's new one once.  */
-      if (h.type != GQ_PKT_INITIAL)
+      if (h.type == GQ_PKT_HANDSHAKE && c->role == GQ_ROLE_CLIENT
+          && !c->switched && !c->sp[SP_HANDSHAKE].have_rk
+          && conn_version_listed (c, h.version)
+          && conn_version_compatible (c->version, h.version)
+          && gq_version_supported (h.version))
+        future = 1;	/* Ahead of the Initial that moves us to it.  */
+      else if (h.type != GQ_PKT_INITIAL)
         {
           drop_long (c, &h, "unsupported");
           return 0;
         }
-      if (c->role == GQ_ROLE_SERVER)
+      else if (c->role == GQ_ROLE_SERVER)
         {
           if (!c->switched || h.version != c->orig_version
               || !c->have_orig_rk)
@@ -915,11 +1020,19 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
     }
   if (h.type == GQ_PKT_ZERO_RTT)
     {
-      if (!c->got_first_initial)
+      if (c->role == GQ_ROLE_SERVER && !c->have_early_rk
+          && !c->handshake_complete && !c->switched)
         {
-          /* It came before the Initial that gives the keys for it.  */
-          drop_long (c, &h, "key_unavailable");
-          return 0;
+          /* It came before the ClientHello that gives the keys for it, or
+             the Initial that has it (or the rest of it).  */
+          qlog_hdr q;
+          int k;
+
+          long_hdr (&q, &h);
+          k = hold (c, now, HELD_EARLY, pkt, h.packet_len, dgram, &q);
+          if (k != 1)
+            drop_long (c, &h, k ? "rejected" : "key_unavailable");
+          return k == 1;
         }
       return recv_early (c, now, pkt, &h);
     }
@@ -948,11 +1061,22 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
     }
   if (c->role == GQ_ROLE_SERVER && !c->got_first_initial)
     {
-      drop_long (c, &h, "invalid");
-      return 0;
+      /* A Handshake packet ahead of the Initial that starts us.  */
+      qlog_hdr q;
+      int k = 0;
+
+      if (sp == SP_HANDSHAKE)
+        {
+          long_hdr (&q, &h);
+          k = hold (c, now, HELD_HANDSHAKE, pkt, h.packet_len, dgram, &q);
+        }
+      if (k != 1)
+        drop_long (c, &h, k == 2 ? "rejected" : sp == SP_HANDSHAKE
+                   ? "key_unavailable" : "invalid");
+      return k == 1;
     }
   s = &c->sp[sp];
-  if (s->discarded || !s->have_rk)
+  if (s->discarded)
     {
       drop_long (c, &h, "key_unavailable");
       return 0;
@@ -971,6 +1095,22 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
     {
       drop_long (c, &h, "invalid");
       return 0;
+    }
+  if (!s->have_rk || future)
+    {
+      /* The connection IDs are ours, so this is plausibly a packet for us
+         that is ahead of its keys.  */
+      qlog_hdr q;
+      int k = 0;
+
+      if (sp == SP_HANDSHAKE)
+        {
+          long_hdr (&q, &h);
+          k = hold (c, now, HELD_HANDSHAKE, pkt, h.packet_len, dgram, &q);
+        }
+      if (k != 1)
+        drop_long (c, &h, k == 2 ? "rejected" : "key_unavailable");
+      return k == 1;
     }
   if (rk == NULL)
     rk = &s->rk;
@@ -1039,10 +1179,33 @@ recv_short (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t *used)
   int update = 0, ae, r, highest, nonprobing = 0;
 
   *used = rem;
-  if (!s->have_rk || s->discarded)
+  if (s->discarded)
     {
       drop_short (c, rem, "key_unavailable");
       return 0;
+    }
+  if (!s->have_rk)
+    {
+      /* Ahead of its keys, if it is for us.  */
+      qlog_hdr q;
+      int k = 0;
+
+      if (gq_short_header_parse (pkt, rem, c->cfg.cid_len, &h) != GQ_OK)
+        {
+          drop_short (c, rem, "invalid");
+          return 0;
+        }
+      if (!is_our_cid (c, h.dcid.data, h.dcid.len))
+        {
+          drop_short (c, rem, "connection_unknown");
+          return 0;
+        }
+      memset (&q, 0, sizeof q);
+      q.type = "1RTT";
+      k = hold (c, now, HELD_APP, pkt, rem, rem, &q);
+      if (k != 1)
+        drop_short (c, rem, k == 2 ? "rejected" : "key_unavailable");
+      return k == 1;
     }
   if (c->have_rk_prev && now >= c->rk_prev_until)
     {
@@ -1151,6 +1314,73 @@ failed:
   else
     drop_short (c, rem, "decryption_failure");
   return 0;
+}
+
+/* The keys that a datagram brought may be those that held packets were
+   waiting for: read them, in the order they came and as of the time they
+   came, as often as it takes (a Handshake packet can bring the 1-RTT keys).
+   They are not counted again towards the amplification limit, which counted
+   them when they arrived.  */
+void
+conn_replay_held (gq_conn *c)
+{
+  int progress;
+  unsigned i;
+
+  if (c->replaying || c->n_held == 0)
+    return;
+  c->replaying = 1;
+  do
+    {
+      progress = 0;
+      i = 0;
+      while (i < c->n_held && c->state < GQ_CONN_CLOSING)
+        {
+          held_pkt h = c->held[i];
+          int ready;
+          size_t used;
+
+          switch (h.kind)
+            {
+            case HELD_HANDSHAKE:
+              ready = c->sp[SP_HANDSHAKE].have_rk
+                      || c->sp[SP_HANDSHAKE].discarded;
+              break;
+            case HELD_EARLY:
+              ready = c->have_early_rk || c->handshake_complete
+                      || c->switched || c->state >= GQ_CONN_CLOSING;
+              break;
+            default:
+              ready = c->sp[SP_APP].have_rk || c->sp[SP_APP].discarded;
+              break;
+            }
+          if (!ready)
+            {
+              i++;
+              continue;
+            }
+          memmove (&c->held[i], &c->held[i + 1],
+                   (c->n_held - i - 1) * sizeof *c->held);
+          c->n_held--;
+          conn_path_rx_begin (c, h.has_from ? &h.from : NULL);
+          c->rx_ecn = h.ecn;
+          c->ql.dgram_id = h.dgram_id;
+          c->ql.rx_trigger = "keys_available";
+          if (h.kind == HELD_APP)
+            recv_short (c, h.at, h.d, h.len, &used);
+          else
+            recv_long (c, h.at, h.d, h.len, h.dgram, &used);
+          c->ql.rx_trigger = NULL;
+          c->rx_ecn = -1;
+          conn_path_rx_end (c);
+          free (h.d);
+          progress = 1;
+        }
+    }
+  while (progress && c->state < GQ_CONN_CLOSING);
+  c->replaying = 0;
+  if (c->state >= GQ_CONN_CLOSING)
+    conn_held_free (c);
 }
 
 int

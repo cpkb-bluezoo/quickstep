@@ -396,6 +396,8 @@ conn_discard_space (gq_conn *c, int sp)
     }
   s->discarded = 1;
   s->have_rk = s->have_wk = 0;
+  if (sp != SP_INITIAL)
+    conn_held_drop (c, sp == SP_HANDSHAKE ? HELD_HANDSHAKE : HELD_APP);
   gq_packet_keys_wipe (&s->rk);
   gq_packet_keys_wipe (&s->wk);
   sp_sent_clear (c, sp);
@@ -831,6 +833,10 @@ fill_defaults (gq_conn_config *g)
     g->send_buffer = 256u << 10;
   if (g->max_udp_payload == 0)
     g->max_udp_payload = 1452;
+  if (g->max_buffered_packets == 0)
+    g->max_buffered_packets = 16;
+  if (g->max_buffered_packets > 256)
+    g->max_buffered_packets = 256;
   if (g->n_versions == 0)
     {
       if (g->version)
@@ -1211,6 +1217,7 @@ gq_conn_free (gq_conn *c)
     return;
   gq_tls_free (c->tls);
   gq_ticket_keys_free (c->ticket_v2);
+  conn_held_free (c);
   datagrams_free (c);
   for (i = 0; i < N_SPACES; i++)
     {
@@ -1322,6 +1329,7 @@ gq_conn_get_stats (const gq_conn *c, gq_conn_stats *st)
   st->ecn_marked_sent = c->ecn_marked_sent;
   st->max_datagram_size = conn_max_datagram (c);
   st->pmtu_done = conn_pmtu_done (c);
+  st->packets_buffered = c->packets_buffered;
 }
 
 /* ECN is a gq_ecn, or -1 when the caller does not say.  */
@@ -1344,6 +1352,8 @@ recv_datagram (gq_conn *c, uint64_t now_us, const gq_path *from, int ecn,
   r = conn_receive_datagram (c, now_us, data, len);
   c->rx_ecn = -1;
   conn_path_rx_end (c);
+  /* The keys this datagram brought open what came ahead of them.  */
+  conn_replay_held (c);
   ql_after (c);
   return r;
 }

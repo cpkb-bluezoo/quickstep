@@ -203,6 +203,10 @@ struct net
   uint8_t late[2048];
   size_t late_len;
   struct esink qs[MAXNODES];	/* What each node's endpoint logged.  */
+  /* A client's 0-RTT packet that comes coalesced after its Initial is sent
+     ahead of it in a datagram of its own, with the Initial's datagram
+     emptied of it.  */
+  int early_first, early_split;
 };
 
 static uint8_t
@@ -432,6 +436,47 @@ enqueue (struct net *net, struct node *from, const uint8_t *d, size_t len,
     {
       net->dropped++;
       return;
+    }
+  if (net->early_first && from != &net->node[0] && (d[0] & 0x80)
+      && len >= 1200)
+    {
+      gq_long_header h;
+
+      /* Initial, then a 0-RTT packet: the 0-RTT one goes first, alone.  */
+      if (gq_long_header_parse (d, len, &h) == GQ_OK && h.packet_len < len
+          && (d[h.packet_len] & 0xb0) == 0x90)	/* Long, QUIC v1 0-RTT.  */
+        {
+          uint8_t rest[2048];
+          size_t rl = len - h.packet_len;
+
+          memcpy (rest, d + h.packet_len, rl);
+          int ahead_of_all = net->early_first == 2;
+
+          net->early_first = 0;
+          net->early_split++;
+          enqueue (net, from, rest, rl, to, ecn);
+          if (ahead_of_all)
+            {
+              /* Not just ahead of this Initial but of the first: it comes
+                 before the server has a connection at all.  */
+              struct pkt last = net->q[net->nq - 1];
+              int first = 0;
+
+              while (first < net->nq - 1 && net->q[first].to != 0)
+                first++;
+              memmove (&net->q[first + 1], &net->q[first],
+                       (size_t) (net->nq - 1 - first) * sizeof net->q[0]);
+              net->q[first] = last;
+            }
+          {
+            uint8_t head[2048];
+
+            memcpy (head, d, len);
+            memset (head + h.packet_len, 0, rl);
+            enqueue (net, from, head, len, to, ecn);
+          }
+          return;
+        }
     }
   CHECK (net->nq < MAXQ);
   p = &net->q[net->nq++];
@@ -758,7 +803,7 @@ all_clients_done (struct net *net)
    arrives in the first flight and the server endpoint sees it as early
    data.  */
 static void
-test_early_data (void)
+run_early_data (int reorder, int limit, int expect_early)
 {
   gq_endpoint_config sc;
   gq_conn_config cc;
@@ -772,6 +817,7 @@ test_early_data (void)
   memset (&sc, 0, sizeof sc);
   sc.tickets = 1;
   sc.early_data = 1;
+  sc.conn.max_buffered_packets = limit;
   memset (&cc, 0, sizeof cc);
   cc.version = GQ_VERSION_1;
   sc.conn.version = GQ_VERSION_1;
@@ -791,6 +837,7 @@ test_early_data (void)
   memset (&path, 0, sizeof path);
   path.local = net->node[1].addr;
   path.remote = net->node[0].addr;
+  net->early_first = reorder;
   CHECK_EQ (gq_endpoint_connect (net->node[1].ep, net->now, &tls2, &cc, &path,
                                  &ev, &b->c), GQ_OK);
   {
@@ -810,10 +857,28 @@ test_early_data (void)
 
     for (k = 0; k < net->node[0].napp; k++)
       early += net->node[0].app[k].early_bytes;
-    CHECK_EQ (early, 40);		/* Two requests of 20 bytes.  */
+    CHECK_EQ (early, expect_early);
   }
   CHECK (b->got[0] == net->node[0].respond && b->got[1] == net->node[0].respond);
+  if (reorder)
+    CHECK_EQ (net->early_split, 1);
   net_free (net);
+}
+
+static void
+test_early_data (void)
+{
+  run_early_data (0, 0, 40);		/* Two requests of 20 bytes.  */
+  /* The 0-RTT packet arrives ahead of the Initial that makes the
+     connection: it is held, and the early data is accepted as it would
+     have been; with no buffering it is lost and the requests are made
+     again after the handshake.  */
+  run_early_data (1, 0, 40);
+  run_early_data (1, -1, 0);
+  /* Ahead of every packet of the client's, so that there is no connection
+     for it to be held by but the endpoint's own care.  */
+  run_early_data (2, 0, 40);
+  run_early_data (2, -1, 0);
 }
 
 static void

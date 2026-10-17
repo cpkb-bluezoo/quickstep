@@ -77,6 +77,21 @@ typedef struct sent_frame
 /* The packets of an ECN test (RFC 9000 section 13.4.2).  */
 #define ECN_TEST_PACKETS 10
 
+/* A packet that arrived before the keys to read it, kept until they do
+   (RFC 9001 section 5.7).  */
+enum { HELD_HANDSHAKE = 1, HELD_EARLY, HELD_APP };
+
+typedef struct held_pkt
+{
+  uint8_t *d;
+  size_t len, dgram;		/* The packet, and the datagram it came in.  */
+  uint64_t at;			/* When it came.  */
+  uint32_t dgram_id;
+  gq_path from;
+  uint8_t has_from, kind;
+  int8_t ecn;
+} held_pkt;
+
 typedef struct sent_pkt
 {
   uint64_t pn;
@@ -275,6 +290,10 @@ struct gq_conn
   uint8_t pmtu_state, pmtu_probe_out, pmtu_fails;
   uint32_t pmtu_cur, pmtu_lo, pmtu_hi, pmtu_probe_size;
   uint32_t pmtu_gen;		/* Counts the searches; a probe carries it.  */
+  uint64_t packets_buffered;	/* Held for want of keys, in all.  */
+  held_pkt *held;		/* Packets held for want of keys,  */
+  unsigned n_held, cap_held;	/* in arrival order.  */
+  uint8_t replaying;
   uint64_t pmtu_raise_at;	/* When a finished search is made again.  */
   uint32_t ecn_gen;		/* Counts the tests; packets sent in one carry
 				   it, and none is 0.  */
@@ -376,6 +395,11 @@ struct gq_conn
 /* conn.c */
 void conn_fail (gq_conn *c, uint64_t code, const char *reason);
 
+/* Packets held for want of their keys (conn_recv.c).  */
+void conn_replay_held (gq_conn *c);
+void conn_held_drop (gq_conn *c, int kind);
+void conn_held_free (gq_conn *c);
+
 /* Path MTU discovery (conn_pmtu.c).  */
 #define PMTU_BASE 1200
 enum { PMTU_START = 0, PMTU_SEARCH, PMTU_DONE };
@@ -439,6 +463,7 @@ void ql_cid_check (gq_conn *c);
 void ql_spin_bit_updated (gq_conn *c, int state);
 void ql_ecn_state_updated (gq_conn *c, int old, int state);
 void ql_mtu_updated (gq_conn *c, size_t old, size_t new, int done);
+void ql_packet_buffered (gq_conn *c, const qlog_hdr *h, size_t raw_len);
 void ql_rx_cid (gq_conn *c, const uint8_t *cid, size_t len);
 void ql_version_information (gq_conn *c, const uint32_t *client,
                              size_t nclient, const uint32_t *server,

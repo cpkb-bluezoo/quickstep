@@ -37,6 +37,12 @@
 #define REPLY_MAX 1500
 #define MAX_GRAVES 256
 
+/* 0-RTT datagrams that came ahead of the Initial that makes their
+   connection (RFC 9001 section 5.7): at most this many, each kept for this
+   long.  */
+#define MAX_EARLY 8
+#define EARLY_LIFE_US 1000000u
+
 struct entry
 {
   gq_endpoint *ep;
@@ -88,6 +94,18 @@ struct grave
   gq_cid cid;
 };
 
+/* A datagram held until its connection exists.  */
+struct early
+{
+  uint8_t *d;
+  size_t len;
+  gq_path from;
+  int ecn;
+  uint64_t at;
+  uint8_t dcid[GQ_MAX_CID_LEN];
+  uint8_t dcid_len;
+};
+
 struct gq_endpoint
 {
   gq_endpoint_config cfg;
@@ -114,6 +132,8 @@ struct gq_endpoint
   /* Answers of our own.  */
   struct reply replies[MAX_REPLIES];
   size_t reply_head, reply_n;
+  struct early early[MAX_EARLY];
+  size_t n_early;
   /* Stateless reset rate limit.  */
   uint64_t reset_window;
   unsigned resets_in_window;
@@ -664,6 +684,8 @@ gq_endpoint_free (gq_endpoint *ep)
   /* Entries are freed as the heap drains.  */
   while (ep->heap_n)
     heap_pop (ep);
+  while (ep->n_early)
+    free (ep->early[--ep->n_early].d);
   free (ep->conns);
   free (ep->wake);
   free (ep->heap);
@@ -866,6 +888,82 @@ queue_reply (gq_endpoint *ep, const gq_path *to, const uint8_t *d, size_t len)
   return 1;
 }
 
+static void conn_recv (gq_conn *c, uint64_t now, const gq_path *from, int ecn,
+                       uint8_t *data, size_t len);
+
+/* Let go of the early datagrams held longer than they are good for.  */
+static void
+early_expire (gq_endpoint *ep, uint64_t now)
+{
+  size_t i = 0;
+
+  while (i < ep->n_early)
+    if (now - ep->early[i].at > EARLY_LIFE_US)
+      {
+        free (ep->early[i].d);
+        memmove (&ep->early[i], &ep->early[i + 1],
+                 (ep->n_early - i - 1) * sizeof ep->early[0]);
+        ep->n_early--;
+      }
+    else
+      i++;
+}
+
+/* A 0-RTT packet for a connection that does not exist yet: the client's
+   Initial may be on its way behind it.  Hold the datagram, within limits,
+   for when it comes.  Returns 1 if held.  */
+static int
+early_hold (gq_endpoint *ep, uint64_t now, const gq_path *from, int ecn,
+            const gq_long_header *h, const uint8_t *data, size_t len)
+{
+  struct early *x;
+  int limit = ep->cfg.conn.max_buffered_packets;
+
+  if (limit < 0 || from == NULL || from->remote.len == 0 || ep->closed
+      || !ep->serving || !gq_version_supported (h->version)
+      || h->dcid.len < 8 || h->dcid.len > GQ_MAX_CID_LEN
+      || len > 2048 || ep->n_early >= MAX_EARLY)
+    return 0;
+  x = &ep->early[ep->n_early];
+  x->d = malloc (len);
+  if (x->d == NULL)
+    return 0;
+  memcpy (x->d, data, len);
+  x->len = len;
+  x->from = *from;
+  x->ecn = ecn;
+  x->at = now;
+  x->dcid_len = (uint8_t) h->dcid.len;
+  memcpy (x->dcid, h->dcid.data, h->dcid.len);
+  ep->n_early++;
+  return 1;
+}
+
+/* Give the connection E, just made by the Initial of ID, the datagrams that
+   were held for it.  */
+static void
+early_release (gq_endpoint *ep, uint64_t now, struct entry *e,
+               const uint8_t *id, size_t id_len)
+{
+  size_t i = 0;
+
+  while (i < ep->n_early)
+    {
+      struct early x = ep->early[i];
+
+      if (x.dcid_len != id_len || memcmp (x.dcid, id, id_len) != 0)
+        {
+          i++;
+          continue;
+        }
+      memmove (&ep->early[i], &ep->early[i + 1],
+               (ep->n_early - i - 1) * sizeof ep->early[0]);
+      ep->n_early--;
+      conn_recv (e->c, now, &x.from, x.ecn, x.d, x.len);
+      free (x.d);
+    }
+}
+
 /* Give a connection a datagram; ECN is the field of its IP header, or -1 if
    the application did not say.  */
 static void
@@ -957,6 +1055,8 @@ admit (gq_endpoint *ep, uint64_t now, const gq_path *from, int ecn,
   if (ep->ev.connection)
     ep->ev.connection (ep->ev.user, c);
   conn_recv (c, now, from, ecn, data, len);
+  if (gq_long_header_parse (data, len, &h) == GQ_OK)
+    early_release (ep, now, e, h.dcid.data, h.dcid.len);
   mark_woken (ep, e);
   reschedule (ep, e);
   return GQ_OK;
@@ -1005,11 +1105,15 @@ endpoint_recv (gq_endpoint *ep, uint64_t now_us, const gq_path *from, int ecn,
 
       if (r == GQ_OK || r == GQ_ERR_UNSUPPORTED)
         e = lookup (ep, h.dcid.data, h.dcid.len);
+      early_expire (ep, now_us);
       if (e == NULL && r == GQ_OK && buried (ep, h.dcid.data, h.dcid.len))
         {
           ep_ql_unrouted (ep, len, "connection_unknown");
           return GQ_OK;
         }
+      if (e == NULL && r == GQ_OK && h.type == GQ_PKT_ZERO_RTT
+          && early_hold (ep, now_us, from, ecn, &h, data, len))
+        return GQ_OK;
       if (e == NULL)
         return admit (ep, now_us, from, ecn, data, len);
     }

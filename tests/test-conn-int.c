@@ -2317,6 +2317,336 @@ test_pmtu_qlog_nothing_to_find (void)
   pair_free (p);
 }
 
+/* ---- Packets that arrive before their keys (RFC 9001 section 5.7) ---- */
+
+#define MAXPIECES 64
+
+struct piece
+{
+  uint8_t d[2048];
+  size_t len;
+};
+
+/* A datagram split into the packets it holds (as separate datagrams, so
+   that they can be delivered in another order).  */
+static size_t
+split_datagram (const uint8_t *d, size_t len, struct piece *out, size_t max)
+{
+  size_t off = 0, n = 0;
+
+  while (off < len && n < max)
+    {
+      size_t used = len - off;
+
+      if (d[off] & 0x80)
+        {
+          gq_long_header h;
+
+          if (gq_long_header_parse (d + off, len - off, &h) == GQ_OK)
+            used = h.packet_len;
+        }
+      memcpy (out[n].d, d + off, used);
+      out[n].len = used;
+      n++;
+      off += used;
+    }
+  return n;
+}
+
+/* Everything FROM sends now: as datagrams, or if SPLIT as the packets in
+   them.  */
+static size_t
+collect (gq_conn *from, uint64_t now, struct piece *out, size_t max, int split)
+{
+  uint8_t buf[2048];
+  size_t len = 0, n = 0;
+  int guard;
+
+  for (guard = 0; guard < 100 && n < max; guard++)
+    {
+      CHECK_EQ (gq_conn_send (from, now, buf, sizeof buf, &len), GQ_OK);
+      if (len == 0)
+        break;
+      if (split)
+        n += split_datagram (buf, len, out + n, max - n);
+      else
+        {
+          memcpy (out[n].d, buf, len);
+          out[n].len = len;
+          n++;
+        }
+    }
+  return n;
+}
+
+static void
+deliver (gq_conn *to, uint64_t now, struct piece *pc, size_t n, int reverse)
+{
+  size_t i;
+
+  for (i = 0; i < n; i++)
+    {
+      struct piece *x = &pc[reverse ? n - 1 - i : i];
+
+      gq_conn_recv (to, now, x->d, x->len);
+    }
+}
+
+/* Run a handshake by hand, round by round, with no timers: the client's
+   flight, then the server's.  What a side sends after the first flight is
+   taken apart into its packets and given to the other in reverse order if
+   REV_CLI / REV_SRV; and once connected the client asks for something.  */
+static void
+by_hand (struct pair *p, int rev_cli, int rev_srv, int rounds)
+{
+  static struct piece pc[MAXPIECES];
+  uint64_t now = p->net.now;
+  int r, asked = 0;
+  size_t n;
+
+  for (r = 0; r < rounds; r++)
+    {
+      if (p->cli.connected && !asked)
+        {
+          uint64_t id;
+          uint8_t req[100];
+          size_t k;
+
+          asked = 1;
+          CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+          for (k = 0; k < sizeof req; k++)
+            req[k] = pat (id, k);
+          CHECK (gq_conn_stream_write (p->cli.c, id, req, sizeof req) == 100);
+        }
+      n = collect (p->cli.c, now, pc, MAXPIECES, rev_cli && r > 0);
+      now += 10000;
+      deliver (p->srv.c, now, pc, n, rev_cli && r > 0);
+      n = collect (p->srv.c, now, pc, MAXPIECES, rev_srv);
+      now += 10000;
+      deliver (p->cli.c, now, pc, n, rev_srv);
+    }
+  p->net.now = now;
+}
+
+static struct pair *
+buffer_pair (int limit)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.max_buffered_packets = limit;
+  p = pair_new (&cfg, &cfg, 0, 80);
+  p->qlog_sink[0].keep = p->qlog_sink[1].keep = 1;
+  if (getenv ("QDUMP"))
+    p->qlog_sink[0].dump = p->qlog_sink[1].dump = 1;
+  return p;
+}
+
+static size_t
+count_dropped (const struct qsink *k, const char *trigger)
+{
+  size_t i, c = 0;
+  qline q;
+
+  for (i = 0; i < qsink_count (k, "quic:packet_dropped"); i++)
+    {
+      CHECK (qsink_nth (k, "quic:packet_dropped", i, &q));
+      if (qline_is (&q, "trigger", trigger))
+        c++;
+      qline_free (&q);
+    }
+  return c;
+}
+
+static size_t
+count_received_after_keys (const struct qsink *k)
+{
+  size_t i, c = 0;
+  qline q;
+
+  for (i = 0; i < qsink_count (k, "quic:packet_received"); i++)
+    {
+      CHECK (qsink_nth (k, "quic:packet_received", i, &q));
+      if (qline_is (&q, "trigger", "keys_available"))
+        c++;
+      qline_free (&q);
+    }
+  return c;
+}
+
+/* The server's first flight arrives with its Handshake packets ahead of the
+   Initial that gives the client the keys for them: they are held and read
+   when the keys come, and the handshake needs no retransmission.  */
+static void
+test_buffer_handshake_before_initial (void)
+{
+  struct pair *p = buffer_pair (0);
+  gq_conn_stats st;
+
+  by_hand (p, 0, 1, 6);
+  CHECK (p->cli.connected && p->srv.connected);
+  gq_conn_get_stats (p->cli.c, &st);
+  CHECK (st.packets_buffered >= 1);
+  CHECK (qsink_count (&p->qlog_sink[0], "quic:packet_buffered") >= 1);
+  {
+    qline q;
+    size_t i, handshake = 0;
+
+    for (i = 0; i < qsink_count (&p->qlog_sink[0], "quic:packet_buffered");
+         i++)
+      {
+        CHECK (qsink_nth (&p->qlog_sink[0], "quic:packet_buffered", i, &q));
+        CHECK (qline_is (&q, "trigger", "keys_unavailable"));
+        if (qline_is (&q, "header.packet_type", "handshake"))
+          handshake++;
+        qline_free (&q);
+      }
+    CHECK (handshake >= 1);
+  }
+  CHECK (count_received_after_keys (&p->qlog_sink[0]) >= 1);
+  CHECK_EQ (count_dropped (&p->qlog_sink[0], "key_unavailable"), 0);
+  CHECK_EQ (p->qlog_sink[0].bad_event + p->qlog_sink[0].bad_line, 0);
+  CHECK_EQ (p->cli.c->n_held, 0);
+  pair_free (p);
+
+  /* With the buffering off, the same order costs the handshake.  */
+  p = buffer_pair (-1);
+  by_hand (p, 0, 1, 6);
+  CHECK (!(p->cli.connected && p->srv.connected));
+  gq_conn_get_stats (p->cli.c, &st);
+  CHECK_EQ (st.packets_buffered, 0);
+  CHECK (count_dropped (&p->qlog_sink[0], "key_unavailable") >= 1);
+  pair_free (p);
+}
+
+/* A 1-RTT packet ahead of the client's Finished, which gives the server its
+   keys: held, and the request in it is not lost.  */
+static void
+test_buffer_one_rtt_before_finished (void)
+{
+  struct pair *p = buffer_pair (0);
+  gq_conn_stats st;
+
+  by_hand (p, 1, 0, 8);
+  CHECK (p->cli.connected && p->srv.connected);
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK (st.packets_buffered >= 1);
+  CHECK_EQ (p->srv.total_in, 100);
+  CHECK_EQ (p->srv.c->n_held, 0);
+  pair_free (p);
+
+  p = buffer_pair (-1);
+  by_hand (p, 1, 0, 8);
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK_EQ (st.packets_buffered, 0);
+  CHECK_EQ (p->srv.total_in, 0);
+  pair_free (p);
+}
+
+/* A short-header packet with the connection ID of CONN, which nothing can
+   open: garbage after the header.  */
+static size_t
+junk_short (const gq_conn *conn, uint8_t *out, uint8_t salt)
+{
+  size_t i, n = 0;
+
+  out[n++] = 0x40 | (salt & 0x1f);
+  memcpy (out + n, conn->l[0].cid.data, conn->l[0].cid.len);
+  n += conn->l[0].cid.len;
+  for (i = 0; i < 60; i++)
+    out[n++] = (uint8_t) (salt * 7 + i);
+  return n;
+}
+
+/* Plausible packets that cannot be read are held only up to the limit, and
+   what is held is freed when the keys come and they prove to be junk.  */
+static void
+test_buffer_is_bounded (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  static struct piece pc[MAXPIECES];
+  uint8_t junk[200];
+  size_t n, len;
+  int i;
+  gq_conn_stats st;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.max_buffered_packets = 5;
+  p = pair_new (&cfg, &cfg, 0, 81);
+  p->qlog_sink[0].keep = p->qlog_sink[1].keep = 1;
+  /* The client's Initial starts the server, whose 1-RTT keys come with the
+     client's Finished.  */
+  n = collect (p->cli.c, p->net.now, pc, MAXPIECES, 0);
+  deliver (p->srv.c, p->net.now, pc, n, 0);
+  for (i = 0; i < 40; i++)
+    {
+      len = junk_short (p->srv.c, junk, (uint8_t) i);
+      gq_conn_recv (p->srv.c, p->net.now, junk, len);
+    }
+  CHECK_EQ (p->srv.c->n_held, 5);
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK_EQ (st.packets_buffered, 5);
+  CHECK_EQ (count_dropped (&p->qlog_sink[1], "rejected"), 35);
+  CHECK_EQ (qsink_count (&p->qlog_sink[1], "quic:packet_buffered"), 5);
+  /* Not one of our connection IDs: not worth holding.  */
+  junk[1] ^= 0xff;
+  gq_conn_recv (p->srv.c, p->net.now, junk, len);
+  CHECK_EQ (p->srv.c->n_held, 5);
+  CHECK_EQ (count_dropped (&p->qlog_sink[1], "connection_unknown"), 1);
+  /* Finish the handshake: the keys come, the junk does not open and goes.  */
+  by_hand (p, 0, 0, 6);
+  CHECK (p->cli.connected && p->srv.connected);
+  CHECK_EQ (p->srv.c->n_held, 0);
+  CHECK_EQ (count_dropped (&p->qlog_sink[1], "decryption_failure"), 5);
+  CHECK_EQ (p->srv.bad, 0);
+  pair_free (p);
+}
+
+/* Packets held for the Handshake keys are let go when those keys are
+   discarded for good.  */
+static void
+test_buffer_freed_with_the_keys (void)
+{
+  struct pair *p = buffer_pair (0);
+  gq_conn *c = p->cli.c;
+  uint8_t junk[200];
+  size_t i, n = 0;
+
+  /* Long-header Handshake packets for the client, which has no Handshake
+     keys yet: v1 or v2 code points as the connection has.  */
+  for (i = 0; i < 3; i++)
+    {
+      gq_long_header h;
+      uint8_t cid_len = c->l[0].cid.len;
+
+      n = 0;
+      junk[n++] = c->version == GQ_VERSION_2 ? 0xd0 : 0xe0;
+      junk[n++] = (uint8_t) (c->version >> 24);
+      junk[n++] = (uint8_t) (c->version >> 16);
+      junk[n++] = (uint8_t) (c->version >> 8);
+      junk[n++] = (uint8_t) c->version;
+      junk[n++] = cid_len;
+      memcpy (junk + n, c->l[0].cid.data, cid_len);
+      n += cid_len;
+      junk[n++] = 4;
+      memcpy (junk + n, "\x01\x02\x03\x04", 4);
+      n += 4;
+      junk[n++] = 0x40;		/* Length: 64.  */
+      junk[n++] = 0x40;
+      memset (junk + n, (int) (i + 1), 64);
+      n += 64;
+      CHECK_EQ (gq_long_header_parse (junk, n, &h), GQ_OK);
+      gq_conn_recv (c, p->net.now, junk, n);
+    }
+  CHECK_EQ (c->n_held, 3);
+  conn_discard_space (c, SP_HANDSHAKE);
+  CHECK_EQ (c->n_held, 0);
+  CHECK_EQ (count_dropped (&p->qlog_sink[0], "key_unavailable"), 3);
+  pair_free (p);
+}
+
 int
 main (void)
 {
@@ -2368,6 +2698,10 @@ main (void)
   test_pmtu_size_is_kept_per_path ();
   test_pmtu_qlog ();
   test_pmtu_qlog_nothing_to_find ();
+  test_buffer_handshake_before_initial ();
+  test_buffer_one_rtt_before_finished ();
+  test_buffer_is_bounded ();
+  test_buffer_freed_with_the_keys ();
   TST_DONE ();
 }
 
