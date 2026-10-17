@@ -766,8 +766,8 @@ conn_alloc (enum gq_role role, const gq_conn_config *config,
     c->ev = *events;
   c->version = c->orig_version = c->cfg.version;
   c->now = now;
-  c->srtt = K_INITIAL_RTT;
-  c->rttvar = K_INITIAL_RTT / 2;
+  c->srtt = CONN_INITIAL_RTT (c);
+  c->rttvar = CONN_INITIAL_RTT (c) / 2;
   c->peer_max_ack_delay_us = 25000;
   c->peer_ack_delay_exp = 3;
   c->idle_timeout_us = c->cfg.idle_timeout_ms * 1000;

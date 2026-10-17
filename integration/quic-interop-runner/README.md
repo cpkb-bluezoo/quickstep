@@ -59,6 +59,22 @@ The runner knows nothing about quickstep; it only runs the image.
 | `ecn` | 127 | 127 | The library neither reads nor sets the ECN codepoints |
 | `connectionmigration` | 127 | - | The library does not use the server's `preferred_address` |
 
+The endpoint assumes a 100 ms round trip until it measures one (the library
+default is 333 ms), and in the `multiconnect` case, which the runner uses for
+handshake loss and corruption, a client offers X25519 only, so that its
+ClientHello fits in one datagram. Under 30% loss in bursts of 3 a
+handshake that waits for the default backoff, or has to get two datagrams
+across, can outlast a server's patience: quic-go forgets a half-open
+handshake after 5 seconds, and a late retransmission then starts a second
+one, which the runner counts. A server such as msquic answers a ClientHello
+of which only the first datagram has arrived with an ACK-only Initial under
+a provisional connection ID, and sends its real flight under another one;
+RFC 9000 section 7.2 has a client discard packets whose source connection ID
+differs from the first it accepted, so a client that sends its ClientHello in
+two datagrams can be left waiting. That is what the runner's amplification
+limit case, which drops the second datagram, does to the default (hybrid)
+ClientHello.
+
 There is no qlog: `QLOGDIR` is ignored. The endpoint's own console log, the
 packet captures and the analyses below take its place.
 

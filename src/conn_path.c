@@ -232,8 +232,8 @@ switch_to (gq_conn *c, int idx)
      (RFC 9000 section 9.4).  */
   cc_init (c);
   c->have_rtt = 0;
-  c->srtt = K_INITIAL_RTT;
-  c->rttvar = K_INITIAL_RTT / 2;
+  c->srtt = CONN_INITIAL_RTT (c);
+  c->rttvar = CONN_INITIAL_RTT (c) / 2;
   c->migrations++;
   if (c->ev.migrated)
     c->ev.migrated (c->ev.user, &n->p);

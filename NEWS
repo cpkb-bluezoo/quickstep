@@ -32,6 +32,14 @@ an all-zero token for it and compared every undecryptable datagram's last
 zero bytes, so a retransmitted Initial reaching an established connection
 killed it, and under heavy packet loss those peers' handshake loss and
 corruption runs failed.
+** gq_conn_config.initial_rtt_us sets the round trip time assumed before one
+is measured (default 333 ms, as RFC 9002 section 6.2.2 recommends).  It sets
+how soon the first probes go out and how fast they back off.  The interop
+runner's endpoint uses 100 ms, and offers only X25519 in the multiconnect
+case (the runner's handshake loss and corruption) so that the ClientHello
+fits in one datagram: in a simulation of the runner's 30% loss in bursts of
+3, the share of handshakes taking more than 5 seconds fell from 13% to 1%,
+and 5 seconds is how long some servers keep a half-open handshake.
 ** TLS key log: gq_tls_config.keylog and gq_tls_server_config.keylog take a
 callback that receives each handshake secret as a line of the NSS key log
 format (CLIENT_HANDSHAKE_TRAFFIC_SECRET and the rest, for QUIC and TLS 1.3

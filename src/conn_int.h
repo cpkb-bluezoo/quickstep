@@ -38,6 +38,9 @@ enum { SP_INITIAL, SP_HANDSHAKE, SP_APP, N_SPACES };
 /* RFC 9002 constants, in microseconds.  */
 #define K_GRANULARITY 1000u
 #define K_INITIAL_RTT 333000u
+/* The round trip time before the first sample: the configured one, or this.  */
+#define CONN_INITIAL_RTT(c) \
+  ((c)->cfg.initial_rtt_us ? (c)->cfg.initial_rtt_us : (uint64_t) K_INITIAL_RTT)
 #define K_PACKET_THRESHOLD 3
 /* RFC 9002 section 7 (NewReno) constants.  */
 #define CC_MAX_DATAGRAM 1200u

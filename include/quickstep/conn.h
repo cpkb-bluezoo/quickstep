@@ -214,6 +214,13 @@ typedef struct gq_conn_config
   uint32_t versions[GQ_TP_MAX_VERSIONS];
   size_t n_versions;
   uint64_t idle_timeout_ms;		/* 0: 30000.  */
+  /* The round trip time assumed until one is measured, in microseconds
+     (RFC 9002 section 6.2.2: 333 ms unless the endpoint knows better).  It
+     sets how soon the first probes go out and how fast they back off, so a
+     client that knows its path is short, or that must finish a handshake
+     within a peer's own short timeout under heavy loss, can use less.  0:
+     333000.  */
+  uint64_t initial_rtt_us;
   uint64_t initial_max_data;		/* 0: 1 MiB.  */
   uint64_t initial_max_stream_data;	/* Each stream type; 0: 256 KiB.  */
   uint64_t initial_max_streams_bidi;	/* 0: 100.  */

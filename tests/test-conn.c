@@ -105,6 +105,8 @@ struct net
   int nq;
   uint64_t now, latency;
   unsigned loss_pct;
+  unsigned burst;		/* Loss comes in runs of this many (0: alone).  */
+  unsigned burst_left;
   int reorder, corrupt;
   int total;
   uint32_t rng;
@@ -443,6 +445,31 @@ addr_same (const gq_addr *a, const gq_addr *b)
   return a->len == b->len && memcmp (a->data, b->data, a->len) == 0;
 }
 
+/* Does the network lose this datagram?  With BURST, losses come in runs of
+   that many, at the same overall rate (the simulator of the interop runner
+   drops 30% of packets in bursts of 3).  */
+static int
+lossy (struct net *n)
+{
+  if (n->loss_pct == 0)
+    return 0;
+  if (n->burst_left)
+    {
+      n->burst_left--;
+      return 1;
+    }
+  if (n->burst > 1)
+    {
+      if (rnd (n) % 100 < n->loss_pct / n->burst)
+        {
+          n->burst_left = n->burst - 1;
+          return 1;
+        }
+      return 0;
+    }
+  return rnd (n) % 100 < n->loss_pct;
+}
+
 static void
 enqueue (struct net *n, int from, const uint8_t *d, size_t len,
          const gq_path *to)
@@ -507,7 +534,7 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len,
         }
     }
 
-  if (index == n->drop_index || (n->loss_pct && rnd (n) % 100 < n->loss_pct))
+  if (index == n->drop_index || lossy (n))
     {
       n->dropped++;
       return;
@@ -698,6 +725,10 @@ fill_events (gq_conn_events *e, struct app *a)
   e->migrated = ev_migrated;
 }
 
+/* Groups the client offers (NULL: the policy's).  */
+static const uint16_t *g_cgroups;
+static size_t g_n_cgroups;
+
 static struct pair *
 pair_new (const gq_conn_config *ccfg, const gq_conn_config *scfg,
           unsigned loss_pct, uint32_t seed)
@@ -725,6 +756,8 @@ pair_new (const gq_conn_config *ccfg, const gq_conn_config *scfg,
   p->scfg.n_alpn = 1;
   p->scfg.ticket_keys = g_ring;
   p->ccfg.resume = g_resume;
+  p->ccfg.groups = g_cgroups;
+  p->ccfg.n_groups = g_n_cgroups;
   p->ccfg.early_data = g_early_client;
   if (g_early_server)
     {
@@ -1105,6 +1138,89 @@ test_long_token (void)
       CHECK (q->net.replies >= 1);
       pair_free (q);
     }
+}
+
+/* How long after its first flight a client waits before probing: the
+   probe timeout of RFC 9002 section 6.2.1 from the round trip time assumed
+   before a sample (333 ms unless configured), srtt + 4 * rttvar, so a
+   second less a millisecond with the default.  */
+static uint64_t
+first_probe_delay (uint64_t initial_rtt_us)
+{
+  gq_conn_config cc, sc;
+  struct pair *p;
+  uint8_t buf[2048];
+  size_t len = 1;
+  uint64_t t, now;
+  int guard = 0;
+
+  memset (&cc, 0, sizeof cc);
+  memset (&sc, 0, sizeof sc);
+  cc.initial_rtt_us = initial_rtt_us;
+  p = pair_new (&cc, &sc, 0, 5);
+  now = p->net.now;
+  while (len && guard++ < 10)
+    CHECK_EQ (gq_conn_send (p->cli.c, now, buf, sizeof buf, &len), GQ_OK);
+  t = gq_conn_timeout (p->cli.c);
+  pair_free (p);
+  CHECK (t > now);
+  return t - now;
+}
+
+static void
+test_initial_rtt (void)
+{
+  /* The default is the RFC's 333 ms, so a probe after 999 ms; a client that
+     knows better, or must finish a handshake in a peer's few seconds under
+     heavy loss, can have it sooner and the backoff starts from there.  */
+  CHECK_EQ (first_probe_delay (0), 999000);
+  CHECK_EQ (first_probe_delay (333000), 999000);
+  CHECK_EQ (first_probe_delay (100000), 300000);
+  CHECK_EQ (first_probe_delay (50000), 150000);
+}
+
+/* Handshakes under the interop runner's handshake loss: 30% of datagrams,
+   in runs of 3, with 15 ms each way.  Both ends assume 100 ms until they
+   measure a round trip, and the client's ClientHello fits in one datagram
+   (X25519 only), as the runner's endpoint does.  Nearly all of them must be
+   done within 5 seconds, which is how long some servers keep a half-open
+   handshake before a late retransmission starts another.  The seeds are
+   fixed, so the counts are the same on every run.  */
+static void
+test_handshake_under_bursty_loss (void)
+{
+  static const uint16_t x25519_only[] = { GQ_GROUP_X25519 };
+  int i, done = 0, quick = 0;
+
+  g_cgroups = x25519_only;
+  g_n_cgroups = 1;
+  for (i = 0; i < 100; i++)
+    {
+      gq_conn_config cc, sc;
+      struct pair *p;
+      uint64_t start;
+
+      memset (&cc, 0, sizeof cc);
+      memset (&sc, 0, sizeof sc);
+      cc.initial_rtt_us = sc.initial_rtt_us = 100000;
+      p = pair_new (&cc, &sc, 0, 2000 + (uint32_t) i);
+      p->net.latency = 15000;
+      p->net.loss_pct = 30;
+      p->net.burst = 3;
+      p->net.rng = 104729u * ((uint32_t) i + 1);
+      start = p->net.now;
+      if (run (&p->net, both_connected, 60000000))
+        {
+          done++;
+          if (p->net.now - start <= 5000000)
+            quick++;
+        }
+      pair_free (p);
+    }
+  g_cgroups = NULL;
+  g_n_cgroups = 0;
+  CHECK (done >= 99);
+  CHECK (quick >= 96);
 }
 
 /* A client that advertises no stateless reset token (ours and most others
@@ -2406,6 +2522,8 @@ main (void)
   test_tokens ();
   test_long_token ();
   test_zero_tail_is_not_a_reset ();
+  test_initial_rtt ();
+  test_handshake_under_bursty_loss ();
   test_retry_tamper ();
   test_admit_input ();
   test_compat ();

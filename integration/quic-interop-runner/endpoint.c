@@ -73,6 +73,13 @@
 #define MAX_REQ 1100
 #define KEY_UPDATE_AFTER (100 * 1024)	/* Bytes received before we rekey.  */
 #define SESSION_TIMEOUT_S 120
+/* The round trip assumed before one is measured.  The runner's paths are
+   30 ms, and under its handshake loss (30% in bursts of 3) a handshake that
+   waits out the default 333 ms backoff can take longer than a peer is
+   willing to keep it: quic-go drops a half-open handshake after 5 seconds,
+   and a late retransmission then starts a second one, which the runner
+   counts.  RFC 9002 allows a different value.  */
+#define INITIAL_RTT_US 100000
 
 enum testcase
 {
@@ -873,6 +880,7 @@ run_server (struct run *r, const char *cert, const char *key)
     }
 
   memset (&ec, 0, sizeof ec);
+  ec.conn.initial_rtt_us = INITIAL_RTT_US;
   ec.server = &sc;
   /* Only the retry case may send a Retry: handshake fails if one arrives.  */
   ec.admit.require_retry = r->tc == TC_RETRY;
@@ -1044,6 +1052,7 @@ client_session (struct run *r, const gq_trust *trust, size_t first,
 {
   static gq_slice alpn;
   static uint16_t chacha[] = { GQ_TLS_CHACHA20_POLY1305_SHA256 };
+  static uint16_t x25519_only[] = { GQ_GROUP_X25519 };
   const struct url *u = &r->urls[first];
   gq_tls_config tc;
   gq_endpoint_config ec;
@@ -1099,12 +1108,23 @@ client_session (struct run *r, const gq_trust *trust, size_t first,
       tc.suites = chacha;
       tc.n_suites = 1;
     }
+  /* multiconnect is what the runner's handshake loss and corruption cases
+     run: fifty handshakes, each of which fails to finish if a datagram of
+     its first flight is lost.  The hybrid key share makes the ClientHello
+     too big for one datagram, so offer only X25519, whose ClientHello fits
+     in one: half the datagrams to lose.  */
+  if (r->tc == TC_MULTICONNECT)
+    {
+      tc.groups = x25519_only;
+      tc.n_groups = 1;
+    }
   if (r->keylog)
     {
       tc.keylog = keylog_line;
       tc.keylog_user = r;
     }
   memset (&cc, 0, sizeof cc);
+  cc.initial_rtt_us = INITIAL_RTT_US;
   /* Open in v1 whatever else is offered, as the runner checks; the v2 case
      lists v2 first among what the server may switch us to.  */
   if (r->tc == TC_V2)
