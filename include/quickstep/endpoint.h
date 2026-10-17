@@ -123,12 +123,22 @@ int gq_endpoint_connect (gq_endpoint *ep, uint64_t now_us,
 int gq_endpoint_recv (gq_endpoint *ep, uint64_t now_us, const gq_path *from,
                       uint8_t *data, size_t len);
 
+/* As gq_endpoint_recv, with the ECN field of the datagram (a gq_ecn; see
+   gq_conn_recv_ecn).  GQ_ERR_INVAL if it is not one.  */
+int gq_endpoint_recv_ecn (gq_endpoint *ep, uint64_t now_us, const gq_path *from,
+                          int ecn, uint8_t *data, size_t len);
+
 /* The next datagram to transmit into OUT (CAP at least 2048) for path *TO;
    *LEN is 0 when there is none.  Datagrams the endpoint itself answers with
    (Version Negotiation, Retry, stateless reset) come first, then those of
    connections in turn.  */
 int gq_endpoint_send (gq_endpoint *ep, uint64_t now_us, uint8_t *out,
                       size_t cap, size_t *len, gq_path *to);
+
+/* As gq_endpoint_send, and *ECN is the ECN field to give the datagram (see
+   gq_conn_send_ecn): what the endpoint answers by itself is never marked.  */
+int gq_endpoint_send_ecn (gq_endpoint *ep, uint64_t now_us, uint8_t *out,
+                          size_t cap, size_t *len, gq_path *to, int *ecn);
 
 /* When to call gq_endpoint_on_timeout next; 0 if no timer is armed.  */
 uint64_t gq_endpoint_timeout (gq_endpoint *ep);

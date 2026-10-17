@@ -782,11 +782,12 @@ struct spin_obs
 
 static void
 spin_snoop (struct net *n, int from, const uint8_t *dg, size_t len,
-            void *user)
+            int ecn, void *user)
 {
   struct spin_obs *o = user;
   int bit;
 
+  (void) ecn;
   if (!o->armed || len == 0 || (dg[0] & 0x80))
     return;				/* Not a 1-RTT packet.  */
   bit = (dg[0] >> 5) & 1;
@@ -1154,7 +1155,7 @@ test_ecn_receive_counts (void)
   uint64_t v[3], pn, now;
   uint8_t buf[1500];
   size_t len;
-  gq_conn_stats st;
+  gq_conn_stats st, base;
   int i;
 
   p = pair_new_paths (&(gq_conn_config) { 0 }, &(gq_conn_config) { 0 }, 63);
@@ -1167,6 +1168,8 @@ test_ecn_receive_counts (void)
   to_srv.remote = p->net.m[0].ext;
   p->qlog_sink[1].keep = 1;
   memset (ss->ecn_in, 0, sizeof ss->ecn_in);
+  gq_conn_get_stats (srv, &st);
+  base = st;
   now = p->net.now;
 
   /* Three ECT(0), two ECT(1), one CE, and one without a codepoint.  */
@@ -1180,9 +1183,9 @@ test_ecn_receive_counts (void)
   CHECK_EQ (ss->ecn_in[1], 2);
   CHECK_EQ (ss->ecn_in[2], 1);
   gq_conn_get_stats (srv, &st);
-  CHECK_EQ (st.ecn_ect0_received, 3);
-  CHECK_EQ (st.ecn_ect1_received, 2);
-  CHECK_EQ (st.ecn_ce_received, 1);
+  CHECK_EQ (st.ecn_ect0_received - base.ecn_ect0_received, 3);
+  CHECK_EQ (st.ecn_ect1_received - base.ecn_ect1_received, 2);
+  CHECK_EQ (st.ecn_ce_received - base.ecn_ce_received, 1);
 
   /* The same packet number again is a duplicate: not counted.  */
   pn = cs->next_pn;
@@ -1214,6 +1217,7 @@ test_ecn_receive_counts (void)
 
   /* Without a codepoint on anything, the ACK is the plain type.  */
   p = pair_new_paths (&(gq_conn_config) { 0 }, &(gq_conn_config) { 0 }, 64);
+  p->net.bleach[0] = p->net.bleach[1] = 1;
   settle (p);
   p->qlog_sink[1].keep = 1;
   to_srv.local = p->net.S;
@@ -1282,6 +1286,7 @@ test_ecn_receive_transfer (void)
   p = pair_new (&cfg, &cfg, 0, 67);
   p->qlog_sink[0].keep = p->qlog_sink[1].keep = 1;
   p->net.mark[1] = GQ_ECN_ECT0;
+  p->net.bleach[0] = 1;		/* Nothing the client sends is marked.  */
   p->srv.respond = 200000;
   CHECK (run (&p->net, both_connected, 30000000));
   CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
@@ -1343,17 +1348,481 @@ test_ecn_receive_transfer (void)
     }
   CHECK (marked > 100);
   CHECK_EQ (k->bad_event + k->bad_line, 0);
-  /* The server's own datagrams are not marked and say nothing of it.  */
-  k = &p->qlog_sink[1];
-  n = qsink_count (k, "quic:udp_datagrams_sent");
+  pair_free (p);
+}
+
+/* What the path saw of the ECN fields: datagrams each end sent, how many
+   were marked, and those with a long header (the handshake), which must
+   never be.  */
+struct ecn_obs
+{
+  unsigned dgrams[2], marked[2], long_marked[2];
+  unsigned marked_after[2];	/* Marked after AFTER_AT datagrams of it.  */
+  unsigned after_at;
+};
+
+static void
+ecn_snoop (struct net *n, int from, const uint8_t *dg, size_t len, int ecn,
+           void *user)
+{
+  struct ecn_obs *o = user;
+
+  (void) n;
+  o->dgrams[from]++;
+  if (ecn != GQ_ECN_NOT_ECT)
+    {
+      o->marked[from]++;
+      if (len && (dg[0] & 0x80))
+        o->long_marked[from]++;
+      if (o->after_at && o->dgrams[from] > o->after_at)
+        o->marked_after[from]++;
+    }
+}
+
+/* The states the ECN log of one end went through, as a string such as
+   "testing,unknown,capable".  */
+static void
+ecn_states (const struct qsink *k, char *out, size_t cap)
+{
+  size_t i, n = qsink_count (k, "quic:ecn_state_updated");
+
+  out[0] = '\0';
   for (i = 0; i < n; i++)
     {
       qline q;
+      const char *s;
 
-      CHECK (qsink_nth (k, "quic:udp_datagrams_sent", i, &q));
-      CHECK (qline_get (&q, "ecn") == NULL);
+      CHECK (qsink_nth (k, "quic:ecn_state_updated", i, &q));
+      s = qline_get (&q, "new");
+      CHECK (s != NULL);
+      if (s && strlen (out) + strlen (s) + 2 < cap)
+        {
+          if (i)
+            strcat (out, ",");
+          strcat (out, s);
+        }
       qline_free (&q);
     }
+}
+
+/* A connection, and a transfer of RESP bytes to the client over a path
+   that SETUP shapes before anything is sent.  */
+static struct pair *
+ecn_transfer (struct ecn_obs *obs, void (*setup) (struct net *), size_t resp)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  struct sbuf *s;
+  uint64_t id;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.initial_max_data = 100u << 20;
+  cfg.initial_max_stream_data = 100u << 20;
+  p = pair_new (&cfg, &cfg, 0, 68);
+  p->qlog_sink[0].keep = p->qlog_sink[1].keep = 1;
+  p->net.latency = 20000;
+  if (setup)
+    setup (&p->net);
+  memset (obs, 0, sizeof *obs);
+  p->net.snoop = ecn_snoop;
+  p->net.snoop_user = obs;
+  p->srv.respond = resp;
+  CHECK (run (&p->net, both_connected, 30000000));
+  CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+  s = sb_get (&p->cli, id);
+  s->out_total = 10;
+  s->out_fin = 1;
+  CHECK (wait_for_stream (p, s, resp, 60000000));
+  run (&p->net, NULL, 500000);
+  CHECK_EQ (p->cli.bad + p->srv.bad, 0);
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  return p;
+}
+
+static int
+ecn_state_of (const gq_conn *c)
+{
+  gq_conn_stats st;
+
+  gq_conn_get_stats (c, &st);
+  return st.ecn_state;
+}
+
+/* A path that passes the marks: both ends test, see the counts come back,
+   and mark from then on; the handshake is never marked; the log has each
+   step.  */
+static void
+test_ecn_validates (void)
+{
+  struct ecn_obs obs;
+  struct pair *p = ecn_transfer (&obs, NULL, 300000);
+  char st[128];
+  gq_conn_stats cs, ss;
+  int e;
+
+  CHECK_EQ (ecn_state_of (p->cli.c), GQ_ECN_CAPABLE);
+  CHECK_EQ (ecn_state_of (p->srv.c), GQ_ECN_CAPABLE);
+  CHECK_EQ (obs.long_marked[0] + obs.long_marked[1], 0);
+  CHECK (obs.marked[0] > 10 && obs.marked[1] > 100);
+  /* Nearly everything after the first few packets is marked.  */
+  CHECK (obs.marked[1] * 10 > obs.dgrams[1] * 8);
+  gq_conn_get_stats (p->cli.c, &cs);
+  gq_conn_get_stats (p->srv.c, &ss);
+  CHECK (cs.ecn_marked_sent >= 10 && ss.ecn_marked_sent >= 10);
+  /* The peer counted what we marked.  */
+  CHECK (cs.ecn_marked_sent >= ss.ecn_ect0_received);
+  CHECK (ss.ecn_ect0_received > 0 && cs.ecn_ect0_received > 0);
+  CHECK_EQ (cs.ecn_ect1_received + cs.ecn_ce_received, 0);
+  CHECK_EQ (ss.congestion_events, 0);
+  CHECK_EQ (ss.packets_lost, 0);
+  for (e = 0; e < 2; e++)
+    {
+      ecn_states (&p->qlog_sink[e], st, sizeof st);
+      CHECK (!strncmp (st, "testing,", 8));
+      CHECK (strstr (st, "capable") != NULL);
+      CHECK (strstr (st, "failed") == NULL);
+      CHECK_EQ (p->qlog_sink[e].bad_event + p->qlog_sink[e].bad_line, 0);
+    }
+  /* udp_datagrams_sent says which datagrams were marked.  */
+  {
+    const struct qsink *k = &p->qlog_sink[1];
+    size_t i, n = qsink_count (k, "quic:udp_datagrams_sent"), ect0 = 0;
+
+    for (i = 0; i < n; i++)
+      {
+        qline q;
+
+        CHECK (qsink_nth (k, "quic:udp_datagrams_sent", i, &q));
+        if (qline_is (&q, "ecn", "ECT(0)"))
+          ect0++;
+        else
+          CHECK (qline_is (&q, "ecn", "Not-ECT"));
+        qline_free (&q);
+      }
+    CHECK_EQ (ect0, obs.marked[1]);
+  }
+  pair_free (p);
+}
+
+/* The application that does not use the ECN calls gets none of it.  */
+static void
+ecn_off_setup (struct net *n)
+{
+  n->no_ecn = 1;
+}
+
+static void
+test_ecn_off_without_the_api (void)
+{
+  struct ecn_obs obs;
+  struct pair *p = ecn_transfer (&obs, ecn_off_setup, 100000);
+  gq_conn_stats st;
+
+  CHECK_EQ (obs.marked[0] + obs.marked[1], 0);
+  CHECK_EQ (ecn_state_of (p->cli.c), GQ_ECN_OFF);
+  CHECK_EQ (ecn_state_of (p->srv.c), GQ_ECN_OFF);
+  CHECK_EQ (qsink_count (&p->qlog_sink[0], "quic:ecn_state_updated"), 0);
+  CHECK_EQ (qsink_count (&p->qlog_sink[1], "quic:ecn_state_updated"), 0);
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK_EQ (st.ecn_marked_sent, 0);
+  CHECK_EQ (qsink_count (&p->qlog_sink[1], "quic:udp_datagrams_sent") > 0, 1);
+  {
+    qline q;
+
+    CHECK (qsink_nth (&p->qlog_sink[1], "quic:udp_datagrams_sent", 0, &q));
+    CHECK (qline_get (&q, "ecn") == NULL);
+    qline_free (&q);
+  }
+  pair_free (p);
+}
+
+/* A path that clears the marks: the peer's counts never come, validation
+   fails on the first acknowledgement of a marked packet and no more are
+   marked.  The connection is not troubled by it.  */
+static void
+ecn_bleach_setup (struct net *n)
+{
+  n->bleach[0] = n->bleach[1] = 1;
+}
+
+static void
+test_ecn_bleached_path (void)
+{
+  struct ecn_obs obs;
+  struct pair *p = ecn_transfer (&obs, ecn_bleach_setup, 300000);
+  char st[128];
+  int e;
+
+  CHECK_EQ (ecn_state_of (p->cli.c), GQ_ECN_FAILED);
+  CHECK_EQ (ecn_state_of (p->srv.c), GQ_ECN_FAILED);
+  /* At most the ten of the test.  */
+  CHECK (obs.marked[0] <= 10 && obs.marked[1] <= 10);
+  CHECK_EQ (obs.long_marked[0] + obs.long_marked[1], 0);
+  for (e = 0; e < 2; e++)
+    {
+      ecn_states (&p->qlog_sink[e], st, sizeof st);
+      CHECK (!strncmp (st, "testing,", 8));
+      CHECK (strstr (st, "failed") != NULL);
+      CHECK (strstr (st, "capable") == NULL);
+    }
+  pair_free (p);
+}
+
+/* A path that drops what is marked: the packets of the test are lost, and
+   that fails it; what is sent then gets through, so the transfer completes
+   all the same, and the handshake, unmarked, was never at risk.  */
+static void
+ecn_drop_setup (struct net *n)
+{
+  n->drop_ect[0] = n->drop_ect[1] = 1;
+}
+
+static void
+test_ecn_dropping_path (void)
+{
+  struct ecn_obs obs;
+  struct pair *p = ecn_transfer (&obs, ecn_drop_setup, 300000);
+  gq_conn_stats ss;
+
+  CHECK_EQ (ecn_state_of (p->cli.c), GQ_ECN_FAILED);
+  CHECK_EQ (ecn_state_of (p->srv.c), GQ_ECN_FAILED);
+  CHECK (obs.marked[0] <= 10 && obs.marked[1] <= 10);
+  gq_conn_get_stats (p->srv.c, &ss);
+  CHECK (ss.packets_lost > 0);
+  pair_free (p);
+}
+
+/* A bottleneck that marks every so often: the sender takes each as a
+   congestion event, as for a loss, with nothing lost.  */
+static void
+ecn_ce_setup (struct net *n)
+{
+  n->ce_every[1] = 50;
+}
+
+static void
+test_ecn_ce_is_congestion (void)
+{
+  struct ecn_obs obs;
+  struct pair *p = ecn_transfer (&obs, ecn_ce_setup, 3000000);
+  gq_conn_stats ss, cs;
+
+  gq_conn_get_stats (p->srv.c, &ss);
+  gq_conn_get_stats (p->cli.c, &cs);
+  CHECK_EQ (ecn_state_of (p->srv.c), GQ_ECN_CAPABLE);
+  CHECK (cs.ecn_ce_received > 5);
+  CHECK (ss.congestion_events >= 2);
+  CHECK_EQ (ss.packets_lost, 0);
+  /* The window came down but not to the persistent congestion minimum.  */
+  CHECK (p->net.min_cwnd > 2400);
+  CHECK (p->net.max_cwnd > p->net.min_cwnd);
+  pair_free (p);
+
+  /* Without the marks, the same transfer has no events at all.  */
+  p = ecn_transfer (&obs, NULL, 3000000);
+  gq_conn_get_stats (p->srv.c, &ss);
+  CHECK_EQ (ss.congestion_events, 0);
+  CHECK_EQ (ss.packets_lost, 0);
+  pair_free (p);
+}
+
+/* The newly acknowledged packets of the test below.  */
+struct ecn_sent
+{
+  uint64_t lo, hi;
+};
+
+/* Send three packets of stream data from C, marked or not as the library
+   chooses, and say what range of packet numbers they are.  */
+static struct ecn_sent
+ecn_send_three (struct pair *p, gq_conn *c, uint64_t *now, int *marked)
+{
+  struct ecn_sent r;
+  uint64_t id;
+  uint8_t data[1000], out[1500];
+  int k;
+
+  memset (data, 'x', sizeof data);
+  CHECK_EQ (gq_conn_stream_open (c, 1, &id), GQ_OK);
+  r.lo = c->sp[SP_APP].next_pn;
+  *marked = 0;
+  for (k = 0; k < 3; k++)
+    {
+      size_t len = 0;
+      int ecn = -1;
+
+      CHECK (gq_conn_stream_write (c, id, data, sizeof data) == sizeof data);
+      *now += 10000;
+      CHECK_EQ (gq_conn_send_ecn (c, *now, out, sizeof out, &len, NULL,
+                                  &ecn), GQ_OK);
+      CHECK (len > 0);
+      if (ecn == GQ_ECN_ECT0)
+        (*marked)++;
+    }
+  r.hi = c->sp[SP_APP].next_pn - 1;
+  (void) p;
+  return r;
+}
+
+/* An ACK from FROM to TO for [LO, HI] with the counts E0, E1, CE, or none.  */
+static void
+ecn_forge_ack (gq_conn *from, gq_conn *to, uint64_t now, uint64_t lo,
+               uint64_t hi, int has_ecn, uint64_t e0, uint64_t e1, uint64_t ce)
+{
+  gq_frame f;
+  gq_ack_range r;
+  uint8_t enc[32];
+  size_t w = 0;
+
+  r.lo = lo;
+  r.hi = hi;
+  CHECK_EQ (gq_ack_ranges_encode (&r, 1, enc, sizeof enc, &w), GQ_OK);
+  memset (&f, 0, sizeof f);
+  f.type = GQ_FRAME_ACK;
+  f.u.ack.largest = hi;
+  f.u.ack.ranges.data = enc;
+  f.u.ack.ranges.len = w;
+  f.u.ack.has_ecn = has_ecn;
+  f.u.ack.ect0 = e0;
+  f.u.ack.ect1 = e1;
+  f.u.ack.ecn_ce = ce;
+  forge (from, to, now, NULL, &f, 1, 0);
+}
+
+enum ack_kind
+{
+  ACK_GOOD, ACK_GOOD_WITH_CE, ACK_NO_COUNTS, ACK_UNDERCOUNT, ACK_ECT1,
+  ACK_DECREASE, ACK_OVERCOUNT
+};
+
+/* RFC 9000 section 13.4.2.1: the counts in the ACK frame that acknowledges
+   the marked packets of the test are right, or validation fails.  */
+static void
+ecn_ack_case (enum ack_kind kind)
+{
+  struct pair *p = settled_pair (NULL, NULL);
+  gq_conn *a = p->cli.c, *b = p->srv.c;
+  space *s = &a->sp[SP_APP];
+  struct ecn_sent r;
+  uint64_t now = p->net.now + 1000000, b0, b1, bce;
+  gq_conn_stats before, after;
+  uint8_t out[1500];
+  size_t len = 0;
+  int marked = 0, ecn = -1;
+
+  conn_ecn_restart (a);
+  r = ecn_send_three (p, a, &now, &marked);
+  CHECK_EQ (marked, 3);
+  b0 = s->ecn_peer[0];
+  b1 = s->ecn_peer[1];
+  bce = s->ecn_peer[2];
+  if (kind == ACK_DECREASE)
+    {
+      /* The counts have to have been something to go down from.  */
+      now += 20000;
+      ecn_forge_ack (b, a, now, r.lo, r.hi, 1, b0 + 3, b1, bce);
+      CHECK_EQ (ecn_state_of (a), GQ_ECN_CAPABLE);
+      b0 += 3;
+      r = ecn_send_three (p, a, &now, &marked);
+      CHECK_EQ (marked, 3);
+    }
+  gq_conn_get_stats (a, &before);
+  now += 20000;
+  switch (kind)
+    {
+    case ACK_GOOD:
+      ecn_forge_ack (b, a, now, r.lo, r.hi, 1, b0 + 3, b1, bce);
+      break;
+    case ACK_GOOD_WITH_CE:
+      ecn_forge_ack (b, a, now, r.lo, r.hi, 1, b0 + 2, b1, bce + 1);
+      break;
+    case ACK_NO_COUNTS:
+      ecn_forge_ack (b, a, now, r.lo, r.hi, 0, 0, 0, 0);
+      break;
+    case ACK_UNDERCOUNT:
+      ecn_forge_ack (b, a, now, r.lo, r.hi, 1, b0 + 2, b1, bce);
+      break;
+    case ACK_ECT1:
+      ecn_forge_ack (b, a, now, r.lo, r.hi, 1, b0 + 3, b1 + 1, bce);
+      break;
+    case ACK_DECREASE:
+      /* ECT(0) goes down, with CE making up for it in the sum.  */
+      ecn_forge_ack (b, a, now, r.lo, r.hi, 1, b0 - 2, b1, bce + 5);
+      break;
+    case ACK_OVERCOUNT:
+      ecn_forge_ack (b, a, now, r.lo, r.hi, 1, b0 + 3 + s->ecn_sent, b1,
+                     bce);
+      break;
+    }
+  gq_conn_get_stats (a, &after);
+  if (kind == ACK_GOOD || kind == ACK_GOOD_WITH_CE)
+    CHECK_EQ (ecn_state_of (a), GQ_ECN_CAPABLE);
+  else
+    CHECK_EQ (ecn_state_of (a), GQ_ECN_FAILED);
+  /* Only a count of CE that grew is congestion.  */
+  CHECK_EQ (after.congestion_events - before.congestion_events,
+            kind == ACK_GOOD_WITH_CE);
+  CHECK_EQ (after.packets_lost, before.packets_lost);
+  /* And a connection that failed it marks no more; one that passed does.  */
+  {
+    uint64_t id;
+    uint8_t data[100];
+
+    memset (data, 'y', sizeof data);
+    CHECK_EQ (gq_conn_stream_open (a, 1, &id), GQ_OK);
+    CHECK (gq_conn_stream_write (a, id, data, sizeof data) == sizeof data);
+    now += 10000;
+    CHECK_EQ (gq_conn_send_ecn (a, now, out, sizeof out, &len, NULL, &ecn),
+              GQ_OK);
+    CHECK (len > 0);
+    if (kind == ACK_GOOD || kind == ACK_GOOD_WITH_CE)
+      CHECK_EQ (ecn, GQ_ECN_ECT0);
+    else
+      CHECK_EQ (ecn, GQ_ECN_NOT_ECT);
+  }
+  pair_free (p);
+}
+
+static void
+test_ecn_validation_of_counts (void)
+{
+  enum ack_kind k;
+
+  for (k = ACK_GOOD; k <= ACK_OVERCOUNT; k++)
+    ecn_ack_case (k);
+}
+
+/* A new path starts the test again (RFC 9000 section 13.4.2): the server
+   of a connection that validated ECN, whose peer's address changes, goes
+   through testing once more.  */
+static void
+test_ecn_restarts_on_new_path (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  struct sbuf *s;
+  char st[160];
+  const char *again;
+
+  memset (&cfg, 0, sizeof cfg);
+  p = pair_new_paths (&cfg, &cfg, 69);
+  p->qlog_sink[1].keep = 1;
+  settle (p);
+  s = start_transfer (p, 400000);
+  run (&p->net, NULL, 60000);
+  CHECK_EQ (ecn_state_of (p->srv.c), GQ_ECN_CAPABLE);
+  p->net.out_map[0] = 3;
+  p->net.m[3].alive_in = 1;
+  p->net.m[0].alive_in = 0;
+  CHECK (run (&p->net, transfer_done, 60000000));
+  CHECK_EQ (s->n, 400000);
+  run (&p->net, NULL, 500000);
+  ecn_states (&p->qlog_sink[1], st, sizeof st);
+  again = strstr (st, "capable");
+  CHECK (again != NULL);
+  /* After capable, it is testing again, and in the end capable again.  */
+  CHECK (again && strstr (again, "testing") != NULL);
+  CHECK_EQ (ecn_state_of (p->srv.c), GQ_ECN_CAPABLE);
   pair_free (p);
 }
 
@@ -1388,6 +1857,13 @@ main (void)
   test_ecn_receive_counts ();
   test_ecn_ce_acked_at_once ();
   test_ecn_receive_transfer ();
+  test_ecn_validates ();
+  test_ecn_off_without_the_api ();
+  test_ecn_bleached_path ();
+  test_ecn_dropping_path ();
+  test_ecn_ce_is_congestion ();
+  test_ecn_validation_of_counts ();
+  test_ecn_restarts_on_new_path ();
   TST_DONE ();
 }
 

@@ -137,9 +137,15 @@ struct net
   /* Called with the bytes of every datagram a connection sends, as an
      observer on the path would see them.  */
   void (*snoop) (struct net *, int from, const uint8_t *d, size_t len,
-                 void *user);
+                 int ecn, void *user);
   void *snoop_user;
-  int mark[2];			/* gq_ecn of what each app sends, as received.  */
+  /* What the path does to the ECN field of what each app sends: MARK, if
+     not zero, sets it, BLEACH clears it, DROP_ECT drops datagrams that have
+     one, and CE_EVERY turns every that many of the ones marked ECT(0) into
+     CE (a bottleneck that signals congestion).  NO_ECN: the apps use the
+     calls that know nothing of ECN.  */
+  int mark[2], bleach[2], drop_ect[2], no_ecn;
+  unsigned ce_every[2], ce_count[2];
   int hold;			/* Stash datagrams to EXT-0 instead of sending.  */
   struct pkt *held[8];
   int n_held;
@@ -481,7 +487,7 @@ lossy (struct net *n)
 
 static void
 enqueue (struct net *n, int from, const uint8_t *d, size_t len,
-         const gq_path *to)
+         const gq_path *to, int ecn)
 {
   struct pkt *p;
   int index = n->total++;
@@ -492,7 +498,19 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len,
   if (n->tap)
     n->tap (n, from, n->paths ? to : NULL, n->tap_user);
   if (n->snoop)
-    n->snoop (n, from, d, len, n->snoop_user);
+    n->snoop (n, from, d, len, ecn, n->snoop_user);
+  if (n->mark[from])
+    ecn = n->mark[from];
+  if (n->bleach[from])
+    ecn = GQ_ECN_NOT_ECT;
+  if (ecn != GQ_ECN_NOT_ECT && n->drop_ect[from])
+    {
+      n->dropped++;
+      return;
+    }
+  if (ecn == GQ_ECN_ECT0 && n->ce_every[from]
+      && ++n->ce_count[from] % n->ce_every[from] == 0)
+    ecn = GQ_ECN_CE;
   if (n->paths && to)
     {
       int i, j;
@@ -563,7 +581,7 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len,
   p->len = len;
   p->from = src;
   p->has_from = has_from;
-  p->ecn = n->mark[from];
+  p->ecn = ecn;
   memcpy (p->d, d, len);
   if (n->corrupt && index % n->corrupt == 0)
     p->d[rnd (n) % len] ^= 0x20;
@@ -599,14 +617,19 @@ flush (struct net *n)
       while (guard++ < 200)
         {
           gq_path to;
+          int ecn = GQ_ECN_NOT_ECT;
 
           memset (&to, 0, sizeof to);
-          CHECK_EQ (gq_conn_send_path (a->c, n->now, buf, sizeof buf, &len,
-                                       &to), GQ_OK);
+          if (n->no_ecn)
+            CHECK_EQ (gq_conn_send_path (a->c, n->now, buf, sizeof buf, &len,
+                                         &to), GQ_OK);
+          else
+            CHECK_EQ (gq_conn_send_ecn (a->c, n->now, buf, sizeof buf, &len,
+                                        &to, &ecn), GQ_OK);
           if (len == 0)
             break;
           CHECK (len <= 1200);
-          enqueue (n, s, buf, len, n->paths ? &to : NULL);
+          enqueue (n, s, buf, len, n->paths ? &to : NULL, ecn);
         }
     }
 }
@@ -669,7 +692,7 @@ run (struct net *n, int (*done) (struct net *), uint64_t budget_us)
               if (act == GQ_ADMIT_REPLY)
                 {
                   n->replies++;
-                  enqueue (n, 1, reply, rl, NULL);
+                  enqueue (n, 1, reply, rl, NULL, GQ_ECN_NOT_ECT);
                 }
               else if (act == GQ_ADMIT_ACCEPT)
                 {

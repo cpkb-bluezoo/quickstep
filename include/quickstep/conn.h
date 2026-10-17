@@ -45,7 +45,14 @@
    chosen with gq_conn_config.congestion_control, with HyStart++ (RFC 9406)
    in slow start, and bulk stream data is paced over the round trip (RFC
    9002 section 7.7), which makes gq_conn_timeout return the time the pacer
-   next has credit while data is being held back.  There is no ECN.
+   next has credit while data is being held back.
+
+   ECN (RFC 9000 section 13.4, RFC 9002 section 7.1) is supported for an
+   application that passes on the ECN field of the IP header of each datagram
+   (gq_conn_recv_ecn) and sets it on those it sends (gq_conn_send_ecn): the
+   connection marks 1-RTT packets ECT(0) when the path is found to keep the
+   marks, counts the peer's, and takes an increase in its CE count as
+   congestion.
 
    Version negotiation is both RFC 9000 section 6 (a client restarts after
    a Version Negotiation packet) and RFC 9368 (compatible negotiation
@@ -64,7 +71,7 @@
 
    0-RTT (RFC 9001 section 4.6) is supported for QUIC v1 and v2 sessions.
 
-   Not done here (later steps): pacing and ECN.  */
+   The server's preferred_address is not used, and there is no multipath.  */
 
 #ifndef QUICKSTEP_CONN_H
 #define QUICKSTEP_CONN_H
@@ -403,8 +410,36 @@ enum gq_ecn
    gq_conn_recv_path are this with GQ_ECN_NOT_ECT.  */
 int gq_conn_recv_ecn (gq_conn *c, uint64_t now_us, const gq_path *from,
                       int ecn, uint8_t *data, size_t len);
+
+/* Where ECN validation (RFC 9000 section 13.4.2) has got to on the path the
+   connection sends on.  */
+enum gq_ecn_state
+{
+  GQ_ECN_OFF = 0,		/* Not begun: the application has not used
+				   gq_conn_send_ecn, or no 1-RTT packet has
+				   been sent in a call to it.  */
+  GQ_ECN_TESTING,		/* The first packets are marked ECT(0).  */
+  GQ_ECN_UNKNOWN,		/* Those are out; none marked until the peer's
+				   counts say whether the path keeps the marks.  */
+  GQ_ECN_CAPABLE,		/* Validated: packets are marked, and an
+				   increase in the peer's CE count is
+				   congestion.  */
+  GQ_ECN_FAILED			/* The path loses, clears or misreports the
+				   marks: not marked any more.  */
+};
 int gq_conn_send_path (gq_conn *c, uint64_t now_us, uint8_t *out, size_t cap,
                        size_t *len, gq_path *to);
+
+/* As gq_conn_send_path, and *ECN (a gq_ecn) is the ECN field to give the IP
+   header of the datagram, which the application must set (IP_TOS or an
+   ancillary message; the library does not touch sockets).  Calling this
+   instead of gq_conn_send_path is what lets the connection mark packets
+   ECT(0) and test whether the path allows it; the datagrams of
+   gq_conn_send_path are never marked.  Only 1-RTT packets on the current
+   path are, so a path that drops marked packets cannot break the
+   handshake.  TO may be NULL.  */
+int gq_conn_send_ecn (gq_conn *c, uint64_t now_us, uint8_t *out, size_t cap,
+                      size_t *len, gq_path *to, int *ecn);
 
 /* The path the connection currently sends on; GQ_ERR_UNAVAILABLE if it is
    not known yet.  */
@@ -574,6 +609,8 @@ typedef struct gq_conn_stats
   uint64_t datagrams_sent, datagrams_received, datagrams_dropped;
   /* Packets received with each ECN codepoint, in all packet number spaces.  */
   uint64_t ecn_ect0_received, ecn_ect1_received, ecn_ce_received;
+  int ecn_state;			/* A gq_ecn_state.  */
+  uint64_t ecn_marked_sent;		/* Packets sent marked ECT(0).  */
 } gq_conn_stats;
 
 void gq_conn_get_stats (const gq_conn *c, gq_conn_stats *st);

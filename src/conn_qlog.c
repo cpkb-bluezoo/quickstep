@@ -1357,6 +1357,22 @@ ql_tuple_assigned (gq_conn *c, int idx, int abandoned)
   qlog_end (c, QE_TUPLE_ASSIGNED);
 }
 
+/* ECN validation went from state OLD (a gq_ecn_state) to STATE.  */
+void
+ql_ecn_state_updated (gq_conn *c, int old, int state)
+{
+  static const char *const name[] = { NULL, "testing", "unknown", "capable",
+                                      "failed" };
+  qkv *w;
+
+  if ((w = qlog_begin (c, QE_ECN_STATE_UPDATED, NULL)) == NULL)
+    return;
+  if (old != GQ_ECN_OFF)
+    qkv_str (w, "old", name[old]);
+  qkv_str (w, "new", name[state]);
+  qlog_end (c, QE_ECN_STATE_UPDATED);
+}
+
 /* The spin bit we send changed to STATE.  */
 void
 ql_spin_bit_updated (gq_conn *c, int state)

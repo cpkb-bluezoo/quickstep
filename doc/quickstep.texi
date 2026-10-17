@@ -76,8 +76,9 @@ For QUIC it provides versions 1 and 2 with compatible version negotiation,
 streams and flow control, loss recovery with CUBIC or NewReno congestion
 control and pacing, address validation (Retry and tokens), 0-RTT, path
 validation and migration, DATAGRAM frames, and an endpoint layer that
-serves many connections from one socket.  ECN and the server's
-preferred_address are not implemented.
+serves many connections from one socket.  ECN is supported, for an
+application that passes the ECN field of datagrams to and from the library;
+the server's preferred_address is not implemented.
 
 The library is the C member of a family: Gumdrop (Java) and Hopf (Rust)
 established the architecture, and this project ports it to C under the
@@ -871,8 +872,7 @@ event delivers received ones, and @code{datagram_acked} and
 @code{datagram_lost} report the fate of each sent one by id.
 
 @heading Limits of this step
-ECN is not implemented yet.  The receiving side treats a few limits as
-fixed: 64 tracked packet number ranges per space and 8 connection IDs
+The receiving side treats a few limits as fixed: 64 tracked packet number ranges per space and 8 connection IDs
 in each direction.
 
 @node Congestion control
@@ -930,8 +930,31 @@ last attempt to send ended because the window or the pacer would not let
 more out, not for lack of data or because of the peer's flow control.  On a
 change of path the window, recovery state and pacer start again.
 @code{gq_conn_get_stats} reports @code{cwnd}, @code{ssthresh},
-@code{congestion_events} and @code{pacing_rate_bps}.  ECN is not
-implemented.
+@code{congestion_events} and @code{pacing_rate_bps}.
+
+@heading ECN
+The library does not touch sockets, so ECN (RFC 9000 section 13.4, RFC 9002
+section 7.1) needs the application: it gives each datagram's ECN field (a
+@code{gq_ecn}, from @code{IP_TOS} or the ancillary data of the socket) to
+@code{gq_conn_recv_ecn}, or @code{gq_endpoint_recv_ecn}, and sets the field
+that @code{gq_conn_send_ecn}, or @code{gq_endpoint_send_ecn}, returns on the
+datagram it sends.  The plain calls do neither, and a connection that
+only has them never marks anything.
+
+Received packets are counted by codepoint in each packet number space and
+the ACK frames say so (type 0x03); a packet marked CE is acknowledged at
+once.  For sending, only 1-RTT packets on the current path are marked
+(ECT(0)), never the handshake, so a path that drops the marks cannot hurt it.
+The first ten are the test: after that none are marked until an ACK frame
+shows the peer received a marked packet and counted it, with counts that
+add up.  It fails, and marking ends, if the counts are missing, fall, add
+up to less than the marked packets newly acknowledged, include ECT(1), or
+come to more than were sent, or if all of the test packets are lost.  A new
+path starts the test again.  Once it has passed, an increase in the CE
+count is a congestion event like a loss, with the window reduced once for
+the round trip (never persistent congestion).  @code{gq_conn_get_stats}
+reports @code{ecn_state}, @code{ecn_marked_sent} and the counts received,
+and qlog has @code{ecn_state_updated} and the codepoint of each datagram.
 
 @node qlog
 @chapter qlog
@@ -997,10 +1020,10 @@ text, which it cannot know; without it the events carry none, as the draft
 allows.
 
 @heading What is logged
-Every event of the draft except these.  Path MTU discovery, ECN and the
+Every event of the draft except these.  Path MTU discovery and the
 buffering of packets that arrive before their keys are not implemented (see
-the issues for each), so @code{mtu_updated}, @code{ecn_state_updated} and
-@code{packet_buffered} have nothing to say.  @code{frames_created}, @code{frames_parsed} and
+the issues for each), so @code{mtu_updated} and @code{packet_buffered} have
+nothing to say.  @code{frames_created}, @code{frames_parsed} and
 @code{frames_processed} would repeat what @code{packet_sent} and
 @code{packet_received} already carry, which the draft advises against.  A
 lost packet lists the frames it carried as far as they were kept, and the
@@ -1336,7 +1359,7 @@ flow control) and against quiche in both directions.
 CUBIC (RFC 9438) or NewReno (RFC 9002 section 7), HyStart++ (RFC 9406) in
 slow start, persistent congestion, window growth only while the window is
 in use, and a token bucket that spreads the window over the round trip
-(RFC 9002 section 7.7).  Still open: ECN, and further controllers (BBR).
+(RFC 9002 section 7.7), and ECN.  Still open: further controllers (BBR).
 
 @item
 @strong{Done.}  Address validation (@ref{Address validation}): Retry and
@@ -1405,7 +1428,7 @@ shims are needed); Encrypted Client Hello and certificate compression,
 which Gumdrop has and are deferred here.  (The timer interface was
 decided: a ``next timeout'' query, for connections and endpoints alike.)
 
-Not implemented anywhere yet: ECN, the server's
+Not implemented anywhere yet: the server's
 preferred_address, multipath, and DTLS 1.3 connection IDs.
 
 @subheading Planned
@@ -1425,7 +1448,7 @@ Gaps found by comparing with Gumdrop and Hopf: certificate compression
 (RFC 8879); @code{record_size_limit} (RFC 8449); Encrypted Client Hello
 (RFC 9849) including rotation and DTLS; ML-DSA signatures once a backend
 has them; QUIC keep-alive PING; a streams-available event when
-MAX_STREAMS raises the limit; DPLPMTUD; ECN and segmentation
+MAX_STREAMS raises the limit; DPLPMTUD; segmentation
 offload; the server's preferred_address; caching AEAD
 handles for speed; asynchronous crypto offload; and a DANE/TLSA verifier.
 Whether to send Retry by default is also open.

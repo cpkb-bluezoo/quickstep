@@ -866,11 +866,23 @@ queue_reply (gq_endpoint *ep, const gq_path *to, const uint8_t *d, size_t len)
   return 1;
 }
 
+/* Give a connection a datagram; ECN is the field of its IP header, or -1 if
+   the application did not say.  */
+static void
+conn_recv (gq_conn *c, uint64_t now, const gq_path *from, int ecn,
+           uint8_t *data, size_t len)
+{
+  if (ecn < 0)
+    gq_conn_recv_path (c, now, from, data, len);
+  else
+    gq_conn_recv_ecn (c, now, from, ecn, data, len);
+}
+
 /* Datagram for a connection ID we do not know that looks like the start of a
    connection.  */
 static int
-admit (gq_endpoint *ep, uint64_t now, const gq_path *from, uint8_t *data,
-       size_t len)
+admit (gq_endpoint *ep, uint64_t now, const gq_path *from, int ecn,
+       uint8_t *data, size_t len)
 {
   gq_admit_config ac = ep->cfg.admit;
   gq_conn_accept acc;
@@ -944,7 +956,7 @@ admit (gq_endpoint *ep, uint64_t now, const gq_path *from, uint8_t *data,
     }
   if (ep->ev.connection)
     ep->ev.connection (ep->ev.user, c);
-  gq_conn_recv_path (c, now, from, data, len);
+  conn_recv (c, now, from, ecn, data, len);
   mark_woken (ep, e);
   reschedule (ep, e);
   return GQ_OK;
@@ -975,9 +987,10 @@ stateless_reset (gq_endpoint *ep, uint64_t now, const gq_path *from,
     ep->resets_in_window++;
 }
 
-int
-gq_endpoint_recv (gq_endpoint *ep, uint64_t now_us, const gq_path *from,
-                  uint8_t *data, size_t len)
+/* ECN is a gq_ecn, or -1 if the application did not say.  */
+static int
+endpoint_recv (gq_endpoint *ep, uint64_t now_us, const gq_path *from, int ecn,
+               uint8_t *data, size_t len)
 {
   struct entry *e = NULL;
 
@@ -998,7 +1011,7 @@ gq_endpoint_recv (gq_endpoint *ep, uint64_t now_us, const gq_path *from,
           return GQ_OK;
         }
       if (e == NULL)
-        return admit (ep, now_us, from, data, len);
+        return admit (ep, now_us, from, ecn, data, len);
     }
   else
     {
@@ -1030,7 +1043,7 @@ gq_endpoint_recv (gq_endpoint *ep, uint64_t now_us, const gq_path *from,
           return GQ_OK;
         }
     }
-  gq_conn_recv_path (e->c, now_us, from, data, len);
+  conn_recv (e->c, now_us, from, ecn, data, len);
   mark_woken (ep, e);
   reschedule (ep, e);
   if (gq_conn_state (e->c) == GQ_CONN_DONE)
@@ -1039,10 +1052,30 @@ gq_endpoint_recv (gq_endpoint *ep, uint64_t now_us, const gq_path *from,
 }
 
 int
-gq_endpoint_send (gq_endpoint *ep, uint64_t now_us, uint8_t *out, size_t cap,
-                  size_t *len, gq_path *to)
+gq_endpoint_recv (gq_endpoint *ep, uint64_t now_us, const gq_path *from,
+                  uint8_t *data, size_t len)
+{
+  return endpoint_recv (ep, now_us, from, -1, data, len);
+}
+
+int
+gq_endpoint_recv_ecn (gq_endpoint *ep, uint64_t now_us, const gq_path *from,
+                      int ecn, uint8_t *data, size_t len)
+{
+  if (ecn < GQ_ECN_NOT_ECT || ecn > GQ_ECN_CE)
+    return GQ_ERR_INVAL;
+  return endpoint_recv (ep, now_us, from, ecn, data, len);
+}
+
+/* ECN, if not NULL, is where the codepoint of the datagram goes, and the
+   connections are asked through the call that may mark.  */
+static int
+endpoint_send (gq_endpoint *ep, uint64_t now_us, uint8_t *out, size_t cap,
+               size_t *len, gq_path *to, int *ecn)
 {
   *len = 0;
+  if (ecn)
+    *ecn = GQ_ECN_NOT_ECT;
   ep->now = now_us;
   ep_ql_listening (ep);
   if (ep->reply_n)
@@ -1063,7 +1096,8 @@ gq_endpoint_send (gq_endpoint *ep, uint64_t now_us, uint8_t *out, size_t cap,
   while (ep->wake_n)
     {
       struct entry *e = ep->wake[ep->wake_head];
-      int r = gq_conn_send_path (e->c, now_us, out, cap, len, to);
+      int r = ecn ? gq_conn_send_ecn (e->c, now_us, out, cap, len, to, ecn)
+                  : gq_conn_send_path (e->c, now_us, out, cap, len, to);
 
       if (r != GQ_OK)
         return r;
@@ -1087,6 +1121,20 @@ gq_endpoint_send (gq_endpoint *ep, uint64_t now_us, uint8_t *out, size_t cap,
         reap (ep, e);
     }
   return GQ_OK;
+}
+
+int
+gq_endpoint_send (gq_endpoint *ep, uint64_t now_us, uint8_t *out, size_t cap,
+                  size_t *len, gq_path *to)
+{
+  return endpoint_send (ep, now_us, out, cap, len, to, NULL);
+}
+
+int
+gq_endpoint_send_ecn (gq_endpoint *ep, uint64_t now_us, uint8_t *out,
+                      size_t cap, size_t *len, gq_path *to, int *ecn)
+{
+  return endpoint_send (ep, now_us, out, cap, len, to, ecn);
 }
 
 uint64_t

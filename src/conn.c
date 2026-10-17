@@ -1315,6 +1315,8 @@ gq_conn_get_stats (const gq_conn *c, gq_conn_stats *st)
   st->ecn_ect0_received = c->ecn_in[0];
   st->ecn_ect1_received = c->ecn_in[1];
   st->ecn_ce_received = c->ecn_in[2];
+  st->ecn_state = c->ecn_state;
+  st->ecn_marked_sent = c->ecn_marked_sent;
 }
 
 /* ECN is a gq_ecn, or -1 when the caller does not say.  */
@@ -1381,6 +1383,20 @@ gq_conn_send_path (gq_conn *c, uint64_t now_us, uint8_t *out, size_t cap,
   ql_after (c);
   if (to)
     *to = c->paths[c->tx_path].p;
+  return r;
+}
+
+int
+gq_conn_send_ecn (gq_conn *c, uint64_t now_us, uint8_t *out, size_t cap,
+                  size_t *len, gq_path *to, int *ecn)
+{
+  int r;
+
+  c->tx_ecn_ok = 1;
+  c->tx_ecn = GQ_ECN_NOT_ECT;
+  r = gq_conn_send_path (c, now_us, out, cap, len, to);
+  c->tx_ecn_ok = 0;
+  *ecn = *len ? c->tx_ecn : GQ_ECN_NOT_ECT;
   return r;
 }
 

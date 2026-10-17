@@ -81,6 +81,7 @@ typedef struct sent_pkt
   uint32_t size;
   uint8_t ack_eliciting, in_flight, requeued;
   uint8_t early;		/* Sent as a 0-RTT packet.  */
+  uint32_t ecn_gen;		/* Sent marked ECT(0), in this test: else 0.  */
   uint32_t nframes;
   sent_frame *frames;
 } sent_pkt;
@@ -120,6 +121,13 @@ typedef struct space
   } ack_sent[ACK_SENT_MAX];
   unsigned n_ack_sent;
   uint64_t ecn_in[3];		/* Received with ECT(0), ECT(1), CE.  */
+  /* Validating ECN (section 13.4.2): the counts the peer last reported,
+     the packets we marked ECT(0), and the largest packet number of the ACK
+     frames whose counts were last looked at.  */
+  uint64_t ecn_peer[3];
+  uint64_t ecn_sent;
+  uint64_t ecn_largest;
+  uint8_t ecn_have_largest;
 } space;
 
 typedef struct lcid
@@ -254,6 +262,13 @@ struct gq_conn
   uint8_t w_phase_acked;
   uint64_t rk_prev_until;	/* When the previous phase's read keys go.  */
   uint64_t aead_failed;		/* Packets that failed authentication.  */
+  uint8_t ecn_state;		/* A gq_ecn_state.  */
+  uint32_t ecn_gen;		/* Counts the tests; packets sent in one carry
+				   it, and none is 0.  */
+  uint64_t ecn_test_sent, ecn_test_ae, ecn_test_acked, ecn_test_lost;
+  uint64_t ecn_marked_sent;
+  uint8_t tx_ecn_ok;		/* The send in progress may mark packets.  */
+  uint8_t tx_ecn;		/* The codepoint of the datagram it made.  */
   int8_t rx_ecn;		/* ECN field of the datagram being processed
 				   (a gq_ecn), or -1 if we are not told.  */
   uint64_t ecn_in[3];		/* Packets received with ECT(0), ECT(1), CE.  */
@@ -345,6 +360,16 @@ struct gq_conn
 /* conn.c */
 void conn_fail (gq_conn *c, uint64_t code, const char *reason);
 
+/* ECN (conn_ecn.c).  */
+void conn_ecn_restart (gq_conn *c);
+int conn_ecn_marks (gq_conn *c, int dest, const int *spaces,
+                    const uint8_t *early, int n);
+uint32_t conn_ecn_sent (gq_conn *c, int ae);
+void conn_ecn_datagram_sent (gq_conn *c);
+void conn_ecn_lost (gq_conn *c, const sent_pkt *p);
+void conn_ecn_on_ack (gq_conn *c, int sp, const gq_frame *f,
+                      const sent_pkt *got, size_t n, uint64_t now);
+
 /* The latency spin bit (conn.c).  */
 int conn_spin_enabled (const gq_conn_config *cfg, unsigned draw);
 void conn_spin_draw (gq_conn *c);
@@ -381,6 +406,7 @@ void ql_closed (gq_conn *c, int source, int application, uint64_t error,
                 const uint8_t *reason, size_t reason_len, const char *trigger);
 void ql_cid_check (gq_conn *c);
 void ql_spin_bit_updated (gq_conn *c, int state);
+void ql_ecn_state_updated (gq_conn *c, int old, int state);
 void ql_rx_cid (gq_conn *c, const uint8_t *cid, size_t len);
 void ql_version_information (gq_conn *c, const uint32_t *client,
                              size_t nclient, const uint32_t *server,
