@@ -21,13 +21,18 @@ AM_CFLAGS = $(STD_CFLAGS) $(WARN_CFLAGS) $(GNUTLS_CFLAGS)
 LDADD = $(top_builddir)/src/libquickstep.la $(GNUTLS_LIBS)
 
 UNIT_TESTS = test-varint test-frame test-crypto test-policy test-trust \
-  test-packet test-protect test-tparams test-kx test-sign \
+  test-packet test-protect test-tparams test-kx test-mlkem test-sign \
   test-tlsmsg test-keysched test-tls-client test-record test-tlsconn test-tls-server \
   test-resume test-tickets test-early test-tls12ks test-record12 test-tls12 \
   test-tls12conn test-dtlsrec test-dtlshs test-dtls test-dtls12rec test-dtls12 test-ranges test-stream test-tlsauto test-dtlsauto test-quiclb test-conn test-conn-int test-cc test-qlog test-token test-endpoint
 
 TESTS = $(UNIT_TESTS)
 check_PROGRAMS = $(UNIT_TESTS)
+
+# Calls libgcrypt's KEM interface directly to check it against the FIPS 203
+# vectors.
+test_mlkem_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
+test_mlkem_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
 
 # It uses the library's internals, which a shared library does not export.
 test_conn_int_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
@@ -37,4 +42,4 @@ test_cc_LDFLAGS = -static
 test_qlog_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
 test_qlog_LDFLAGS = -static
 
-EXTRA_DIST = tst-qkv.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h
+EXTRA_DIST = tst-qkv.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h vectors-mlkem.h

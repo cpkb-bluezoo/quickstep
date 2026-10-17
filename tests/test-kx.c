@@ -25,6 +25,7 @@
 #include <quickstep/kx.h>
 
 #include "tst-util.h"
+#include "vectors-mlkem.h"
 
 static const unsigned all_groups[] = {
   GQ_GROUP_X25519, GQ_GROUP_SECP256R1, GQ_GROUP_SECP384R1,
@@ -155,6 +156,60 @@ test_hybrid_order (void)
                       48, 1568, 0);
 }
 
+/* Known-answer test of a hybrid group on the client side, the only
+   direction whose inputs the caller fixes: gq_kx_generate and
+   gq_kx_respond draw their own randomness, which the interface does not
+   let a test replace.  The client key is the classical private key
+   followed by the ML-KEM decapsulation key (the layout kx.h documents),
+   the server share and the expected shared secret are literal values
+   from vectors-mlkem.h with the halves in the order RFC 10024 gives the
+   group.  A swap of either order, or a wrong length for a half, changes
+   the result.  */
+static void
+check_hybrid_kat (unsigned group, const char *const *scalar,
+                  const char *const *dk, const char *const *server_share,
+                  const char *const *shared)
+{
+  static gq_kx_key key;
+  uint8_t share[GQ_KX_SHARE_MAX], want[GQ_KX_SHARED_MAX];
+  uint8_t out[GQ_KX_SHARED_MAX];
+  size_t scalar_len, dk_len, share_len, want_len, n;
+
+  memset (&key, 0, sizeof key);
+  key.group = (uint16_t) group;
+  scalar_len = tst_unhex_parts (scalar, key.secret, sizeof key.secret);
+  dk_len = tst_unhex_parts (dk, key.secret + scalar_len,
+                            sizeof key.secret - scalar_len);
+  CHECK (scalar_len + dk_len <= sizeof key.secret);
+  share_len = tst_unhex_parts (server_share, share, sizeof share);
+  want_len = tst_unhex_parts (shared, want, sizeof want);
+
+  CHECK_EQ (share_len, gq_kx_server_share_len (group));
+  CHECK_EQ (want_len, gq_kx_shared_len (group));
+  CHECK_EQ (gq_kx_complete (&key, share, share_len, out, sizeof out, &n),
+            GQ_OK);
+  CHECK_EQ (n, want_len);
+  CHECK (n == want_len && memcmp (out, want, n) == 0);
+}
+
+#define HYBRID_KAT(group, scalar, dk, name) \
+  check_hybrid_kat (group, \
+                    (const char *const[]) { scalar }, \
+                    (const char *const[]) { dk }, \
+                    (const char *const[]) { HYBRID_##name##_SERVER_SHARE }, \
+                    (const char *const[]) { HYBRID_##name##_SHARED })
+
+static void
+test_hybrid_kat (void)
+{
+  HYBRID_KAT (GQ_GROUP_X25519_MLKEM768, HYBRID_X25519_SCALAR,
+              MLKEM768_DECAP1_DK, X25519_MLKEM768);
+  HYBRID_KAT (GQ_GROUP_SECP256R1_MLKEM768, HYBRID_P256_SCALAR,
+              MLKEM768_DECAP1_DK, SECP256R1_MLKEM768);
+  HYBRID_KAT (GQ_GROUP_SECP384R1_MLKEM1024, HYBRID_P384_SCALAR,
+              MLKEM1024_DECAP1_DK, SECP384R1_MLKEM1024);
+}
+
 static void
 test_errors (void)
 {
@@ -212,6 +267,7 @@ main (void)
   test_roundtrip ();
   test_x25519_kat ();
   test_hybrid_order ();
+  test_hybrid_kat ();
   test_errors ();
   TST_DONE ();
 }

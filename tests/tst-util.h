@@ -67,6 +67,18 @@ tst_unhex (const char *hex, uint8_t *out, size_t cap)
   return n;
 }
 
+/* Decode a NULL-terminated list of hex pieces (see vectors-mlkem.h) into
+   OUT, one after the other; returns the byte count.  */
+static inline size_t
+tst_unhex_parts (const char *const *parts, uint8_t *out, size_t cap)
+{
+  size_t n = 0;
+
+  for (; *parts; parts++)
+    n += tst_unhex (*parts, out + n, cap - n);
+  return n;
+}
+
 /* Compare BUF (LEN bytes) with the hex string HEX.  */
 static inline int
 tst_eq_hex (const uint8_t *buf, size_t len, const char *hex)
