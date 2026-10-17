@@ -202,6 +202,26 @@ conn_enter_closing (gq_conn *c, gq_conn_close_info *info, int draining)
     return;
   c->state = draining ? GQ_CONN_DRAINING : GQ_CONN_CLOSING;
   c->close_deadline = c->now + pto;
+  {
+    const char *trigger;
+
+    if (info->source == GQ_CLOSE_RESET)
+      trigger = "stateless_reset";
+    else if (info->source == GQ_CLOSE_LOCAL)
+      trigger = info->application ? "application"
+                : info->error == GQ_QERR_VERSION_NEGOTIATION
+                  ? "version_mismatch" : "error";
+    else
+      trigger = "unspecified";
+    ql_closed (c, info->source, info->application, info->error, info->reason,
+               info->reason_len, trigger);
+    /* The base state, "closed", is entered when the CONNECTION_CLOSE is
+       sent or seen; the detailed ones keep it for the end of the period.  */
+    if (c->ql.level >= GQ_QLOG_EXTRA)
+      ql_state (c, draining ? "draining" : "closing", 1);
+    else
+      ql_state (c, "closed", 0);
+  }
   if (!c->closed_notified)
     {
       c->closed_notified = 1;
@@ -279,6 +299,16 @@ conn_discard_space (gq_conn *c, int sp)
 
   if (s->discarded)
     return GQ_OK;
+  if (sp != SP_APP)
+    {
+      enum gq_level lv = sp == SP_INITIAL ? GQ_LEVEL_INITIAL
+                                          : GQ_LEVEL_HANDSHAKE;
+
+      if (s->have_rk)
+        ql_key_discarded (c, lv, GQ_DIR_READ, 0, 0, "tls");
+      if (s->have_wk)
+        ql_key_discarded (c, lv, GQ_DIR_WRITE, 0, 0, "tls");
+    }
   s->discarded = 1;
   s->have_rk = s->have_wk = 0;
   gq_packet_keys_wipe (&s->rk);
@@ -303,6 +333,7 @@ conn_maybe_confirm (gq_conn *c)
   if (c->handshake_confirmed)
     return;
   c->handshake_confirmed = 1;
+  ql_state (c, "handshake_confirmed", 1);
   conn_discard_space (c, SP_HANDSHAKE);
 }
 
@@ -606,10 +637,23 @@ sink_peer_params (void *user, const uint8_t *data, size_t len)
       conn_fail (c, GQ_QERR_TRANSPORT_PARAMETER, "bad transport parameters");
       return 1;
     }
+  ql_parameters_set (c, 1, &c->peer_tp);
   if (negotiate_version (c) != GQ_OK)
     {
       conn_fail (c, GQ_QERR_VERSION_NEGOTIATION, "version negotiation failed");
       return 1;
+    }
+  if (c->switched && gq_tp_has (&c->peer_tp, GQ_TP_VERSION_INFORMATION))
+    {
+      /* A compatible switch: what each side offered, and what was chosen.  */
+      if (c->role == GQ_ROLE_SERVER)
+        ql_version_information (c, c->peer_tp.available_versions,
+                                c->peer_tp.n_available_versions,
+                                c->cfg.versions, c->cfg.n_versions, c->version);
+      else
+        ql_version_information (c, c->cfg.versions, c->cfg.n_versions,
+                                c->peer_tp.available_versions,
+                                c->peer_tp.n_available_versions, c->version);
     }
   return 0;
 }
@@ -620,6 +664,10 @@ sink_complete (void *user, const gq_tls_info *info)
   gq_conn *c = user;
 
   c->handshake_complete = 1;
+  ql_state (c, "handshake_complete", 0);
+  ql_parameters_tls (c, info);
+  ql_alpn_information (c, NULL, 0, NULL, 0, info->alpn_len ? info->alpn : NULL,
+                       info->alpn_len);
   c->early_rk_deadline = c->now + 3 * conn_pto_base (c, SP_APP);
   if (c->role == GQ_ROLE_SERVER)
     {
@@ -781,6 +829,7 @@ conn_alloc (enum gq_role role, const gq_conn_config *config,
       space_init (&c->sp[i]);
     }
   cc_init (c);
+  qlog_conn_init (c);
   conn_recompute_idle (c, now);
   /* Our first connection ID.  */
   if (new_lcid (c, 1, fixed) != GQ_OK)
@@ -799,6 +848,7 @@ encode_params (gq_conn *c)
   gq_transport_params tp;
 
   local_params (c, &tp);
+  ql_parameters_set (c, 0, &tp);
   c->tp_len = 0;
   gq_tp_encode (&tp, c->role, c->tp_buf, sizeof c->tp_buf, &c->tp_len);
 }
@@ -820,6 +870,7 @@ client_setup (gq_conn *c, int use_token)
   c->initial_dcid = c->odcid;
   c->dcid_set = 1;
   c->p[0].cid = c->odcid;
+  ql_connection_started (c);
   c->token_len = 0;
   if (use_token && c->cfg.token && c->cfg.token_len
       && c->cfg.token_len <= sizeof c->token)
@@ -834,6 +885,8 @@ client_setup (gq_conn *c, int use_token)
   c->sp[SP_INITIAL].wk = ck;
   c->sp[SP_INITIAL].rk = sk;
   c->sp[SP_INITIAL].have_wk = c->sp[SP_INITIAL].have_rk = 1;
+  ql_key_updated (c, GQ_LEVEL_INITIAL, GQ_DIR_WRITE, "tls");
+  ql_key_updated (c, GQ_LEVEL_INITIAL, GQ_DIR_READ, "tls");
   encode_params (c);
   c->ctls.quic = 1;
   c->ctls.transport_params = c->tp_buf;
@@ -896,6 +949,12 @@ gq_conn_client_new (gq_conn **out, const gq_conn_config *config,
       gq_conn_free (c);
       return r;
     }
+  ql_version_information (c, c->cfg.versions, c->cfg.n_versions, NULL, 0,
+                          c->version);
+  ql_alpn_information (c, c->ctls.alpn, c->ctls.n_alpn, NULL, 0, NULL, 0);
+  ql_recovery_parameters (c);
+  if (c->early_offered)
+    ql_parameters_restored (c, &c->resume_tp);
   *out = c;
   return GQ_OK;
 }
@@ -949,6 +1008,11 @@ conn_abandon (gq_conn *c, uint64_t error, const char *reason)
   info.reason_len = strlen (reason);
   c->close_pending = 0;
   c->state = GQ_CONN_DONE;
+  ql_closed (c, GQ_CLOSE_LOCAL, 0, error, (const uint8_t *) reason,
+             strlen (reason),
+             error == GQ_QERR_VERSION_NEGOTIATION ? "version_mismatch"
+                                                  : "error");
+  ql_state (c, "closed", 0);
   if (!c->closed_notified)
     {
       c->closed_notified = 1;
@@ -1023,12 +1087,19 @@ conn_server_start (gq_conn *c, const uint8_t *odcid, size_t odcid_len,
   memcpy (c->dcid.data, client_scid, client_scid_len);
   c->dcid_set = 1;
   c->p[0].cid = c->dcid;
+  ql_connection_started (c);
+  ql_version_information (c, NULL, 0, c->cfg.versions, c->cfg.n_versions,
+                          c->version);
+  ql_alpn_information (c, NULL, 0, c->stls.alpn, c->stls.n_alpn, NULL, 0);
+  ql_recovery_parameters (c);
   r = gq_packet_keys_initial (c->version, odcid, odcid_len, &ck, &sk);
   if (r != GQ_OK)
     return r;
   c->sp[SP_INITIAL].rk = ck;
   c->sp[SP_INITIAL].wk = sk;
   c->sp[SP_INITIAL].have_rk = c->sp[SP_INITIAL].have_wk = 1;
+  ql_key_updated (c, GQ_LEVEL_INITIAL, GQ_DIR_READ, "tls");
+  ql_key_updated (c, GQ_LEVEL_INITIAL, GQ_DIR_WRITE, "tls");
   encode_params (c);
   c->stls.quic = 1;
   c->stls.transport_params = c->tp_buf;
@@ -1067,6 +1138,7 @@ gq_conn_free (gq_conn *c)
       gq_packet_keys_wipe (&s->wk);
     }
   streams_free (c);
+  qlog_conn_free (c);
   gq_packet_keys_wipe (&c->rk_prev);
   gq_packet_keys_wipe (&c->rk_next);
   memset (c->rsec, 0, sizeof c->rsec);
@@ -1099,6 +1171,13 @@ gq_conn_get_peer_params (const gq_conn *c, uint8_t *out, size_t cap,
   memcpy (out, c->peer_tp_raw, c->peer_tp_raw_len);
   *len = c->peer_tp_raw_len;
   return GQ_OK;
+}
+
+const uint8_t *
+gq_conn_original_dcid (const gq_conn *c, size_t *len)
+{
+  *len = c->odcid.len;
+  return c->odcid.data;
 }
 
 int
@@ -1167,6 +1246,7 @@ gq_conn_recv_path (gq_conn *c, uint64_t now_us, const gq_path *from,
     }
   r = conn_receive_datagram (c, now_us, data, len);
   conn_path_rx_end (c);
+  ql_after (c);
   return r;
 }
 
@@ -1190,6 +1270,7 @@ gq_conn_send_path (gq_conn *c, uint64_t now_us, uint8_t *out, size_t cap,
   if (cap < conn_max_datagram (c))
     return GQ_ERR_BUFSIZE;
   r = conn_build_datagram (c, now_us, out, cap, len);
+  ql_after (c);
   if (to)
     *to = c->paths[c->tx_path].p;
   return r;
@@ -1232,10 +1313,14 @@ gq_conn_on_timeout (gq_conn *c, uint64_t now_us)
   c->now = now_us;
   if (c->state == GQ_CONN_DONE)
     return;
+  ql_timers_expired (c, now_us);
   if (c->state >= GQ_CONN_CLOSING)
     {
       if (c->close_deadline && now_us >= c->close_deadline)
-        c->state = GQ_CONN_DONE;
+        {
+          c->state = GQ_CONN_DONE;
+          ql_state (c, "closed", 0);
+        }
       return;
     }
   if (c->idle_deadline && now_us >= c->idle_deadline)
@@ -1246,6 +1331,8 @@ gq_conn_on_timeout (gq_conn *c, uint64_t now_us)
       info.source = GQ_CLOSE_IDLE;
       c->closed_notified = 1;
       c->state = GQ_CONN_DONE;
+      ql_closed (c, GQ_CLOSE_IDLE, 0, 0, NULL, 0, "idle_timeout");
+      ql_state (c, "closed", 0);
       if (c->ev.closed)
         c->ev.closed (c->ev.user, &info);
       return;
@@ -1265,4 +1352,5 @@ gq_conn_on_timeout (gq_conn *c, uint64_t now_us)
     c->pace_deadline = 0;
   on_loss_timeout (c, now_us);
   conn_path_on_timeout (c, now_us);
+  ql_after (c);
 }

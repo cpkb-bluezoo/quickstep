@@ -16,6 +16,7 @@ everything needed to be one of those implementations:
 | `run_endpoint.sh` | Container entrypoint: simulator routing, then the endpoint |
 | `ack_stats.py`, `dump_frames.py` | Read the runner's packet captures: ACK-only packet counts, and a packet-by-packet decode (see below) |
 | `smoke.sh` | The endpoint against itself over loopback, once per test case; part of `make check-integration` |
+| `qlog_lint.c` | `qlog-lint`: checks the qlog files the endpoint writes against the qlog draft (see below) |
 
 The matrix is run by the `QUIC interop` GitHub Actions workflow
 (`.github/workflows/quic-interop.yml`), on demand only. It is not part of
@@ -75,8 +76,45 @@ two datagrams can be left waiting. That is what the runner's amplification
 limit case, which drops the second datagram, does to the default (hybrid)
 ClientHello.
 
-There is no qlog: `QLOGDIR` is ignored. The endpoint's own console log, the
-packet captures and the analyses below take its place.
+## qlog
+
+The runner sets `QLOGDIR` (to `/logs/qlog/`) for both endpoints and keeps what
+is written there. The endpoint writes a file for each connection, named as the
+qlog draft suggests by the original destination connection ID and the side
+(`abcd1234_server.qlog.txt`), and `endpoint_server.qlog.txt` or
+`endpoint_client.qlog.txt` for the events that belong to no connection (the
+server listening, datagrams that matched none, the Version Negotiation, Retry
+and stateless reset packets it sends itself).
+
+The files are lines, not the draft's JSON: a time in microseconds from the
+connection's first event, the event's name and its fields as `key=value`. The
+format is described in `include/quickstep/qlog.h`. The first line of a file
+begins with `#` and says what it is. To pick out the lost packets of a
+connection:
+
+```bash
+awk '$2 == "quic:packet_lost"' abcd1234_server.qlog.txt
+```
+
+`QUICKSTEP_QLOG_LEVEL` (`core`, `base` or `extra`; the default is `extra`)
+chooses how much is logged, and `QUICKSTEP_QLOG_RAW` how many bytes of the data
+of each CRYPTO, STREAM, DATAGRAM and NEW_TOKEN frame to include; these are
+read by the endpoint, so for the runner they are set when the image is built.
+
+`qlog-lint` (built with `make -C integration qlog-lint`, and in the image as
+`/quickstep/qlog-lint`) checks files against the draft's event definitions:
+the event names, the fields each event must and may have, the values of the
+enumerated ones, the types of the numbers, the order of the times, and that a
+connection's file begins with its `connection_started`. `smoke.sh` runs it on
+what each of its cases wrote, and the workflow on what each run against
+another implementation wrote, with the result in the job summary:
+
+```bash
+qlog-lint -v logs/quickstep-server/*/server/qlog/*.qlog.txt
+```
+
+The endpoint's own console log, the packet captures and the analyses below
+are the other places to look.
 
 ## Building the image
 

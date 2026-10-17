@@ -166,6 +166,33 @@ jobs:
       - name: Load endpoint image
         run: zstd -d -c quickstep-interop.tar.zst | docker load
 
+      # Both directions lint the qlogs their endpoint wrote; the check is
+      # inside the image so that it is the one the endpoint was built with.
+      - name: Write the qlog check
+        run: |
+          cat > "$RUNNER_TEMP/lint_qlogs.sh" <<'LINT'
+          # lint_qlogs LOGDIR SIDE PEER: check every qlog under LOGDIR, print
+          # a markdown paragraph.  Never fails: the verdict is in the text.
+          lint_qlogs ()
+          {
+            dir=$1; side=$2; peer=$3
+            n=$(find "$dir" -name '*.qlog.txt' | wc -l)
+            echo "#### qlogs, quickstep $side vs $peer: $n files"
+            echo
+            if [ "$n" -eq 0 ]; then echo "none written"; return 0; fi
+            if (cd "$dir" && find . -name '*.qlog.txt' -print0 \
+                  | xargs -0 -n 400 docker run --rm -v "$PWD":/logs:ro \
+                      -w /logs --entrypoint /quickstep/qlog-lint \
+                      quickstep-interop:ci) > "$RUNNER_TEMP/lint.out" 2>&1
+            then rc=0; else rc=1; fi
+            echo '```'
+            if [ "$rc" -eq 0 ]; then grep ' faults$' "$RUNNER_TEMP/lint.out"
+            else grep -v '^ ' "$RUNNER_TEMP/lint.out" | head -n 40; fi
+            echo '```'
+            echo
+          }
+          LINT
+
       - name: Register quickstep with the runner
         working-directory: runner
         run: |
@@ -199,6 +226,8 @@ jobs:
           # the job summary is not readable from the gh CLI, the log is
           echo "ACK-only packets, quickstep server vs $PEER (quickstep ${REF:-$GITHUB_SHA})"; cat acks.md
           echo "Connection statistics, quickstep server vs $PEER"; cat stats.txt
+          . "$RUNNER_TEMP/lint_qlogs.sh"
+          lint_qlogs "$GITHUB_WORKSPACE/logs/quickstep-server" server "$PEER" | tee qlint.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: ${{ matrix.peer }} server, quickstep client
         if: always() && matrix.quickstep_client
@@ -225,6 +254,8 @@ jobs:
           # the job summary is not readable from the gh CLI, the log is
           echo "ACK-only packets, quickstep client vs $PEER (quickstep ${REF:-$GITHUB_SHA})"; cat acks.md
           echo "Connection statistics, quickstep client vs $PEER"; cat stats.txt
+          . "$RUNNER_TEMP/lint_qlogs.sh"
+          lint_qlogs "$GITHUB_WORKSPACE/logs/quickstep-client" client "$PEER" | tee qlint.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload logs and results
         if: always()

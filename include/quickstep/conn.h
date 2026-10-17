@@ -74,6 +74,7 @@
 
 #include <quickstep/packet.h>
 #include <quickstep/tls.h>
+#include <quickstep/qlog.h>
 #include <quickstep/tparams.h>
 #include <quickstep/token.h>
 
@@ -288,6 +289,27 @@ typedef struct gq_conn_config
   /* Wall clock in seconds, for token ages.  NULL uses time().  */
   uint64_t (*wall_seconds) (void *user);
   void *wall_user;
+  /* qlog (qlog.h): if set, called with each event of
+     draft-ietf-quic-qlog-quic-events the connection produces, of the
+     importance QLOG_IMPORTANCE (a gq_qlog_importance) and the ones before it:
+     0, the default, is all of them.  The callback must not call the
+     connection (but for what its CONN argument allows to read).  QLOG_RAW
+     is how many bytes of the data of each CRYPTO, STREAM, DATAGRAM and
+     NEW_TOKEN frame to include, as hex, in the events that carry frames; 0,
+     the default, logs their lengths and none of the bytes, which can be
+     secret or personal.  */
+  gq_qlog_fn qlog;
+  void *qlog_user;
+  int qlog_importance;
+  size_t qlog_raw;
+  /* How to write a path's addresses in qlog events: the library does not
+     know what the bytes of a gq_addr mean.  Writes the address as text in
+     IP (at most IPCAP bytes with the NUL) and its port, and returns 4 or 6
+     for the family, or 0 if it cannot tell.  Without it events carry no
+     addresses (the draft lets a stack that does not handle sockets leave
+     them out).  */
+  int (*qlog_addr) (void *user, const gq_addr *addr, char *ip, size_t ipcap,
+                    uint16_t *port);
 } gq_conn_config;
 
 /* What the admission step (listen.h) learned about a client's first
@@ -406,6 +428,12 @@ uint32_t gq_conn_version (const gq_conn *c);
    Also: the Destination Connection ID of the first Initial (a server
    endpoint routes by it until the client switches).  */
 const uint8_t *gq_conn_initial_dcid (const gq_conn *c, size_t *len);
+
+/* The Destination Connection ID of the first Initial the client sent, which
+   does not change over the connection (after a Retry gq_conn_initial_dcid
+   names the server's choice instead).  This is what to name a qlog by.  A
+   server only knows it once the first Initial has arrived.  */
+const uint8_t *gq_conn_original_dcid (const gq_conn *c, size_t *len);
 
 /* ---- 0-RTT ---- */
 

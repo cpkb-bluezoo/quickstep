@@ -20,6 +20,10 @@
 EP=${QUIC_INTEROP_ENDPOINT:-./quic-interop-endpoint}
 [ -x "$EP" ] || exit 77
 case $EP in /*) ;; *) EP=$(pwd)/$EP ;; esac
+# The checker of the qlogs the endpoints write; without it they are not read.
+LINT=${QLOG_LINT:-./qlog-lint}
+case $LINT in /*) ;; *) LINT=$(pwd)/$LINT ;; esac
+[ -x "$LINT" ] || LINT=
 OPENSSL=${OPENSSL:-$(command -v openssl)}
 [ -n "$OPENSSL" ] || exit 77
 
@@ -29,7 +33,8 @@ cleanup ()
 {
   [ -n "$PID" ] && kill $PID 2>/dev/null
   wait 2>/dev/null
-  rm -rf "$T"
+  # GQ_KEEP=1 leaves the logs and downloads where they are to be looked at.
+  if [ -n "$GQ_KEEP" ]; then echo "kept $T"; else rm -rf "$T"; fi
 }
 trap cleanup EXIT INT TERM
 cd "$T" || exit 77
@@ -98,6 +103,7 @@ case_ ()
   : > "keys-$name.cli"
   ROLE=server TESTCASE=$tc INTEROP_PORT=$port INTEROP_WWW=www \
     INTEROP_CERTS=certs SSLKEYLOGFILE="keys-$name.srv" \
+    QLOGDIR="ql-$name/" \
     "$EP" > "$name.srv.log" 2>&1 &
   PID=$!
   i=0
@@ -108,7 +114,7 @@ case_ ()
   reqs=
   for f in "$@"; do reqs="$reqs https://$host:$port/$f"; done
   ROLE=client TESTCASE=$tc INTEROP_DOWNLOADS="dl-$name" INTEROP_CERTS=certs \
-    REQUESTS="$reqs" SSLKEYLOGFILE="keys-$name.cli" \
+    REQUESTS="$reqs" SSLKEYLOGFILE="keys-$name.cli" QLOGDIR="ql-$name/" \
     "$EP" > "$name.cli.log" 2>&1
   rc=$?
   kill $PID 2>/dev/null
@@ -117,6 +123,17 @@ case_ ()
   for f in "$@"; do
     cmp -s "dl-$name/$f" "www/$f" || { echo "     $f differs"; rc=1; }
   done
+  # Each side wrote the qlog of the connection, named for the same
+  # connection, and what they wrote is as the draft says.
+  ls "ql-$name" | grep -q '_server\.qlog\.txt$' || { echo "     no server qlog"; rc=1; }
+  ls "ql-$name" | grep -q '_client\.qlog\.txt$' || { echo "     no client qlog"; rc=1; }
+  [ -n "$(ls "ql-$name" | grep '^[0-9a-f]*_' | sed 's/_.*//' | sort | uniq -d)" ] \
+    || { echo "     the qlogs name different connections"; rc=1; }
+  grep -q ' quic:packet_sent ' "ql-$name"/*_client.qlog.txt || rc=1
+  if [ -n "$LINT" ]; then
+    "$LINT" "ql-$name"/*.qlog.txt > "$name.lint" 2>&1 \
+      || { echo "     qlog-lint:"; sed 's/^/       /' "$name.lint" | head -8; rc=1; }
+  fi
   # Each side logged the secrets of the handshake, and the same ones.
   grep -q '^SERVER_HANDSHAKE_TRAFFIC_SECRET ' "keys-$name.cli" || rc=1
   grep -q '^CLIENT_TRAFFIC_SECRET_0 ' "keys-$name.srv" || rc=1

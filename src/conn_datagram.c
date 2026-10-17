@@ -131,6 +131,7 @@ gq_conn_datagram_send (gq_conn *c, const uint8_t *data, size_t len,
   c->dq_bytes += len;
   if (id)
     *id = d->id;
+  ql_datagram_moved (c, "application", "transport", len);
   conn_wake (c);
   return GQ_OK;
 }

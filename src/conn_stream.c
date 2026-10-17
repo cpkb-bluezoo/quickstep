@@ -115,6 +115,7 @@ stream_create (gq_conn *c, uint64_t id)
            (c->n_streams - i) * sizeof *c->streams);
   c->streams[i] = st;
   c->n_streams++;
+  ql_stream_states (c, st, locally_initiated (c, id) ? "local" : "remote");
   return st;
 }
 
@@ -172,6 +173,7 @@ stream_remove_if_done (gq_conn *c, stream *st)
       if (r != GQ_RS_DATA_READ && r != GQ_RS_RESET_RECVD)
         return;
     }
+  ql_stream_states (c, st, NULL);
   i = lower_bound (c, id);
   memmove (&c->streams[i], &c->streams[i + 1],
            (c->n_streams - i - 1) * sizeof *c->streams);
@@ -195,6 +197,7 @@ stream_on_acked (gq_conn *c, uint64_t id)
 
   if (st == NULL || !st->has_send)
     return;
+  ql_stream_states (c, st, "remote");
   if (st->full && gq_sstream_room (&st->s) > 0)
     {
       st->full = 0;
@@ -268,7 +271,8 @@ stream_deliver (void *user, uint64_t off, const uint8_t *data, size_t len,
 {
   deliver_user *u = user;
 
-  (void) off;
+  ql_stream_moved (u->c, u->id, 1, off, "transport", "application", len,
+                   fin ? "fin_set" : NULL);
   if (u->c->ev.stream_data == NULL)
     return 0;
   return u->c->ev.stream_data (u->c->ev.user, u->id, data, len, fin);
@@ -349,7 +353,10 @@ stream_handle_frame (gq_conn *c, const gq_frame *f)
         if (map_stream_error (c, r))
           return 1;
         if (st)
-          stream_remove_if_done (c, st);
+          {
+            ql_stream_states (c, st, "remote");
+            stream_remove_if_done (c, st);
+          }
         return c->state >= GQ_CONN_CLOSING;
       }
     case GQ_FRAME_RESET_STREAM:
@@ -379,6 +386,9 @@ stream_handle_frame (gq_conn *c, const gq_frame *f)
         if (!was)
           {
             c->data_consumed += st->r.final - off;
+            ql_stream_moved (c, id, 0, 0, "transport", "application", 0,
+                             "stream_reset");
+            ql_stream_states (c, st, "remote");
             if (c->ev.stream_reset)
               c->ev.stream_reset (c->ev.user, id, f->u.reset_stream.error);
             st = stream_find (c, id);
@@ -402,6 +412,7 @@ stream_handle_frame (gq_conn *c, const gq_frame *f)
           && gq_sstream_state (&st->s) != GQ_SS_RESET_RECVD)
         {
           gq_sstream_reset (&st->s, f->u.stop_sending.error);
+          ql_stream_states (c, st, "remote");
           if (c->ev.stream_stopped)
             c->ev.stream_stopped (c->ev.user, id, f->u.stop_sending.error);
         }
@@ -500,7 +511,12 @@ gq_conn_stream_write (gq_conn *c, uint64_t id, const uint8_t *data,
   if (w >= 0 && (size_t) w < len)
     st->full = 1;
   if (w > 0)
-    conn_wake (c);
+    {
+      ql_stream_moved (c, id, 1, st->s.base + st->s.len - (uint64_t) w,
+                       "application", "transport", (size_t) w, NULL);
+      ql_stream_states (c, st, "local");
+      conn_wake (c);
+    }
   return w;
 }
 
@@ -508,11 +524,18 @@ int
 gq_conn_stream_finish (gq_conn *c, uint64_t id)
 {
   stream *st = stream_find (c, id);
+  int r;
 
   if (st == NULL || !st->has_send)
     return GQ_ERR_INVAL;
   conn_wake (c);
-  return gq_sstream_finish (&st->s);
+  r = gq_sstream_finish (&st->s);
+  if (r == GQ_OK)
+    {
+      ql_stream_moved (c, id, 0, 0, "application", "transport", 0, "fin_set");
+      ql_stream_states (c, st, "local");
+    }
+  return r;
 }
 
 int
@@ -523,6 +546,8 @@ gq_conn_stream_reset (gq_conn *c, uint64_t id, uint64_t error)
   if (st == NULL || !st->has_send)
     return GQ_ERR_INVAL;
   gq_sstream_reset (&st->s, error);
+  ql_stream_moved (c, id, 0, 0, "application", "transport", 0, "stream_reset");
+  ql_stream_states (c, st, "local");
   conn_wake (c);
   return GQ_OK;
 }
@@ -535,6 +560,7 @@ gq_conn_stream_stop_sending (gq_conn *c, uint64_t id, uint64_t error)
   if (st == NULL || !st->has_recv)
     return GQ_ERR_INVAL;
   gq_rstream_stop (&st->r, error);
+  ql_stream_states (c, st, "local");
   conn_wake (c);
   return GQ_OK;
 }

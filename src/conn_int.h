@@ -33,6 +33,7 @@
 #include <quickstep/tls.h>
 #include <quickstep/conn.h>
 #include "cc.h"
+#include "qlog.h"
 
 enum { SP_INITIAL, SP_HANDSHAKE, SP_APP, N_SPACES };
 
@@ -168,6 +169,8 @@ typedef struct stream
   uint64_t id;
   uint8_t has_send, has_recv;
   uint8_t opened_notified, full;	/* full: send buffer was full.  */
+  const char *ql_send, *ql_recv;	/* States last logged.  */
+  uint8_t ql_blocked;			/* Last logged as blocked by flow control.  */
   gq_sstream s;
   gq_rstream r;
 } stream;
@@ -273,6 +276,7 @@ struct gq_conn
   /* Amplification and totals.  */
   uint64_t bytes_recv, bytes_sent;
   uint64_t bytes_in_flight;
+  qlog_conn ql;
   cong cc;			/* Congestion window, threshold and recovery.  */
   pacer pace;			/* Spreads the window over the round trip.  */
   uint64_t congestion_events;
@@ -352,6 +356,67 @@ int conn_discard_space (gq_conn *c, int sp);
 void conn_maybe_confirm (gq_conn *c);
 void conn_notify_connected (gq_conn *c, const gq_tls_info *info);
 size_t conn_max_datagram (const gq_conn *c);
+
+/* conn_qlog.c: the qlog events (see qlog.h).  */
+const char *ql_tuple (gq_conn *c, int idx);
+void ql_connection_started (gq_conn *c);
+void ql_state (gq_conn *c, const char *state, int granular);
+void ql_handshake_started (gq_conn *c);
+void ql_peer_validated (gq_conn *c);
+void ql_closed (gq_conn *c, int source, int application, uint64_t error,
+                const uint8_t *reason, size_t reason_len, const char *trigger);
+void ql_cid_check (gq_conn *c);
+void ql_rx_cid (gq_conn *c, const uint8_t *cid, size_t len);
+void ql_version_information (gq_conn *c, const uint32_t *client,
+                             size_t nclient, const uint32_t *server,
+                             size_t nserver, uint32_t chosen);
+void ql_alpn_information (gq_conn *c, const gq_slice *client, size_t nclient,
+                          const gq_slice *server, size_t nserver,
+                          const uint8_t *chosen, size_t chosen_len);
+void ql_parameters_set (gq_conn *c, int remote, const gq_transport_params *tp);
+void ql_parameters_tls (gq_conn *c, const gq_tls_info *info);
+void ql_parameters_restored (gq_conn *c, const gq_transport_params *tp);
+void ql_key_updated (gq_conn *c, enum gq_level level, enum gq_dir dir,
+                     const char *trigger);
+void ql_key_discarded (gq_conn *c, enum gq_level level, enum gq_dir dir,
+                       int have_phase, unsigned phase, const char *trigger);
+void ql_recovery_parameters (gq_conn *c);
+void ql_packets_acked (gq_conn *c, int sp, const sent_pkt *got, size_t n);
+void ql_packet_lost (gq_conn *c, int sp, const sent_pkt *p, int reordering);
+void ql_marked_for_retransmit (gq_conn *c, const sent_pkt *p);
+void ql_metrics (gq_conn *c);
+void ql_cc_state (gq_conn *c, const char *trigger);
+void ql_timers (gq_conn *c);
+void ql_after (gq_conn *c);
+void ql_tuple_assigned (gq_conn *c, int idx, int abandoned);
+void ql_migration (gq_conn *c, const char *state, int idx);
+void ql_blocked (gq_conn *c, const char *conn_reason, const char *dgram_reason);
+void ql_stream_blocked (gq_conn *c, struct stream *st, int blocked);
+struct stream;
+void ql_stream_states (gq_conn *c, struct stream *st, const char *trigger);
+void ql_stream_moved (gq_conn *c, uint64_t id, int have_off, uint64_t off,
+                      const char *from, const char *to, size_t len,
+                      const char *info);
+void ql_datagram_moved (gq_conn *c, const char *from, const char *to,
+                        size_t len);
+void ql_timers_expired (gq_conn *c, uint64_t now);
+void ql_frames_add (char *buf, size_t cap, size_t *len, unsigned *n,
+                    const gq_frame *f, unsigned ack_delay_exp, size_t raw_max);
+void ql_frames_add_padding (char *buf, size_t cap, size_t *len, unsigned *n,
+                            size_t pad);
+void ql_datagram (gq_conn *c, int ev, uint32_t id, size_t len);
+void ql_rx_datagram (gq_conn *c, size_t len);
+void ql_datagram_dropped (gq_conn *c, size_t len);
+void ql_packet_sent (gq_conn *c, const qlog_hdr *h, size_t raw_len,
+                     size_t payload_len, const char *frames,
+                     size_t frames_len, uint32_t dgram_id,
+                     const char *trigger, int path_idx);
+void ql_packet_received (gq_conn *c, const qlog_hdr *h, size_t raw_len,
+                         const uint8_t *payload, size_t payload_len,
+                         int path_idx, const uint32_t *vn, size_t n_vn,
+                         const uint8_t *reset_token);
+void ql_packet_dropped (gq_conn *c, const qlog_hdr *h, size_t raw_len,
+                        const char *trigger);
 
 /* conn_loss.c */
 void sp_sent_add (gq_conn *c, int sp, const sent_pkt *p);

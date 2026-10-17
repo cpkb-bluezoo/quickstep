@@ -31,6 +31,8 @@
 #include <quickstep/quiclb.h>
 
 #include "tst-util.h"
+#include "tst-qkv.h"
+#include "tst-qlogcheck.h"
 
 #ifndef HAVE_GNUTLS
 
@@ -689,6 +691,168 @@ run (struct net *n, int (*done) (struct net *), uint64_t budget_us)
 static const uint8_t alpn_hq[2] = { 'h', 'q' };
 static gq_slice alpn_list[1] = { { alpn_hq, 2 } };
 
+/* ---- qlog ---- */
+
+/* Everything one end of a connection logs.  */
+struct qsink
+{
+  struct qev
+  {
+    uint64_t t;
+    char name[64];
+    char *fields;
+  } *e;
+  size_t n, cap;
+  uint64_t last_t;
+  int bad_order, bad_line, bad_event, bad_first;
+  size_t total;
+  int keep;			/* Keep the events, to look at them.  */
+  int dump;
+  const char *who;
+};
+
+/* How many events the test run put through the checks, and of each kind.  */
+static unsigned long g_qlog_events;
+static unsigned long g_qlog_seen[64];
+
+static void
+qlog_note_seen (const char *name)
+{
+  size_t i;
+
+  for (i = 0; qc_events[i]; i++)
+    if (strncmp (name, "quic:", 5) == 0 && !strcmp (name + 5, qc_events[i]))
+      g_qlog_seen[i]++;
+}
+
+static void
+qsink_cb (void *user, const gq_conn *conn, uint64_t t, const char *name,
+          const char *fields, size_t len)
+{
+  struct qsink *k = user;
+  qline q;
+
+  (void) conn;
+  char where[200];
+  const char *err;
+
+  g_qlog_events++;
+  qlog_note_seen (name);
+  if (t < k->last_t)
+    {
+      fprintf (stderr, "qlog time went back: %s %llu after %llu: %s\n", name,
+               (unsigned long long) t, (unsigned long long) k->last_t, fields);
+      k->bad_order++;
+    }
+  k->last_t = t;
+  /* The log of a connection begins with its connection_started.  */
+  if (k->total++ == 0 && strcmp (name, "quic:connection_started") != 0)
+    {
+      fprintf (stderr, "qlog starts with %s\n", name);
+      k->bad_first++;
+    }
+  if (!qline_parse (fields, len, &q))
+    {
+      fprintf (stderr, "malformed qlog line: %s %s\n", name, fields);
+      k->bad_line++;
+    }
+  else
+    qline_free (&q);
+  err = qc_check (name, fields, len, where, sizeof where);
+  if (err)
+    {
+      fprintf (stderr, "qlog event not as the draft says (%s: %s): %s %s\n",
+               err, where, name, fields);
+      k->bad_event++;
+    }
+  if (k->dump)
+    fprintf (stderr, "QLOG %s %llu %s %s\n", k->who, (unsigned long long) t,
+             name, fields);
+  if (!k->keep)
+    return;
+  if (k->n == k->cap)
+    {
+      k->cap = k->cap ? k->cap * 2 : 256;
+      k->e = realloc (k->e, k->cap * sizeof *k->e);
+    }
+  k->e[k->n].t = t;
+  snprintf (k->e[k->n].name, sizeof k->e[k->n].name, "%s", name);
+  k->e[k->n].fields = strdup (fields);
+  k->n++;
+}
+
+static void
+qsink_free (struct qsink *k)
+{
+  size_t i;
+
+  for (i = 0; i < k->n; i++)
+    free (k->e[i].fields);
+  free (k->e);
+  memset (k, 0, sizeof *k);
+}
+
+/* The number of events called NAME.  */
+static size_t
+qsink_count (const struct qsink *k, const char *name)
+{
+  size_t i, c = 0;
+
+  for (i = 0; i < k->n; i++)
+    if (!strcmp (k->e[i].name, name))
+      c++;
+  return c;
+}
+
+/* The I'th event called NAME, parsed into Q; 1, or 0 if there is no such.  */
+static int
+qsink_nth (const struct qsink *k, const char *name, size_t i, qline *q)
+{
+  size_t j;
+
+  for (j = 0; j < k->n; j++)
+    if (!strcmp (k->e[j].name, name) && i-- == 0)
+      return qline_parse (k->e[j].fields, strlen (k->e[j].fields), q);
+  return 0;
+}
+
+/* Add up VALUE-KEY over the frames of FRAME-TYPE in every PACKET event.  */
+static uint64_t
+qsink_frame_sum (const struct qsink *k, const char *packet_event,
+                 const char *frame_type, const char *value_key)
+{
+  size_t i, f;
+  uint64_t sum = 0;
+
+  for (i = 0; i < k->n; i++)
+    {
+      qline q;
+
+      if (strcmp (k->e[i].name, packet_event))
+        continue;
+      if (!qline_parse (k->e[i].fields, strlen (k->e[i].fields), &q))
+        continue;
+      for (f = 0; f < q.n; f++)
+        {
+          char key[96];
+          const char *dot;
+
+          if (strncmp (q.key[f], "frames.", 7) != 0
+              || strcmp (q.val[f], frame_type))
+            continue;
+          dot = strchr (q.key[f] + 7, '.');
+          if (!dot || strcmp (dot, ".frame_type"))
+            continue;
+          snprintf (key, sizeof key, "%.*s.%s", (int) (dot - q.key[f]),
+                    q.key[f], value_key);
+          if (qline_get (&q, key))
+            sum += strtoull (qline_get (&q, key), NULL, 10);
+        }
+      qline_free (&q);
+    }
+  return sum;
+}
+
 struct pair
 {
   struct net net;
@@ -698,6 +862,7 @@ struct pair
   gq_conn_events cev, sev;
   gq_conn_config scfg_conn;
   gq_token_keys keys;
+  struct qsink qlog_sink[2];	/* What each end logged (unless a test did).  */
 };
 
 static void
@@ -772,11 +937,27 @@ pair_new (const gq_conn_config *ccfg, const gq_conn_config *scfg,
 
     cc.resume_params = g_resume_params;
     cc.resume_params_len = g_resume_params_len;
+    if (cc.qlog == NULL)
+      {
+        cc.qlog = qsink_cb;
+        cc.qlog_user = &p->qlog_sink[0];
+        p->qlog_sink[0].who = "cli";
+      }
     CHECK_EQ (gq_conn_client_new (&p->cli.c, &cc, &p->ccfg, &p->cev,
                                   p->net.now), GQ_OK);
   }
-  CHECK_EQ (gq_conn_server_new (&p->srv.c, scfg, &p->scfg, &p->sev,
-                                p->net.now), GQ_OK);
+  {
+    gq_conn_config sc = scfg ? *scfg : (gq_conn_config) { 0 };
+
+    if (sc.qlog == NULL)
+      {
+        sc.qlog = qsink_cb;
+        sc.qlog_user = &p->qlog_sink[1];
+        p->qlog_sink[1].who = "srv";
+      }
+    CHECK_EQ (gq_conn_server_new (&p->srv.c, &sc, &p->scfg, &p->sev,
+                                  p->net.now), GQ_OK);
+  }
   return p;
 }
 
@@ -833,7 +1014,16 @@ pair_new_admit (const gq_conn_config *ccfg, unsigned loss, uint32_t seed,
   memset (&p->scfg_conn, 0, sizeof p->scfg_conn);
   p->scfg_conn.wall_seconds = sim_wall;
   p->scfg_conn.wall_user = &p->net;
+  p->scfg_conn.qlog = qsink_cb;
+  p->scfg_conn.qlog_user = &p->qlog_sink[1];
+  p->qlog_sink[0].who = "cli";
+  p->qlog_sink[1].who = "srv";
   cc = ccfg ? *ccfg : p->scfg_conn;
+  if (ccfg == NULL || cc.qlog == NULL)
+    {
+      cc.qlog = qsink_cb;
+      cc.qlog_user = &p->qlog_sink[0];
+    }
   cc.token = token;
   cc.token_len = token_len;
   CHECK_EQ (gq_conn_client_new (&p->cli.c, &cc, &p->ccfg, &p->cev,
@@ -844,8 +1034,22 @@ pair_new_admit (const gq_conn_config *ccfg, unsigned loss, uint32_t seed,
 static void
 pair_free (struct pair *p)
 {
+  int i;
+
   gq_conn_free (p->cli.c);
   gq_conn_free (p->srv.c);
+  /* What each end logged was well-formed, as the draft says, in time order
+     and starting with the connection.  */
+  for (i = 0; i < 2; i++)
+    {
+      struct qsink *k = &p->qlog_sink[i];
+
+      CHECK_EQ (k->bad_line, 0);
+      CHECK_EQ (k->bad_event, 0);
+      CHECK_EQ (k->bad_order, 0);
+      CHECK_EQ (k->bad_first, 0);
+      qsink_free (k);
+    }
   free (p);
 }
 
@@ -1067,6 +1271,290 @@ wait_for_stream (struct pair *p, struct sbuf *s, size_t size,
          && guard++ < 100000)
     run (&p->net, NULL, 20000);
   return s->fin && s->n == size;
+}
+
+/* The log of a plain handshake and transfer: every line is well-formed, the
+   events are what the draft names and come in time order, and what the log
+   says adds up to what the connection counted itself.  */
+static void
+test_qlog_handshake (void)
+{
+  gq_conn_config cfg;
+  struct qsink ck, sk;
+  struct pair *p;
+  gq_conn_stats cst, sst;
+  struct sbuf *b;
+  const size_t size = 300000;
+  uint64_t id;
+  qline q;
+  size_t i;
+
+  memset (&ck, 0, sizeof ck);
+  memset (&sk, 0, sizeof sk);
+  ck.who = "cli";
+  sk.who = "srv";
+  ck.keep = sk.keep = 1;
+  ck.dump = sk.dump = getenv ("QLOG_DUMP") != NULL;
+  memset (&cfg, 0, sizeof cfg);
+  cfg.initial_max_data = 100u << 20;
+  cfg.initial_max_stream_data = 100u << 20;
+  cfg.qlog = qsink_cb;
+  cfg.qlog_user = &ck;
+  {
+    gq_conn_config scfg = cfg;
+
+    scfg.qlog_user = &sk;
+    p = pair_new (&cfg, &scfg, 0, 41);
+  }
+  p->srv.respond = size;
+  CHECK (run (&p->net, both_connected, 30000000));
+  run (&p->net, NULL, 500000);
+  CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+  b = sb_get (&p->cli, id);
+  b->out_total = 10;
+  b->out_fin = 1;
+  CHECK (wait_for_stream (p, b, size, 60000000));
+  run (&p->net, NULL, 1000000);
+  gq_conn_get_stats (p->cli.c, &cst);
+  gq_conn_get_stats (p->srv.c, &sst);
+
+  CHECK_EQ (ck.bad_order, 0);
+  CHECK_EQ (sk.bad_order, 0);
+  CHECK_EQ (ck.bad_line, 0);
+  CHECK_EQ (sk.bad_line, 0);
+  CHECK (ck.n > 20 && sk.n > 20);
+
+  /* Every event is one the draft defines, in its namespace.  */
+  for (i = 0; i < ck.n; i++)
+    CHECK (strncmp (ck.e[i].name, "quic:", 5) == 0);
+
+  /* The connection starts the log.  */
+  CHECK_EQ (strcmp (ck.e[0].name, "quic:connection_started"), 0);
+  CHECK_EQ (strcmp (sk.e[0].name, "quic:connection_started"), 0);
+  CHECK_EQ (qsink_count (&ck, "quic:connection_started"), 1);
+  CHECK_EQ (qsink_count (&sk, "quic:connection_started"), 1);
+
+  /* States go attempted, handshake_started, handshake_complete in turn, each
+     naming the one before.  */
+  CHECK (qsink_nth (&ck, "quic:connection_state_updated", 0, &q));
+  CHECK (qline_is (&q, "new", "attempted"));
+  CHECK (qline_get (&q, "old") == NULL);
+  qline_free (&q);
+  CHECK (qsink_nth (&ck, "quic:connection_state_updated", 1, &q));
+  CHECK (qline_is (&q, "old", "attempted"));
+  CHECK (qline_is (&q, "new", "handshake_started"));
+  qline_free (&q);
+  CHECK (qsink_nth (&ck, "quic:connection_state_updated", 2, &q));
+  CHECK (qline_is (&q, "old", "handshake_started"));
+  CHECK (qline_is (&q, "new", "handshake_complete"));
+  qline_free (&q);
+
+  /* Versions and ALPN: what was offered, and what was chosen.  */
+  CHECK (qsink_nth (&ck, "quic:version_information", 0, &q));
+  CHECK (qline_get (&q, "client_versions") != NULL);
+  CHECK (qline_get (&q, "chosen_version") != NULL);
+  qline_free (&q);
+  CHECK (qsink_nth (&sk, "quic:version_information", 0, &q));
+  CHECK (qline_get (&q, "server_versions") != NULL);
+  qline_free (&q);
+  CHECK (qsink_count (&ck, "quic:alpn_information") >= 2);
+  CHECK (qsink_nth (&ck, "quic:alpn_information", 1, &q));
+  CHECK (qline_get (&q, "chosen_alpn.string_value") != NULL);
+  qline_free (&q);
+
+  /* Both ends' parameters, as each side sees them.  */
+  CHECK (qsink_nth (&ck, "quic:parameters_set", 0, &q));
+  CHECK (qline_is (&q, "initiator", "local"));
+  CHECK (qline_is_u (&q, "initial_max_data", 100u << 20));
+  qline_free (&q);
+  CHECK (qsink_nth (&ck, "quic:parameters_set", 1, &q));
+  CHECK (qline_is (&q, "initiator", "remote"));
+  CHECK (qline_get (&q, "original_destination_connection_id") != NULL);
+  qline_free (&q);
+  CHECK_EQ (qsink_count (&ck, "quic:recovery_parameters_set"), 1);
+
+  /* Packets and datagrams add up to what the connection counted.  */
+  CHECK_EQ (qsink_count (&ck, "quic:packet_sent"), cst.packets_sent);
+  CHECK_EQ (qsink_count (&sk, "quic:packet_sent"), sst.packets_sent);
+  CHECK_EQ (qsink_count (&ck, "quic:packet_received"), cst.packets_received);
+  CHECK_EQ (qsink_count (&sk, "quic:packet_received"), sst.packets_received);
+  CHECK_EQ (qsink_count (&sk, "quic:packet_dropped"), 0);
+  CHECK_EQ (qsink_count (&ck, "quic:packet_dropped"), 0);
+  CHECK (qsink_count (&sk, "quic:udp_datagrams_sent") > 0);
+  CHECK (qsink_count (&sk, "quic:udp_datagrams_sent")
+         <= qsink_count (&sk, "quic:packet_sent"));
+  CHECK_EQ (qsink_count (&ck, "quic:udp_datagrams_received"),
+            qsink_count (&sk, "quic:udp_datagrams_sent"));
+
+  /* The response, as the frames of the packets say it.  */
+  CHECK_EQ (qsink_frame_sum (&sk, "quic:packet_sent", "stream", "raw.length"),
+            size);
+  CHECK_EQ (qsink_frame_sum (&ck, "quic:packet_received", "stream",
+                             "raw.length"), size);
+
+  /* A packet event has its header and sizes.  */
+  CHECK (qsink_nth (&sk, "quic:packet_sent", 0, &q));
+  CHECK (qline_is (&q, "header.packet_type", "initial"));
+  CHECK (qline_is_u (&q, "header.packet_number", 0));
+  CHECK (qline_get (&q, "header.dcid") != NULL);
+  CHECK (qline_get (&q, "header.scid") != NULL);
+  CHECK (qline_get (&q, "raw.length") != NULL);
+  CHECK (qline_get (&q, "datagram_id") != NULL);
+  qline_free (&q);
+
+  /* The keys are reported by name, never by value.  */
+  CHECK (qsink_count (&ck, "quic:key_updated") >= 6);
+  for (i = 0; i < ck.n; i++)
+    if (!strcmp (ck.e[i].name, "quic:key_updated"))
+      {
+        CHECK (strstr (ck.e[i].fields, "key_type=") != NULL);
+        CHECK (strstr (ck.e[i].fields, "old=") == NULL);
+        CHECK (strstr (ck.e[i].fields, "new=") == NULL);
+      }
+  CHECK (qsink_count (&ck, "quic:key_discarded") >= 1);
+
+  qsink_free (&ck);
+  qsink_free (&sk);
+  pair_free (p);
+}
+
+/* The latest value of KEY in the events called NAME (and whether there was
+   one), as a number.  */
+static int
+qsink_last (const struct qsink *k, const char *name, const char *key,
+            uint64_t *out)
+{
+  size_t i;
+  int found = 0;
+
+  for (i = 0; i < k->n; i++)
+    {
+      qline q;
+
+      if (strcmp (k->e[i].name, name))
+        continue;
+      if (qline_parse (k->e[i].fields, strlen (k->e[i].fields), &q))
+        {
+          const char *v = qline_get (&q, key);
+
+          if (v)
+            {
+              *out = strtoull (v, NULL, 10);
+              found = 1;
+            }
+          qline_free (&q);
+        }
+    }
+  return found;
+}
+
+/* What loss looks like in the log: each packet the connection counted lost
+   is an event, its data is marked to be sent again, the congestion state
+   goes into recovery, and the last metrics reported are the ones the
+   connection has.  */
+static void
+test_qlog_loss (void)
+{
+  gq_conn_config cfg;
+  struct qsink ck, sk;
+  struct pair *p;
+  gq_conn_stats sst;
+  struct sbuf *b;
+  const size_t size = 1000000;
+  uint64_t id, v;
+  qline q;
+  size_t i, recovery = 0;
+
+  memset (&ck, 0, sizeof ck);
+  memset (&sk, 0, sizeof sk);
+  ck.who = "cli";
+  sk.who = "srv";
+  ck.keep = sk.keep = 1;
+  ck.dump = sk.dump = getenv ("QLOG_DUMP_LOSS") != NULL;
+  memset (&cfg, 0, sizeof cfg);
+  cfg.initial_max_data = 100u << 20;
+  cfg.initial_max_stream_data = 100u << 20;
+  cfg.qlog = qsink_cb;
+  cfg.qlog_user = &ck;
+  {
+    gq_conn_config scfg = cfg;
+
+    scfg.qlog_user = &sk;
+    p = pair_new (&cfg, &scfg, 0, 43);
+  }
+  p->srv.respond = size;
+  CHECK (run (&p->net, both_connected, 30000000));
+  run (&p->net, NULL, 500000);
+  p->net.loss_pct = 4;
+  CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+  b = sb_get (&p->cli, id);
+  b->out_total = 10;
+  b->out_fin = 1;
+  CHECK (wait_for_stream (p, b, size, 120000000));
+  p->net.loss_pct = 0;
+  run (&p->net, NULL, 3000000);
+  gq_conn_get_stats (p->srv.c, &sst);
+  CHECK (sst.packets_lost > 0);
+
+  CHECK_EQ (sk.bad_order, 0);
+  CHECK_EQ (sk.bad_line, 0);
+  CHECK_EQ (ck.bad_line, 0);
+  CHECK_EQ (qsink_count (&sk, "quic:packet_lost"), sst.packets_lost);
+  CHECK (qsink_count (&sk, "quic:marked_for_retransmit") > 0);
+  CHECK (qsink_count (&sk, "quic:packets_acked") > 0);
+  CHECK (qsink_count (&sk, "quic:timer_updated") > 0);
+
+  /* A lost packet says which it was and why.  */
+  CHECK (qsink_nth (&sk, "quic:packet_lost", 0, &q));
+  CHECK (qline_is (&q, "header.packet_type", "1RTT"));
+  CHECK (qline_get (&q, "header.packet_number") != NULL);
+  CHECK (qline_is (&q, "trigger", "reordering_threshold")
+         || qline_is (&q, "trigger", "time_threshold"));
+  qline_free (&q);
+
+  /* The window went into recovery on a loss, and came out of it.  */
+  for (i = 0; i < sk.n; i++)
+    if (!strcmp (sk.e[i].name, "quic:congestion_state_updated")
+        && strstr (sk.e[i].fields, "new=recovery"))
+      {
+        recovery++;
+        CHECK (strstr (sk.e[i].fields, "trigger=packet_loss") != NULL);
+      }
+  CHECK (recovery > 0);
+  {
+    int exited = 0;
+
+    for (i = 0; i < sk.n; i++)
+      if (!strcmp (sk.e[i].name, "quic:congestion_state_updated")
+          && strstr (sk.e[i].fields, "old=recovery"))
+        {
+          exited++;
+          CHECK (strstr (sk.e[i].fields, "trigger=recovery_exit") != NULL);
+        }
+    CHECK (exited > 0);
+  }
+
+  /* The last metrics reported are the connection's own.  */
+  CHECK (qsink_last (&sk, "quic:recovery_metrics_updated", "congestion_window",
+                     &v));
+  CHECK_EQ (v, sst.cwnd);
+  CHECK (qsink_last (&sk, "quic:recovery_metrics_updated", "bytes_in_flight",
+                     &v));
+  CHECK_EQ (v, sst.bytes_in_flight);
+  CHECK (qsink_last (&sk, "quic:recovery_metrics_updated", "ssthresh", &v));
+  CHECK_EQ (v, sst.ssthresh);
+  CHECK (qsink_last (&sk, "quic:recovery_metrics_updated", "pto_count", &v));
+  CHECK_EQ (v, sst.pto_count);
+  CHECK (qsink_last (&sk, "quic:recovery_metrics_updated", "smoothed_rtt", &v));
+  CHECK_EQ (v, sst.srtt_us / 1000);
+  /* Not every update repeats what did not change.  */
+  CHECK (qsink_nth (&sk, "quic:recovery_metrics_updated", 5, &q));
+  CHECK (q.n < 9);
+  qline_free (&q);
+
+  qsink_free (&ck);
+  qsink_free (&sk);
+  pair_free (p);
 }
 
 /* RFC 9002 section 7.7: after a transfer has grown the window, a second one
@@ -2639,6 +3127,8 @@ main (void)
       }
     test_congestion (GQ_CC_DEFAULT, 2000000, 0, 0, 0, 0, 0);
     test_pacing (GQ_CC_CUBIC);
+    test_qlog_handshake ();
+    test_qlog_loss ();
     test_pacing (GQ_CC_NEWRENO);
   }
   test_retry (0, 0, 40);
@@ -2684,6 +3174,15 @@ main (void)
     test_requests (0, 81, 4, 50, 300000, &v2, &v2, 0);
   }
   test_garbage ();
+  if (getenv ("QLOG_STATS"))
+    {
+      size_t i;
+
+      fprintf (stderr, "%lu qlog events checked\n", g_qlog_events);
+      for (i = 0; qc_events[i]; i++)
+        fprintf (stderr, "  %-36s %lu\n", qc_events[i], g_qlog_seen[i]);
+    }
+  CHECK (g_qlog_events > 100000);
   TST_DONE ();
 }
 

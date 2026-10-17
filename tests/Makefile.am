@@ -24,7 +24,7 @@ UNIT_TESTS = test-varint test-frame test-crypto test-policy test-trust \
   test-packet test-protect test-tparams test-kx test-sign \
   test-tlsmsg test-keysched test-tls-client test-record test-tlsconn test-tls-server \
   test-resume test-tickets test-early test-tls12ks test-record12 test-tls12 \
-  test-tls12conn test-dtlsrec test-dtlshs test-dtls test-dtls12rec test-dtls12 test-ranges test-stream test-tlsauto test-dtlsauto test-quiclb test-conn test-conn-int test-cc test-token test-endpoint
+  test-tls12conn test-dtlsrec test-dtlshs test-dtls test-dtls12rec test-dtls12 test-ranges test-stream test-tlsauto test-dtlsauto test-quiclb test-conn test-conn-int test-cc test-qlog test-token test-endpoint
 
 TESTS = $(UNIT_TESTS)
 check_PROGRAMS = $(UNIT_TESTS)
@@ -34,5 +34,7 @@ test_conn_int_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
 test_conn_int_LDFLAGS = -static
 test_cc_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
 test_cc_LDFLAGS = -static
+test_qlog_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
+test_qlog_LDFLAGS = -static
 
-EXTRA_DIST = tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h
+EXTRA_DIST = tst-qkv.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h

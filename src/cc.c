@@ -220,6 +220,8 @@ void
 cong_on_ack (cong *cc, uint64_t sent_us, uint32_t size, int limited,
              uint64_t now_us, uint64_t srtt_us)
 {
+  if (cc->in_recovery && cc->recovery_start && sent_us > cc->recovery_start)
+    cc->in_recovery = 0;
   if (!limited)
     return;
   if (cc->recovery_start && sent_us <= cc->recovery_start)
@@ -251,6 +253,7 @@ cong_on_congestion_event (cong *cc, uint64_t lost_sent_us, uint64_t now_us)
   if (cc->recovery_start && lost_sent_us <= cc->recovery_start)
     return 0;			/* Already in recovery for this loss.  */
   cc->recovery_start = now_us;
+  cc->in_recovery = 1;
   if (cc->algo == GQ_CC_CUBIC)
     {
       /* RFC 9438 section 4.7, fast convergence: a loss before the window
@@ -283,6 +286,7 @@ cong_on_persistent (cong *cc)
 {
   cc->cwnd = 2 * (uint64_t) cc->mss;
   cc->recovery_start = 0;
+  cc->in_recovery = 0;
   cc->ca_acked = 0;
   cc->epoch_started = 0;
   hystart_reset (cc);

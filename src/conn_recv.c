@@ -25,6 +25,91 @@
 
 #include "conn_int.h"
 
+
+/* ---- Logging ---- */
+
+static const char *
+long_type_name (enum gq_packet_type t)
+{
+  switch (t)
+    {
+    case GQ_PKT_INITIAL: return "initial";
+    case GQ_PKT_ZERO_RTT: return "0RTT";
+    case GQ_PKT_HANDSHAKE: return "handshake";
+    case GQ_PKT_RETRY: return "retry";
+    case GQ_PKT_VERSION_NEGOTIATION: return "version_negotiation";
+    default: return "unknown";
+    }
+}
+
+/* What of a long header is known before it is opened.  */
+static void
+long_hdr (qlog_hdr *q, const gq_long_header *h)
+{
+  memset (q, 0, sizeof *q);
+  q->type = long_type_name (h->type);
+  q->have_version = 1;
+  q->version = h->version;
+  q->have_dcid = q->have_scid = 1;
+  q->dcid = h->dcid.data;
+  q->dcid_len = h->dcid.len;
+  q->scid = h->scid.data;
+  q->scid_len = h->scid.len;
+  if (h->type == GQ_PKT_INITIAL || h->type == GQ_PKT_ZERO_RTT
+      || h->type == GQ_PKT_HANDSHAKE)
+    {
+      q->have_length = 1;
+      q->length = h->length;
+    }
+  if ((h->type == GQ_PKT_INITIAL && h->token.len) || h->type == GQ_PKT_RETRY)
+    {
+      q->have_token = 1;
+      q->token = h->token.data;
+      q->token_len = h->token.len;
+    }
+}
+
+static void
+drop_long (gq_conn *c, const gq_long_header *h, const char *trigger)
+{
+  qlog_hdr q;
+
+  if (!QLOG_ON (c, QE_PACKET_DROPPED))
+    return;
+  long_hdr (&q, h);
+  ql_packet_dropped (c, &q, h->packet_len, trigger);
+}
+
+static void
+drop_short (gq_conn *c, size_t rem, const char *trigger)
+{
+  qlog_hdr q;
+
+  if (!QLOG_ON (c, QE_PACKET_DROPPED))
+    return;
+  memset (&q, 0, sizeof q);
+  q.type = "1RTT";
+  ql_packet_dropped (c, &q, rem, trigger);
+}
+
+/* A long-header packet that was opened: PN, its length of PN_LEN bytes,
+   and a payload of PLEN bytes at POFF.  */
+static void
+log_long (gq_conn *c, const gq_long_header *h, const uint8_t *pkt,
+          uint64_t pn, size_t poff, size_t plen)
+{
+  qlog_hdr q;
+
+  if (!QLOG_ON (c, QE_PACKET_RECEIVED))
+    return;
+  long_hdr (&q, h);
+  q.have_pn = 1;
+  q.pn = pn;
+  q.pn_len = (unsigned) (poff - h->pn_offset);
+  ql_packet_received (c, &q, h->packet_len, pkt + poff, plen,
+                      c->rx_known ? c->cur_path : 0, NULL, 0, NULL);
+}
+
 /* ---- Keys ---- */
 
 static int
@@ -57,11 +142,13 @@ conn_install_keys (gq_conn *c, const gq_tls_secret *s)
         {
           c->early_wk = k;
           c->have_early_wk = 1;
+          ql_key_updated (c, GQ_LEVEL_EARLY, GQ_DIR_WRITE, "tls");
         }
       else if (s->dir == GQ_DIR_READ && c->role == GQ_ROLE_SERVER)
         {
           c->early_rk = k;
           c->have_early_rk = 1;
+          ql_key_updated (c, GQ_LEVEL_EARLY, GQ_DIR_READ, "tls");
         }
       return;
     }
@@ -73,6 +160,7 @@ conn_install_keys (gq_conn *c, const gq_tls_secret *s)
       conn_fail (c, GQ_QERR_INTERNAL, "key derivation failed");
       return;
     }
+  ql_key_updated (c, s->level, s->dir, "tls");
   if (s->dir == GQ_DIR_READ)
     {
       c->sp[sp].rk = k;
@@ -90,6 +178,10 @@ conn_install_keys (gq_conn *c, const gq_tls_secret *s)
       c->sp[sp].have_wk = 1;
       if (sp == SP_APP)
         {
+          if (c->have_early_wk)
+            ql_key_discarded (c, GQ_LEVEL_EARLY, GQ_DIR_WRITE, 0, 0, "tls");
+          if (c->role == GQ_ROLE_SERVER && !c->handshake_complete)
+            ql_state (c, "early_write", 1);
           c->have_early_wk = 0;
           gq_packet_keys_wipe (&c->early_wk);
           memcpy (c->wsec, s->secret, s->len);
@@ -100,9 +192,10 @@ conn_install_keys (gq_conn *c, const gq_tls_secret *s)
     }
 }
 
-/* Replace our sending keys with the next generation.  */
+/* Replace our sending keys with the next generation.  REMOTE: the peer
+   updated first and this follows.  */
 static int
-write_key_update (gq_conn *c)
+write_key_update (gq_conn *c, int remote)
 {
   space *s = &c->sp[SP_APP];
   gq_packet_keys next;
@@ -118,6 +211,9 @@ write_key_update (gq_conn *c)
   c->w_phase_acked = 0;
   c->key_updates++;
   memset (next_secret, 0, sizeof next_secret);
+  c->ql.w_phase++;
+  ql_key_updated (c, GQ_LEVEL_APPLICATION, GQ_DIR_WRITE,
+                  remote ? "remote_update" : "local_update");
   return GQ_OK;
 }
 
@@ -129,7 +225,7 @@ gq_conn_update_keys (gq_conn *c, uint64_t now_us)
       || c->w_phase != c->r_phase)
     return GQ_ERR_INVAL;
   conn_wake (c);
-  return write_key_update (c);
+  return write_key_update (c, 0);
 }
 
 static void
@@ -146,9 +242,11 @@ rotate_read_keys (gq_conn *c, uint64_t pn)
   c->r_phase ^= 1;
   c->r_first_pn = pn;
   derive_next_read (c);
+  c->ql.r_phase++;
+  ql_key_updated (c, GQ_LEVEL_APPLICATION, GQ_DIR_READ, "remote_update");
   /* The peer started an update: follow it with our own keys.  */
   if (c->w_phase != c->r_phase)
-    write_key_update (c);
+    write_key_update (c, 1);
 }
 
 /* ---- Frame handling ---- */
@@ -415,6 +513,8 @@ on_frame (void *user, const gq_frame *f)
           return 1;
         }
       c->datagrams_received++;
+      ql_datagram_moved (c, "transport", "application",
+                         f->u.datagram.data.len);
       if (c->ev.datagram)
         c->ev.datagram (c->ev.user, f->u.datagram.data.data,
                         f->u.datagram.data.len);
@@ -613,12 +713,17 @@ recv_early (gq_conn *c, uint64_t now, uint8_t *pkt, const gq_long_header *h)
 
   if (c->role != GQ_ROLE_SERVER || !c->have_early_rk || c->switched
       || h->version != c->version || s->discarded)
-    return 0;
+    {
+      drop_long (c, h, c->have_early_rk ? "rejected" : "key_unavailable");
+      return 0;
+    }
   if (c->handshake_complete && now > c->early_rk_deadline)
     {
       /* The window for stragglers has passed.  */
+      ql_key_discarded (c, GQ_LEVEL_EARLY, GQ_DIR_READ, 0, 0, NULL);
       c->have_early_rk = 0;
       gq_packet_keys_wipe (&c->early_rk);
+      drop_long (c, h, "key_unavailable");
       return 0;
     }
   /* Until the client hears from us it addresses us by the ID it invented.  */
@@ -627,18 +732,30 @@ recv_early (gq_conn *c, uint64_t now, uint8_t *pkt, const gq_long_header *h)
             && memcmp (h->dcid.data, c->initial_dcid.data, h->dcid.len) == 0))
       || h->scid.len != c->dcid.len
       || memcmp (h->scid.data, c->dcid.data, h->scid.len))
-    return 0;
+    {
+      drop_long (c, h, "connection_unknown");
+      return 0;
+    }
   r = gq_packet_open (&c->early_rk, s->have_recv, s->largest_recv, pkt,
                       h->packet_len, h->pn_offset, &pn, &poff, &plen);
   if (r == GQ_ERR_ENCODING)
     {
+      drop_long (c, h, "invalid");
       conn_fail (c, GQ_QERR_PROTOCOL_VIOLATION, "reserved bits set");
       return 1;
     }
   if (r != GQ_OK)
-    return 0;
+    {
+      drop_long (c, h, "decryption_failure");
+      return 0;
+    }
   if (pn < s->recv_floor || gq_ranges_contains (&s->recv, pn))
-    return 1;
+    {
+      drop_long (c, h, "duplicate");
+      return 1;
+    }
+  ql_rx_cid (c, h->dcid.data, h->dcid.len);
+  log_long (c, h, pkt, pn, poff, plen);
   c->rx_early = 1;
   r = process_payload (c, SP_APP, pkt + poff, plen, &ae, &nonprobing);
   c->rx_early = 0;
@@ -682,10 +799,46 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
   *used = 0;
   r = gq_long_header_parse (pkt, rem, &h);
   if (r != GQ_OK)
-    return 0;
+    {
+      if (QLOG_ON (c, QE_PACKET_DROPPED))
+        {
+          qlog_hdr q;
+
+          memset (&q, 0, sizeof q);
+          q.type = "unknown";
+          if (r == GQ_ERR_UNSUPPORTED)
+            {
+              long_hdr (&q, &h);
+              q.type = "unknown";
+            }
+          ql_packet_dropped (c, &q, rem,
+                             r == GQ_ERR_UNSUPPORTED ? "unsupported"
+                                                     : "invalid");
+        }
+      return 0;
+    }
   *used = h.packet_len;
   if (h.type == GQ_PKT_VERSION_NEGOTIATION)
-    return recv_vn (c, &h);
+    {
+      int ok = recv_vn (c, &h);
+
+      if (!ok)
+        drop_long (c, &h, "invalid");
+      else if (QLOG_ON (c, QE_PACKET_RECEIVED))
+        {
+          uint32_t vn[32];
+          size_t i, n = gq_vn_count (&h);
+          qlog_hdr q;
+
+          if (n > 32)
+            n = 32;
+          for (i = 0; i < n; i++)
+            vn[i] = gq_vn_get (&h, i);
+          long_hdr (&q, &h);
+          ql_packet_received (c, &q, h.packet_len, NULL, 0, 0, vn, n, NULL);
+        }
+      return ok;
+    }
   if (c->role == GQ_ROLE_SERVER && !c->got_first_initial
       && h.version != c->version && h.type == GQ_PKT_INITIAL
       && gq_version_supported (h.version) && conn_version_listed (c, h.version))
@@ -697,12 +850,18 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
          version until the client has switched, and a client hears the
          server's new one once.  */
       if (h.type != GQ_PKT_INITIAL)
-        return 0;
+        {
+          drop_long (c, &h, "unsupported");
+          return 0;
+        }
       if (c->role == GQ_ROLE_SERVER)
         {
           if (!c->switched || h.version != c->orig_version
               || !c->have_orig_rk)
-            return 0;
+            {
+              drop_long (c, &h, "unsupported");
+              return 0;
+            }
           rk = &c->orig_rk;
         }
       else if (c->switched || c->sp[SP_HANDSHAKE].have_rk
@@ -712,7 +871,10 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
                || gq_packet_keys_initial (h.version, c->initial_dcid.data,
                                           c->initial_dcid.len, &ck, &sk)
                   != GQ_OK)
-        return 0;
+        {
+          drop_long (c, &h, "unsupported");
+          return 0;
+        }
       else
         {
           rk = &sk;
@@ -720,50 +882,99 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
         }
     }
   if (h.type == GQ_PKT_RETRY)
-    return recv_retry (c, &h, pkt, h.packet_len);
+    {
+      int ok = recv_retry (c, &h, pkt, h.packet_len);
+
+      if (!ok)
+        drop_long (c, &h, "invalid");
+      else if (QLOG_ON (c, QE_PACKET_RECEIVED))
+        {
+          qlog_hdr q;
+
+          long_hdr (&q, &h);
+          ql_packet_received (c, &q, h.packet_len, NULL, 0, 0, NULL, 0, NULL);
+        }
+      return ok;
+    }
   if (h.type == GQ_PKT_ZERO_RTT)
-    return c->got_first_initial ? recv_early (c, now, pkt, &h) : 0;
+    {
+      if (!c->got_first_initial)
+        {
+          /* It came before the Initial that gives the keys for it.  */
+          drop_long (c, &h, "key_unavailable");
+          return 0;
+        }
+      return recv_early (c, now, pkt, &h);
+    }
   if (h.type != GQ_PKT_INITIAL && h.type != GQ_PKT_HANDSHAKE)
-    return 0;			/* 0-RTT.  */
+    {
+      drop_long (c, &h, "invalid");
+      return 0;
+    }
   sp = h.type == GQ_PKT_INITIAL ? SP_INITIAL : SP_HANDSHAKE;
   if (c->role == GQ_ROLE_SERVER && sp == SP_INITIAL && !c->got_first_initial)
     {
       if (dgram < GQ_MIN_INITIAL_DATAGRAM || h.dcid.len < 8)
-        return 0;
+        {
+          drop_long (c, &h, "invalid");
+          return 0;
+        }
       if (conn_server_start (c, h.dcid.data, h.dcid.len, h.scid.data,
                              h.scid.len) != GQ_OK)
         {
+          drop_long (c, &h, "internal_error");
           conn_fail (c, GQ_QERR_INTERNAL, "cannot start handshake");
           return 0;
         }
+      if (c->peer_addr_validated)
+        ql_peer_validated (c);
     }
   if (c->role == GQ_ROLE_SERVER && !c->got_first_initial)
-    return 0;
+    {
+      drop_long (c, &h, "invalid");
+      return 0;
+    }
   s = &c->sp[sp];
   if (s->discarded || !s->have_rk)
-    return 0;
+    {
+      drop_long (c, &h, "key_unavailable");
+      return 0;
+    }
   if (!is_our_cid (c, h.dcid.data, h.dcid.len)
       && !(c->role == GQ_ROLE_SERVER && sp == SP_INITIAL
            && h.dcid.len == c->initial_dcid.len
            && memcmp (h.dcid.data, c->initial_dcid.data, h.dcid.len) == 0))
-    return 0;
+    {
+      drop_long (c, &h, "connection_unknown");
+      return 0;
+    }
   if (c->dcid_set && (c->role == GQ_ROLE_SERVER || c->got_peer_packet)
       && (h.scid.len != c->dcid.len
           || memcmp (h.scid.data, c->dcid.data, h.scid.len)))
-    return 0;
+    {
+      drop_long (c, &h, "invalid");
+      return 0;
+    }
   if (rk == NULL)
     rk = &s->rk;
   r = gq_packet_open (rk, s->have_recv, s->largest_recv, pkt, h.packet_len,
                       h.pn_offset, &pn, &poff, &plen);
   if (r == GQ_ERR_ENCODING)
     {
+      drop_long (c, &h, "invalid");
       conn_fail (c, GQ_QERR_PROTOCOL_VIOLATION, "reserved bits set");
       return 1;
     }
   if (r != GQ_OK)
-    return r == GQ_ERR_CRYPTO && count_failed (c);
+    {
+      drop_long (c, &h, "decryption_failure");
+      return r == GQ_ERR_CRYPTO && count_failed (c);
+    }
   if (pn < s->recv_floor || gq_ranges_contains (&s->recv, pn))
-    return 1;			/* Duplicate.  */
+    {
+      drop_long (c, &h, "duplicate");
+      return 1;
+    }
   if (adopt)
     {
       /* The server moved us to another compatible version: everything
@@ -782,6 +993,10 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
       c->p[0].cid = c->dcid;
     }
   c->got_peer_packet = 1;
+  ql_rx_cid (c, h.dcid.data, h.dcid.len);
+  if (sp == SP_HANDSHAKE)
+    ql_handshake_started (c);
+  log_long (c, &h, pkt, pn, poff, plen);
   if (process_payload (c, sp, pkt + poff, plen, &ae, NULL) != 0)
     return 1;
   note_received (c, sp, pn, ae, now);
@@ -790,6 +1005,7 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
       /* The client has proven it can receive at its address, and has
          moved on from Initial keys.  */
       c->peer_addr_validated = 1;
+      ql_peer_validated (c);
       conn_discard_space (c, SP_INITIAL);
     }
   return 1;
@@ -807,16 +1023,27 @@ recv_short (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t *used)
 
   *used = rem;
   if (!s->have_rk || s->discarded)
-    return 0;
+    {
+      drop_short (c, rem, "key_unavailable");
+      return 0;
+    }
   if (c->have_rk_prev && now >= c->rk_prev_until)
     {
+      ql_key_discarded (c, GQ_LEVEL_APPLICATION, GQ_DIR_READ, 1,
+                        c->ql.r_phase - 1, NULL);
       gq_packet_keys_wipe (&c->rk_prev);
       c->have_rk_prev = 0;
     }
   if (gq_short_header_parse (pkt, rem, c->cfg.cid_len, &h) != GQ_OK)
-    return 0;
+    {
+      drop_short (c, rem, "invalid");
+      return 0;
+    }
   if (!is_our_cid (c, h.dcid.data, h.dcid.len))
-    return 0;
+    {
+      drop_short (c, rem, "connection_unknown");
+      return 0;
+    }
   if (gq_hp_remove (&s->rk, pkt, rem, h.pn_offset, &pn_len) != GQ_OK)
     goto failed;
   for (i = 0; i < pn_len; i++)
@@ -841,6 +1068,7 @@ recv_short (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t *used)
                          &plen);
   if (r == GQ_ERR_ENCODING)
     {
+      drop_short (c, rem, "invalid");
       conn_fail (c, GQ_QERR_PROTOCOL_VIOLATION, "reserved bits set");
       return 1;
     }
@@ -851,20 +1079,57 @@ recv_short (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t *used)
       goto failed;
     }
   if (pn < s->recv_floor || gq_ranges_contains (&s->recv, pn))
-    return 1;
+    {
+      drop_short (c, rem, "duplicate");
+      return 1;
+    }
   if (update)
     rotate_read_keys (c, pn);
   c->got_peer_packet = 1;
   if (c->role == GQ_ROLE_SERVER && conn_path_rx_initial (c))
-    c->peer_addr_validated = 1;
+    {
+      c->peer_addr_validated = 1;
+      ql_peer_validated (c);
+    }
   highest = !s->have_recv || pn > s->largest_recv;
+  ql_rx_cid (c, h.dcid.data, h.dcid.len);
+  if (QLOG_ON (c, QE_PACKET_RECEIVED))
+    {
+      qlog_hdr q;
+
+      memset (&q, 0, sizeof q);
+      q.type = "1RTT";
+      q.have_pn = 1;
+      q.pn = pn;
+      q.pn_len = (unsigned) pn_len;
+      q.have_key_phase = 1;
+      q.key_phase = (pkt[0] >> 2) & 1;
+      q.have_dcid = 1;
+      q.dcid = h.dcid.data;
+      q.dcid_len = h.dcid.len;
+      ql_packet_received (c, &q, rem, pkt + poff, plen,
+                          c->rx_known ? c->cur_path : 0, NULL, 0, NULL);
+    }
   if (process_payload (c, SP_APP, pkt + poff, plen, &ae, &nonprobing) != 0)
     return 1;
   note_received (c, SP_APP, pn, ae, now);
   conn_path_after_packet (c, now, nonprobing, highest);
   return 1;
 failed:
-  stateless_reset_check (c, pkt, rem);
+  if (stateless_reset_check (c, pkt, rem))
+    {
+      if (QLOG_ON (c, QE_PACKET_RECEIVED))
+        {
+          qlog_hdr q;
+
+          memset (&q, 0, sizeof q);
+          q.type = "stateless_reset";
+          ql_packet_received (c, &q, rem, NULL, 0, 0, NULL, 0,
+                              pkt + rem - GQ_RESET_TOKEN_LEN);
+        }
+    }
+  else
+    drop_short (c, rem, "decryption_failure");
   return 0;
 }
 
@@ -874,6 +1139,7 @@ conn_receive_datagram (gq_conn *c, uint64_t now, uint8_t *data, size_t len)
   size_t off = 0;
   int any = 0;
 
+  ql_rx_datagram (c, len);
   if (c->state == GQ_CONN_CLOSING)
     {
       /* Answer with the close again, but not for every packet.  */
@@ -898,7 +1164,11 @@ conn_receive_datagram (gq_conn *c, uint64_t now, uint8_t *data, size_t len)
           c->st.bytes_received += len;
         }
       if (used == 0)
-        break;
+        {
+          if (off == 0)
+            ql_datagram_dropped (c, len);
+          break;
+        }
       off += used;
     }
   return GQ_OK;

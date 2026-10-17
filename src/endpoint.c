@@ -29,6 +29,8 @@
 #include <quickstep/packet.h>
 #include <quickstep/endpoint.h>
 
+#include "qlog.h"
+
 #define MAX_REPLIES 16
 #define MAX_ENTRY_CIDS 14
 #define MAX_ENTRY_TOKENS 20
@@ -120,6 +122,9 @@ struct gq_endpoint
   struct grave graves[MAX_GRAVES];
   size_t grave_next;
   uint64_t now;
+  uint64_t qmask;		/* Events that are logged, 1 << qlog_event.  */
+  uint64_t qlast;		/* The latest time reported.  */
+  int listening_logged;
 };
 
 /* ---- Hashing and the ID table ---- */
@@ -570,6 +575,8 @@ gq_endpoint_new (gq_endpoint **out, const gq_endpoint_config *config,
   if (ep == NULL)
     return GQ_ERR_NOMEM;
   ep->cfg = *config;
+  if (ep->cfg.conn.qlog)
+    ep->qmask = qlog_mask_for (ep->cfg.conn.qlog_importance);
   ep->ev = *events;
   ep->serving = config->server != NULL;
   if (ep->cfg.max_connections == 0)
@@ -701,6 +708,150 @@ gq_endpoint_connect (gq_endpoint *ep, uint64_t now_us,
   return GQ_OK;
 }
 
+/* ---- Logging ----
+
+   The events that belong to no connection: the endpoint reports them with
+   no connection to the callback of the connection defaults.  */
+
+#define EP_EVENT_BUF 1024
+
+static int
+ep_ql_on (const gq_endpoint *ep, int ev)
+{
+  return ep->cfg.conn.qlog != NULL && ((ep->qmask >> ev) & 1);
+}
+
+static void
+ep_ql_emit (gq_endpoint *ep, int ev, const qkv *w)
+{
+  if (ep->now > ep->qlast)
+    ep->qlast = ep->now;
+  if (!w->err)
+    ep->cfg.conn.qlog (ep->cfg.conn.qlog_user, NULL, ep->qlast,
+                       qlog_event_name (ev), w->buf, w->len);
+}
+
+/* The endpoint begins to listen; reported with the first time it is given.  */
+static void
+ep_ql_listening (gq_endpoint *ep)
+{
+  char buf[EP_EVENT_BUF];
+  qkv w;
+
+  if (ep->listening_logged || !ep->serving)
+    return;
+  ep->listening_logged = 1;
+  if (!ep_ql_on (ep, QE_SERVER_LISTENING))
+    return;
+  qkv_init (&w, buf, sizeof buf);
+  if (ep->cfg.admit.require_retry)
+    qkv_bool (&w, "retry_required", 1);
+  ep_ql_emit (ep, QE_SERVER_LISTENING, &w);
+}
+
+/* A datagram that went to no connection, and why.  */
+static void
+ep_ql_unrouted (gq_endpoint *ep, size_t len, const char *trigger)
+{
+  char buf[EP_EVENT_BUF];
+  qkv w;
+
+  if (ep_ql_on (ep, QE_UDP_DATAGRAMS_RECEIVED))
+    {
+      qkv_init (&w, buf, sizeof buf);
+      qkv_u64 (&w, "count", 1);
+      qkv_push_i (&w, "raw", 0);
+      qkv_u64 (&w, "length", len);
+      qkv_pop (&w);
+      ep_ql_emit (ep, QE_UDP_DATAGRAMS_RECEIVED, &w);
+    }
+  if (ep_ql_on (ep, QE_PACKET_DROPPED))
+    {
+      qkv_init (&w, buf, sizeof buf);
+      qkv_push (&w, "raw");
+      qkv_u64 (&w, "length", len);
+      qkv_pop (&w);
+      qkv_str (&w, "trigger", trigger);
+      ep_ql_emit (ep, QE_PACKET_DROPPED, &w);
+    }
+}
+
+/* A datagram of the endpoint's own went out: Version Negotiation, Retry or a
+   stateless reset.  */
+static void
+ep_ql_reply_sent (gq_endpoint *ep, const uint8_t *d, size_t len)
+{
+  char buf[EP_EVENT_BUF];
+  qkv w;
+  qlog_hdr h;
+  gq_long_header lh;
+  uint32_t vn[32];
+  size_t nvn = 0, i;
+
+  if (ep_ql_on (ep, QE_PACKET_SENT))
+    {
+      memset (&h, 0, sizeof h);
+      qkv_init (&w, buf, sizeof buf);
+      if ((d[0] & 0x80) && gq_long_header_parse (d, len, &lh) == GQ_OK)
+        {
+          h.have_version = 1;
+          h.version = lh.version;
+          h.have_dcid = h.have_scid = 1;
+          h.dcid = lh.dcid.data;
+          h.dcid_len = lh.dcid.len;
+          h.scid = lh.scid.data;
+          h.scid_len = lh.scid.len;
+          if (lh.type == GQ_PKT_VERSION_NEGOTIATION)
+            {
+              h.type = "version_negotiation";
+              nvn = gq_vn_count (&lh);
+              if (nvn > 32)
+                nvn = 32;
+              for (i = 0; i < nvn; i++)
+                vn[i] = gq_vn_get (&lh, i);
+            }
+          else
+            {
+              h.type = "retry";
+              h.have_token = 1;
+              h.token = lh.token.data;
+              h.token_len = lh.token.len;
+            }
+        }
+      else
+        h.type = "stateless_reset";
+      qlog_header (&w, &h, 0);
+      if (!strcmp (h.type, "stateless_reset") && len >= GQ_RESET_TOKEN_LEN)
+        qkv_hex (&w, "stateless_reset_token", d + len - GQ_RESET_TOKEN_LEN,
+                 GQ_RESET_TOKEN_LEN);
+      if (nvn)
+        {
+          qkv_list (&w, "supported_versions");
+          for (i = 0; i < nvn; i++)
+            {
+              uint8_t b[4] = { (uint8_t) (vn[i] >> 24), (uint8_t) (vn[i] >> 16),
+                               (uint8_t) (vn[i] >> 8), (uint8_t) vn[i] };
+
+              qkv_item_hex (&w, b, 4);
+            }
+          qkv_end_list (&w);
+        }
+      qkv_push (&w, "raw");
+      qkv_u64 (&w, "length", len);
+      qkv_pop (&w);
+      ep_ql_emit (ep, QE_PACKET_SENT, &w);
+    }
+  if (ep_ql_on (ep, QE_UDP_DATAGRAMS_SENT))
+    {
+      qkv_init (&w, buf, sizeof buf);
+      qkv_u64 (&w, "count", 1);
+      qkv_push_i (&w, "raw", 0);
+      qkv_u64 (&w, "length", len);
+      qkv_pop (&w);
+      ep_ql_emit (ep, QE_UDP_DATAGRAMS_SENT, &w);
+    }
+}
+
 static int
 queue_reply (gq_endpoint *ep, const gq_path *to, const uint8_t *d, size_t len)
 {
@@ -734,7 +885,10 @@ admit (gq_endpoint *ep, uint64_t now, const gq_path *from, uint8_t *data,
   gq_long_header h;
 
   if (!ep->serving || ep->closed || from == NULL || from->remote.len == 0)
-    return GQ_OK;
+    {
+      ep_ql_unrouted (ep, len, "rejected");
+      return GQ_OK;
+    }
   if (ep->cfg.retry_above && ep->n_conns >= ep->cfg.retry_above)
     ac.require_retry = 1;
   wall = ep->cfg.conn.wall_seconds
@@ -745,12 +899,28 @@ admit (gq_endpoint *ep, uint64_t now, const gq_path *from, uint8_t *data,
   if (act == GQ_ADMIT_REPLY)
     queue_reply (ep, from, reply, rl);
   if (act != GQ_ADMIT_ACCEPT)
-    return act < 0 ? act : GQ_OK;
+    {
+      /* A reply is Version Negotiation for a version we do not speak, or
+         a Retry we want the client to come back with; else it is junk.  */
+      ep_ql_unrouted (ep, len,
+                      act == GQ_ADMIT_REPLY
+                      ? (rl >= 5 && reply[1] == 0 && reply[2] == 0
+                         && reply[3] == 0 && reply[4] == 0
+                         ? "unsupported" : "rejected")
+                      : "invalid");
+      return act < 0 ? act : GQ_OK;
+    }
   if (ep->n_conns >= ep->cfg.max_connections)
-    return GQ_OK;
+    {
+      ep_ql_unrouted (ep, len, "rejected");
+      return GQ_OK;
+    }
   memset (&cev, 0, sizeof cev);
   if (ep->ev.accept (ep->ev.user, from, &cev) != 0)
-    return GQ_OK;
+    {
+      ep_ql_unrouted (ep, len, "rejected");
+      return GQ_OK;
+    }
   conn_config (ep, NULL, &cc);
   if (gq_conn_server_accept (&c, &cc, &ep->scfg, &cev, now, &acc)
       != GQ_OK)
@@ -812,6 +982,7 @@ gq_endpoint_recv (gq_endpoint *ep, uint64_t now_us, const gq_path *from,
   struct entry *e = NULL;
 
   ep->now = now_us;
+  ep_ql_listening (ep);
   if (len == 0)
     return GQ_OK;
   if (data[0] & 0x80)
@@ -822,14 +993,20 @@ gq_endpoint_recv (gq_endpoint *ep, uint64_t now_us, const gq_path *from,
       if (r == GQ_OK || r == GQ_ERR_UNSUPPORTED)
         e = lookup (ep, h.dcid.data, h.dcid.len);
       if (e == NULL && r == GQ_OK && buried (ep, h.dcid.data, h.dcid.len))
-        return GQ_OK;
+        {
+          ep_ql_unrouted (ep, len, "connection_unknown");
+          return GQ_OK;
+        }
       if (e == NULL)
         return admit (ep, now_us, from, data, len);
     }
   else
     {
       if (len < 1 + ep->cid_len)
-        return GQ_OK;
+        {
+          ep_ql_unrouted (ep, len, "invalid");
+          return GQ_OK;
+        }
       e = lookup (ep, data + 1, ep->cid_len);
       if (e == NULL)
         {
@@ -848,6 +1025,7 @@ gq_endpoint_recv (gq_endpoint *ep, uint64_t now_us, const gq_path *from,
                   return GQ_OK;
                 }
             }
+          ep_ql_unrouted (ep, len, "connection_unknown");
           stateless_reset (ep, now_us, from, data, len);
           return GQ_OK;
         }
@@ -866,6 +1044,7 @@ gq_endpoint_send (gq_endpoint *ep, uint64_t now_us, uint8_t *out, size_t cap,
 {
   *len = 0;
   ep->now = now_us;
+  ep_ql_listening (ep);
   if (ep->reply_n)
     {
       struct reply *r = &ep->replies[ep->reply_head];
@@ -874,6 +1053,7 @@ gq_endpoint_send (gq_endpoint *ep, uint64_t now_us, uint8_t *out, size_t cap,
         return GQ_ERR_BUFSIZE;
       memcpy (out, r->data, r->len);
       *len = r->len;
+      ep_ql_reply_sent (ep, r->data, r->len);
       if (to)
         *to = r->to;
       ep->reply_head = (ep->reply_head + 1) % MAX_REPLIES;

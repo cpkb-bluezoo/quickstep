@@ -49,7 +49,27 @@ typedef struct pk
   int challenge;		/* Carries a PATH_CHALLENGE.  */
   int early;			/* A 0-RTT packet.  */
   size_t hdr_est;		/* Header estimate used to size cap.  */
+  /* For the log: the frames as fields (frames.N.*), the PADDING bytes,
+     the raw bytes of data to include, and what made this packet go.  */
+  char *qf;
+  size_t qf_len, qf_cap, qraw, pad;
+  unsigned qf_n;
+  const char *qtrigger;
 } pk;
+
+/* Start keeping what the log wants of the packet in slot SLOT of the
+   datagram, if it is wanted.  */
+static void
+pk_log_reset (gq_conn *c, pk *p, int slot)
+{
+  p->qf = QLOG_ON (c, QE_PACKET_SENT) ? c->ql.frames[slot] : NULL;
+  p->qf_cap = c->ql.frames_cap;
+  p->qf_len = 0;
+  p->qf_n = 0;
+  p->qraw = c->ql.raw_max;
+  p->pad = 0;
+  p->qtrigger = NULL;
+}
 
 static size_t
 room (const pk *p)
@@ -71,6 +91,8 @@ add (pk *p, const gq_frame *f, int ae, const sent_frame *e)
     p->ae = 1;
   if (e)
     p->sf[p->nsf++] = *e;
+  if (p->qf)
+    ql_frames_add (p->qf, p->qf_cap, &p->qf_len, &p->qf_n, f, 3, p->qraw);
   return 0;
 }
 
@@ -316,6 +338,7 @@ add_stream_control (gq_conn *c, pk *p, stream *st)
           e.a = st->id;
           if (add (p, &f, 1, &e))
             gq_sstream_reset_lost (&st->s);
+          ql_stream_states (c, st, "local");
         }
       if (room (p) >= 20 && gq_sstream_take_blocked (&st->s, &v))
         {
@@ -373,6 +396,7 @@ add_stream_data (gq_conn *c, pk *p, stream *st)
       /* The stream has taken them as sent whatever becomes of this packet:
          what is resent after a failure is not new (nb 0), so charge now.  */
       c->data_sent += nb;
+      ql_stream_states (c, st, "local");
       memset (&f, 0, sizeof f);
       f.type = GQ_FRAME_STREAM;
       f.u.stream.id = st->id;
@@ -760,7 +784,10 @@ assemble (gq_conn *c, int sp, uint64_t now, size_t budget, size_t maxdg,
           add (p, &f, 1, NULL);
         }
       if (p->ae)
-        s->probes--;
+        {
+          s->probes--;
+          p->qtrigger = "pto_probe";
+        }
     }
   return p->len > 0;
 }
@@ -822,6 +849,46 @@ seal (gq_conn *c, uint64_t now, pk *p, uint64_t pn, size_t pn_len, uint8_t *out,
   return r;
 }
 
+/* Report a packet that was sent: W bytes on the wire, in datagram DID.  */
+static void
+log_sent (gq_conn *c, pk *p, uint64_t pn, size_t pnl, size_t w, uint32_t did,
+          int dest)
+{
+  qlog_hdr h;
+
+  memset (&h, 0, sizeof h);
+  h.type = qlog_packet_type_name (p->sp, p->early);
+  h.have_pn = 1;
+  h.pn = pn;
+  h.pn_len = (unsigned) pnl;
+  h.have_dcid = 1;
+  h.dcid = c->dcid.data;
+  h.dcid_len = c->dcid.len;
+  if (p->sp == SP_APP && !p->early)
+    {
+      h.have_key_phase = 1;
+      h.key_phase = c->w_phase;
+    }
+  else
+    {
+      h.have_version = 1;
+      h.version = c->version;
+      h.have_scid = 1;
+      h.scid = c->scid_first.data;
+      h.scid_len = c->scid_first.len;
+      h.have_length = 1;
+      h.length = pnl + p->len + GQ_AEAD_TAG_LEN;
+      if (p->sp == SP_INITIAL && c->token_len)
+        {
+          h.have_token = 1;
+          h.token = c->token;
+          h.token_len = c->token_len;
+        }
+    }
+  ql_frames_add_padding (p->qf, p->qf_cap, &p->qf_len, &p->qf_n, p->pad);
+  ql_packet_sent (c, &h, w, p->len, p->qf, p->qf_len, did, p->qtrigger, dest);
+}
+
 /* Pad, protect and account for the N packets of one datagram bound for
    path DEST (an index into the path table).  */
 static int
@@ -831,6 +898,7 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
 {
   size_t total = 0;
   int i, ae = 0, sent_handshake = 0, r = GQ_OK;
+  uint32_t did = c->ql.next_dgram_id++;
 
   if (need_pad && maxdg >= GQ_MIN_INITIAL_DATAGRAM)
     {
@@ -858,7 +926,11 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
         }
       /* A longer payload can widen the Length field by a byte.  */
       if (t > GQ_MIN_INITIAL_DATAGRAM && padded >= t - GQ_MIN_INITIAL_DATAGRAM)
-        last->len -= t - GQ_MIN_INITIAL_DATAGRAM;
+        {
+          last->len -= t - GQ_MIN_INITIAL_DATAGRAM;
+          padded -= t - GQ_MIN_INITIAL_DATAGRAM;
+        }
+      last->pad += padded;
     }
   for (i = 0; i < n && r == GQ_OK; i++)
     {
@@ -870,6 +942,8 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
         break;
       total += w;
       c->st.packets_sent++;
+      if (p->qf)
+        log_sent (c, p, pns[i], pnl[i], w, did, dest);
       if (p->ack_valid)
         conn_note_ack_sent (c, p->sp, pns[i], p->ack_largest);
       if (p->ae)
@@ -899,7 +973,10 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
             sp_sent_add (c, p->sp, &sp);
         }
       if (p->sp == SP_HANDSHAKE)
-        sent_handshake = 1;
+        {
+          sent_handshake = 1;
+          ql_handshake_started (c);
+        }
     }
   if (r != GQ_OK)
     {
@@ -907,6 +984,7 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
       return r;
     }
   *len = total;
+  ql_datagram (c, QE_UDP_DATAGRAMS_SENT, did, total);
   conn_path_note_sent (c, dest, total);
   c->st.bytes_sent += total;
   if (c->state == GQ_CONN_CLOSING)
@@ -957,6 +1035,7 @@ build_probe (gq_conn *c, uint64_t now, uint8_t *out, size_t cap, size_t *len,
   if (p == NULL)
     return GQ_ERR_NOMEM;
   memset (p, 0, sizeof *p);
+  pk_log_reset (c, p, 0);
   p->sp = SP_APP;
   c->dcid = e->dcid;		/* Header size and header both use it.  */
   p->cap = maxdg - overhead_of (c, SP_APP);
@@ -1001,7 +1080,10 @@ build_probe (gq_conn *c, uint64_t now, uint8_t *out, size_t cap, size_t *len,
     pn = s->next_pn++;
     pnl = gq_pn_encoded_len (pn, s->have_acked, s->largest_acked);
     while (p->len < 4 - pnl && p->len < p->cap)
-      p->pl[p->len++] = 0;
+      {
+        p->pl[p->len++] = 0;
+        p->pad++;
+      }
     r = finish_datagram (c, now, pks, &pn, &pnl, 1, 1, maxdg, idx, out, len);
   }
   c->dcid = saved;
@@ -1061,6 +1143,7 @@ build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
         continue;
       if (est + 1 >= maxdg)
         break;
+      pk_log_reset (c, p, n);
       if (!assemble (c, sp, now, maxdg - est, maxdg, p))
         continue;
       pks[n] = p;
@@ -1068,7 +1151,10 @@ build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
       pnl[n] = gq_pn_encoded_len (pns[n], s->have_acked, s->largest_acked);
       /* Pad tiny payloads so the header protection sample exists.  */
       while (p->len < 4 - pnl[n] + 0 && p->len < p->cap)
-        p->pl[p->len++] = 0;
+        {
+          p->pl[p->len++] = 0;
+          p->pad++;
+        }
       est += p->hdr_est + p->len;
       n++;
       if (c->state == GQ_CONN_CLOSING)
@@ -1111,6 +1197,61 @@ window_limited (gq_conn *c)
   return 0;
 }
 
+/* Report what is holding data back, and what is not any longer.  Looked at
+   when a send ends without a datagram, which is when something is held.  */
+static void
+log_blocked (gq_conn *c)
+{
+  const char *why = NULL, *dgram_why = NULL;
+  uint64_t budget;
+  int sp, wants = 0, flow_blocked = 0, any_queued = 0;
+  size_t i;
+
+  if (!QLOG_ON (c, QE_CONNECTION_DATA_BLOCKED_UPDATED)
+      && !QLOG_ON (c, QE_STREAM_DATA_BLOCKED_UPDATED)
+      && !QLOG_ON (c, QE_DATAGRAM_DATA_BLOCKED_UPDATED))
+    return;
+  if (c->state >= GQ_CONN_CLOSING)
+    {
+      ql_blocked (c, NULL, NULL);
+      return;
+    }
+  for (sp = 0; sp < N_SPACES; sp++)
+    if (wants_data (c, sp))
+      wants = 1;
+  /* Data queued on streams, and whether a stream's own credit holds it.  */
+  for (i = 0; i < c->n_streams; i++)
+    {
+      stream *st = c->streams[i];
+      int queued, blocked;
+
+      if (!st->has_send)
+        continue;
+      queued = st->s.len + st->s.base > st->s.sent;
+      blocked = queued && st->s.sent >= st->s.max_data;
+      any_queued |= queued;
+      flow_blocked |= blocked;
+      if (QLOG_ON (c, QE_STREAM_DATA_BLOCKED_UPDATED))
+        ql_stream_blocked (c, st, blocked);
+    }
+  if (wants && conn_path_budget (c, c->cur_path, &budget) && budget == 0)
+    why = "amplification_protection";
+  else if (wants && !conn_can_send_ae (c))
+    why = "congestion_control";
+  else if (c->pace_wait_us)
+    why = "pacing";
+  else if (any_queued && c->data_sent >= c->max_data_peer)
+    why = "connection_flow_control";
+  else if (flow_blocked)
+    why = "stream_flow_control";
+  /* Queued datagrams wait for the same things as stream data does, bar the
+     peer's flow control.  */
+  if (c->dq_n && why && strcmp (why, "connection_flow_control")
+      && strcmp (why, "stream_flow_control"))
+    dgram_why = why;
+  ql_blocked (c, why, dgram_why);
+}
+
 int
 conn_build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
                      size_t *len)
@@ -1124,6 +1265,9 @@ conn_build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
   c->pace_deadline = c->pace_wait_us ? now + c->pace_wait_us : 0;
   /* When a send ends without a datagram, that is where the sender stopped.  */
   if (*len == 0)
-    c->send_blocked = (uint8_t) window_limited (c);
+    {
+      c->send_blocked = (uint8_t) window_limited (c);
+      log_blocked (c);
+    }
   return r;
 }

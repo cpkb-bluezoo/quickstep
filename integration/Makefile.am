@@ -36,7 +36,7 @@ INTEGRATION_TESTS =
 ## (quic-interop-runner/README.md) against itself.
 if HAVE_GNUTLS
 INTEGRATION_PROGS += interop-client interop-server interop-dtls interop-quic \
-  quic-interop-endpoint integ-files
+  quic-interop-endpoint qlog-lint integ-files
 INTEGRATION_TESTS += interop.sh interop-quic.sh quic-interop-runner/smoke.sh \
   integ-files
 endif
@@ -57,6 +57,8 @@ interop_server_SOURCES = interop-server.c
 interop_dtls_SOURCES = interop-dtls.c
 interop_quic_SOURCES = interop-quic.c
 quic_interop_endpoint_SOURCES = quic-interop-runner/endpoint.c
+qlog_lint_SOURCES = quic-interop-runner/qlog_lint.c
+qlog_lint_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/tests
 integ_files_SOURCES = integ-files.c
 integ_files_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/tests
 wolf_dtls_SOURCES = wolf-dtls.c
@@ -68,9 +70,11 @@ TESTS_ENVIRONMENT = INTEROP_CLIENT=./interop-client; export INTEROP_CLIENT; \
   INTEROP_DTLS=./interop-dtls; export INTEROP_DTLS; \
   INTEROP_QUIC=./interop-quic; export INTEROP_QUIC; \
   QUIC_INTEROP_ENDPOINT=./quic-interop-endpoint; export QUIC_INTEROP_ENDPOINT; \
+  QLOG_LINT=./qlog-lint; export QLOG_LINT; \
   WOLF_DTLS=./wolf-dtls; export WOLF_DTLS;
 
 EXTRA_DIST = interop.sh interop-dtls.sh interop-dtls12.sh interop-quic.sh \
   interop-util.h quic-interop-runner/smoke.sh quic-interop-runner/README.md \
   quic-interop-runner/Dockerfile quic-interop-runner/run_endpoint.sh \
-  quic-interop-runner/ack_stats.py quic-interop-runner/dump_frames.py
+  quic-interop-runner/ack_stats.py quic-interop-runner/dump_frames.py \
+  quic-interop-runner/qlog_lint.c

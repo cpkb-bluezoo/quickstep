@@ -21,6 +21,9 @@ lib_LTLIBRARIES = libquickstep.la
 libquickstep_la_SOURCES = \
   cc.c \
   cc.h \
+  qlog.c \
+  conn_qlog.c \
+  qlog.h \
   crypto.c \
   dtls.c \
   endpoint.c \
@@ -101,6 +104,7 @@ quickstepinclude_HEADERS = \
   $(top_srcdir)/include/quickstep/packet.h \
   $(top_srcdir)/include/quickstep/policy.h \
   $(top_srcdir)/include/quickstep/protect.h \
+  $(top_srcdir)/include/quickstep/qlog.h \
   $(top_srcdir)/include/quickstep/conn.h \
   $(top_srcdir)/include/quickstep/endpoint.h \
   $(top_srcdir)/include/quickstep/listen.h \

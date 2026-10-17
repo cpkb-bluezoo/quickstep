@@ -61,6 +61,7 @@ Makefile
 /integration/interop-dtls
 /integration/interop-quic
 /integration/quic-interop-endpoint
+/integration/qlog-lint
 /integration/wolf-dtls
 /integration/integ-files
 .dirstamp

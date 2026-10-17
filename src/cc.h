@@ -41,6 +41,9 @@ typedef struct cong
      before then cannot end it (RFC 9002 appendix B.5).  */
   uint64_t recovery_start;
   uint64_t ca_acked;		/* NewReno: bytes acked in congestion avoidance.  */
+  /* In recovery: from a congestion event until a packet sent after it is
+     acknowledged.  Only for reporting; recovery_start decides.  */
+  uint8_t in_recovery;
 
   /* CUBIC (RFC 9438 section 4).  An epoch is a stretch of congestion
      avoidance, from the first acknowledgement after a loss (or after slow

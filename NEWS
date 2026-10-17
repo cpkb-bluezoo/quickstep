@@ -26,6 +26,19 @@ back, so a caller driven by it needs no change.
 window or the pacer, as RFC 9002 section 7.8 says, rather than by a guess
 from the bytes in flight.
 ** gq_conn_stats gains pacing_rate_bps.
+** A connection can report what it does as the events of
+draft-ietf-quic-qlog-quic-events: set gq_conn_config.qlog (see
+quickstep/qlog.h) and each event arrives as a connection, a time, a name
+and a line of key=value fields, for awk and the other text tools.  The
+detail is chosen with qlog_importance and qlog_raw; secrets are never
+logged.  Every event of the draft is reported except the spin bit, path MTU
+discovery, ECN and the buffering of packets, which the library does not do
+yet, and the three that repeat what the packet events carry.  An endpoint
+reports the events that belong to no connection through the same callback.
+gq_conn_original_dcid names a log by the draft's convention.
+** The interop endpoint writes a log for each connection into QLOGDIR, which
+the runner sets, and qlog-lint checks such files against the draft; the
+interop workflow runs it on what each run wrote.
 ** A client can send a token of up to 512 bytes in its Initial packets.  A
 token over 100 bytes (quic-go's Retry token is about 110) overflowed a
 buffer in the length calculation of the packet header, so the first flight

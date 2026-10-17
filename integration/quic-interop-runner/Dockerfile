@@ -62,8 +62,10 @@ ENV CC=gcc PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 RUN ./autogen.sh \
     && ./configure --disable-shared --without-wolfssl \
     && make -C src -j"$(nproc)" CFLAGS="-g -O2 -Werror" \
-    && make -C integration quic-interop-endpoint CFLAGS="-g -O2 -Werror" \
-    && strip -o /quickstep-interop integration/quic-interop-endpoint
+    && make -C integration quic-interop-endpoint qlog-lint \
+         CFLAGS="-g -O2 -Werror" \
+    && strip -o /quickstep-interop integration/quic-interop-endpoint \
+    && strip -o /qlog-lint integration/qlog-lint
 
 # ---- Check: the unit tests, for the CI workflow ---------------------------
 # Not part of the image; "docker build --target check" runs it.
@@ -101,6 +103,9 @@ RUN printf '%s' "$CONGESTION_CONTROL" > /congestion_control
 
 WORKDIR /quickstep
 COPY --from=build /quickstep-interop ./quickstep-interop
+# Checks the qlogs the endpoint writes (QLOGDIR) against the qlog draft; the
+# workflow runs it over what each run left in the logs.
+COPY --from=build /qlog-lint ./qlog-lint
 COPY integration/quic-interop-runner/run_endpoint.sh ./
 RUN chmod +x run_endpoint.sh
 

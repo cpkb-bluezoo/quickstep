@@ -170,6 +170,8 @@ path_add (gq_conn *c, const gq_path *p, int local_init, int need_fresh)
       e->dcid = c->dcid;
       e->dcid_seq = c->dcid_seq;
     }
+  c->ql.mig[slot] = NULL;
+  ql_tuple_assigned (c, slot, 0);
   return slot;
 }
 
@@ -185,11 +187,15 @@ start_validation (gq_conn *c, pathinfo *e, uint64_t now)
   e->n_chal = 0;
   e->chal_deadline = now + t;
   e->chal_next = now + t / MAX_CHALLENGES;
+  if (e != &c->paths[c->cur_path])
+    ql_migration (c, "probing_started", (int) (e - c->paths));
 }
 
 static void
 free_entry (gq_conn *c, int idx)
 {
+  ql_tuple_assigned (c, idx, 1);
+  c->ql.mig[idx] = NULL;
   memset (&c->paths[idx], 0, sizeof c->paths[idx]);
   if (c->prev_path == idx)
     c->prev_path = -1;
@@ -235,6 +241,7 @@ switch_to (gq_conn *c, int idx)
   c->srtt = CONN_INITIAL_RTT (c);
   c->rttvar = CONN_INITIAL_RTT (c) / 2;
   c->migrations++;
+  ql_migration (c, "migration_started", idx);
   if (c->ev.migrated)
     c->ev.migrated (c->ev.user, &n->p);
 }
@@ -249,10 +256,14 @@ validated (gq_conn *c, int idx)
   e->need_challenge = 0;
   e->chal_deadline = 0;
   c->path_validations++;
+  if (idx != c->cur_path)
+    ql_migration (c, "probing_successful", idx);
   if (c->ev.path_validated)
     c->ev.path_validated (c->ev.user, &e->p);
   if (e->auto_switch && idx != c->cur_path)
     switch_to (c, idx);
+  if (idx == c->cur_path)
+    ql_migration (c, "migration_complete", idx);
   if (idx == c->cur_path && c->prev_path >= 0)
     {
       /* The old path is done with; so is the ID it used.  */
@@ -282,6 +293,8 @@ failed (gq_conn *c, int idx)
   gq_path p = e->p;
 
   c->path_failures++;
+  ql_migration (c, idx == c->cur_path ? "migration_abandoned"
+                                      : "probing_abandoned", idx);
   if (!e->local_init)
     {
       /* Do not switch straight back to something that just failed.  */
@@ -656,7 +669,10 @@ gq_conn_migrate (gq_conn *c, uint64_t now_us, const gq_path *path)
   if (idx < 0)
     return GQ_ERR_INVAL;
   if (c->paths[idx].validated)
-    switch_to (c, idx);
+    {
+      switch_to (c, idx);
+      ql_migration (c, "migration_complete", idx);
+    }
   else
     c->paths[idx].auto_switch = 1;
   conn_wake (c);

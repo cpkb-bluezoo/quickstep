@@ -94,9 +94,10 @@ Pre-alpha.  What exists today:
            streams, flow control, connection IDs, key update, idle
            timeout, close and stateless reset; CUBIC or NewReno congestion
            control with HyStart++ and pacing (RFC 9002 section 7, RFC 9438,
-           RFC 9406); interoperating with quiche
+           RFC 9406); qlog events as lines of text; interoperating with
+           quiche
 
-Not yet written: pacing and ECN, the server's
+Not yet written: ECN, the server's
 preferred_address, and the HTTP/3 and DoQ examples.  See the manual
 (doc/quickstep.texi) for the design, security policy and roadmap.
 

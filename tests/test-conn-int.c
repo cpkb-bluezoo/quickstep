@@ -192,7 +192,9 @@ test_pto_backoff_kept_until_validated (void)
   hand_over (s, c, now, 1);
   CHECK (!c->handshake_confirmed);
   CHECK_EQ (c->pto_count, 2);
-  /* Once the exchange goes through to the end, it is reset.  */
+  /* Once the exchange goes through to the end, it is reset.  The simulated
+     network goes on from the time the connections have been given.  */
+  p->net.now = now;
   CHECK (run (&p->net, both_connected, 30000000));
   run (&p->net, NULL, 3000000);
   CHECK_EQ (c->pto_count, 0);
@@ -729,6 +731,39 @@ test_pacing_deadline (void)
   pair_free (p);
 }
 
+/* The events of a connection come in time order whatever the caller's clock
+   does between calls: a call that reads earlier than a previous one reports
+   at the latest time there was, not before it.  The sink every connection of
+   these tests has fails the test on an event that goes back.  */
+static void
+test_qlog_clock_going_back (void)
+{
+  struct pair *p = settled_pair (NULL, NULL);
+  gq_conn *c = p->cli.c;
+  struct qsink *k = &p->qlog_sink[0];
+  uint64_t t, id, before;
+  uint8_t buf[2048];
+  size_t len;
+
+  /* The time of the last event reported.  */
+  CHECK (k->last_t > 5000 && k->total > 0);
+  t = k->last_t;
+  CHECK_EQ (gq_conn_stream_open (c, 1, &id), GQ_OK);
+  CHECK (gq_conn_stream_write (c, id, (const uint8_t *) "hello", 5) == 5);
+  before = k->total;
+  /* A call whose clock reads 5 ms before the last event.  */
+  CHECK_EQ (gq_conn_send_path (c, t - 5000, buf, sizeof buf, &len, NULL),
+            GQ_OK);
+  CHECK (len > 0);
+  CHECK (k->total > before);
+  CHECK (k->last_t >= t);
+  CHECK_EQ (k->bad_order, 0);
+  /* And a timer serviced early.  */
+  gq_conn_on_timeout (c, t - 9000);
+  CHECK_EQ (k->bad_order, 0);
+  pair_free (p);
+}
+
 int
 main (void)
 {
@@ -751,6 +786,7 @@ main (void)
   test_challenge_first_on_new_path ();
   test_window_unused_does_not_grow ();
   test_pacing_deadline ();
+  test_qlog_clock_going_back ();
   TST_DONE ();
 }
 

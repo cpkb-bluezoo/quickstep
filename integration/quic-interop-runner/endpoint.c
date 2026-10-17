@@ -41,6 +41,7 @@
 # include <config.h>
 #endif
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -157,6 +158,161 @@ say (const char *fmt, ...)
       va_end (ap);
       fflush (logfile);
     }
+}
+
+/* ---- qlog ----
+
+   The runner sets QLOGDIR for every endpoint it starts, and keeps what is
+   written there.  Each connection gets a file of its own, named as the qlog
+   draft suggests: the original destination connection ID and the side
+   (abcd1234_server.qlog.txt), with one line per event as <quickstep/qlog.h>
+   describes: the time in microseconds from the first event, the event's
+   name and its fields.  The events that belong to no connection (the
+   server listening, datagrams that matched none, the replies of the
+   endpoint's own) go to endpoint_server.qlog.txt.  The first line of a file
+   begins with '#' and says what it is.  An awk script reads them:
+
+     awk '$2 == "quic:packet_lost"' abcd1234_server.qlog.txt
+
+   QUICKSTEP_QLOG_LEVEL (core, base or extra; default extra) chooses how much
+   is logged, and QUICKSTEP_QLOG_RAW how many bytes of frame data.  */
+
+#define QLOG_FILES 1024
+
+static const char *qlogdir;
+static int qlog_is_server;
+static struct qlog_file
+{
+  const gq_conn *conn;
+  FILE *f;
+  uint64_t origin;
+} qlog_files[QLOG_FILES];
+static size_t n_qlog_files;
+static struct qlog_file qlog_endpoint;
+
+static FILE *
+qlog_open (const char *path, const char *what, const char *odcid)
+{
+  FILE *f = fopen (path, "w");
+
+  if (f == NULL)
+    {
+      fprintf (stderr, "cannot open %s\n", path);
+      return NULL;
+    }
+  fprintf (f, "# qlog lines 1 %s vantage_point=%s%s%s\n", what,
+           qlog_is_server ? "server" : "client", odcid ? " odcid=" : "",
+           odcid ? odcid : "");
+  return f;
+}
+
+static struct qlog_file *
+qlog_file_for (const gq_conn *conn, uint64_t t)
+{
+  size_t i;
+  char path[512], hex[2 * GQ_MAX_CID_LEN + 1];
+  const uint8_t *id;
+  size_t idlen;
+  struct qlog_file *q;
+
+  if (conn == NULL)
+    {
+      q = &qlog_endpoint;
+      if (q->f == NULL && q->origin == 0)
+        {
+          snprintf (path, sizeof path, "%s/endpoint_%s.qlog.txt", qlogdir,
+                    qlog_is_server ? "server" : "client");
+          q->f = qlog_open (path, "endpoint", NULL);
+          q->origin = t ? t : 1;
+        }
+      return q->f ? q : NULL;
+    }
+  for (i = 0; i < n_qlog_files; i++)
+    if (qlog_files[i].conn == conn)
+      return qlog_files[i].f ? &qlog_files[i] : NULL;
+  if (n_qlog_files == QLOG_FILES)
+    return NULL;
+  q = &qlog_files[n_qlog_files++];
+  q->conn = conn;
+  q->origin = t;
+  /* The first event of a connection is its connection_started, by when the
+     original destination connection ID is known.  */
+  id = gq_conn_original_dcid (conn, &idlen);
+  for (i = 0; i < idlen && i < GQ_MAX_CID_LEN; i++)
+    snprintf (hex + 2 * i, 3, "%02x", id[i]);
+  hex[2 * i] = '\0';
+  snprintf (path, sizeof path, "%s/%s_%s.qlog.txt", qlogdir, hex,
+            qlog_is_server ? "server" : "client");
+  q->f = qlog_open (path, "connection", hex);
+  return q->f ? q : NULL;
+}
+
+static void
+qlog_event (void *user, const gq_conn *conn, uint64_t t, const char *name,
+            const char *fields, size_t len)
+{
+  struct qlog_file *q = qlog_file_for (conn, t);
+
+  (void) user;
+  if (q == NULL)
+    return;
+  fprintf (q->f, "%llu %s %.*s\n",
+           (unsigned long long) (t > q->origin ? t - q->origin : 0), name,
+           (int) len, fields);
+  fflush (q->f);
+}
+
+/* The addresses of the endpoint's paths: the bytes of an address and its port.  */
+static int
+qlog_addr (void *user, const gq_addr *a, char *ip, size_t ipcap, uint16_t *port)
+{
+  (void) user;
+  if (a->len == 6 && inet_ntop (AF_INET, a->data, ip, (socklen_t) ipcap))
+    {
+      *port = (uint16_t) (a->data[4] << 8 | a->data[5]);
+      return 4;
+    }
+  if (a->len == 18 && inet_ntop (AF_INET6, a->data, ip, (socklen_t) ipcap))
+    {
+      *port = (uint16_t) (a->data[16] << 8 | a->data[17]);
+      return 6;
+    }
+  return 0;
+}
+
+/* Log what the library reports, if QLOGDIR says where.  */
+static void
+qlog_setup (gq_conn_config *c, int server)
+{
+  const char *level = getenv ("QUICKSTEP_QLOG_LEVEL");
+  const char *raw = getenv ("QUICKSTEP_QLOG_RAW");
+
+  qlogdir = getenv ("QLOGDIR");
+  if (qlogdir == NULL || *qlogdir == '\0')
+    {
+      qlogdir = NULL;
+      return;
+    }
+  /* The runner's value ends with a '/'.  */
+  {
+    static char dir[400];
+    size_t n = strlen (qlogdir);
+
+    snprintf (dir, sizeof dir, "%s", qlogdir);
+    while (n > 1 && dir[n - 1] == '/')
+      dir[--n] = '\0';
+    qlogdir = dir;
+  }
+  mkdir (qlogdir, 0777);
+  qlog_is_server = server;
+  c->qlog = qlog_event;
+  c->qlog_addr = qlog_addr;
+  if (level && !strcmp (level, "core"))
+    c->qlog_importance = GQ_QLOG_CORE;
+  else if (level && !strcmp (level, "base"))
+    c->qlog_importance = GQ_QLOG_BASE;
+  if (raw && *raw)
+    c->qlog_raw = (size_t) strtoul (raw, NULL, 10);
 }
 
 static volatile sig_atomic_t stop_requested;
@@ -915,6 +1071,7 @@ run_server (struct run *r, const char *cert, const char *key)
   memset (&ec, 0, sizeof ec);
   ec.conn.initial_rtt_us = INITIAL_RTT_US;
   ec.conn.congestion_control = congestion_control ();
+  qlog_setup (&ec.conn, 1);
   ec.server = &sc;
   /* Only the retry case may send a Retry: handshake fails if one arrives.  */
   ec.admit.require_retry = r->tc == TC_RETRY;
@@ -1160,6 +1317,7 @@ client_session (struct run *r, const gq_trust *trust, size_t first,
   memset (&cc, 0, sizeof cc);
   cc.initial_rtt_us = INITIAL_RTT_US;
   cc.congestion_control = congestion_control ();
+  qlog_setup (&cc, 0);
   /* Open in v1 whatever else is offered, as the runner checks; the v2 case
      lists v2 first among what the server may switch us to.  */
   if (r->tc == TC_V2)

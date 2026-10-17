@@ -28,6 +28,7 @@
 #include <quickstep/endpoint.h>
 
 #include "tst-util.h"
+#include "tst-qlogcheck.h"
 
 #ifndef HAVE_GNUTLS
 
@@ -77,6 +78,105 @@ struct node
   uint64_t now_hook;
 };
 
+/* What an endpoint's qlog callback is given.  One callback serves every
+   connection of the endpoint, so it is told which by the connection; events
+   of no connection arrive without one.  */
+struct esink
+{
+  unsigned long events;
+  int bad_event, bad_first, bad_null, bad_order;
+  uint64_t last_t;
+  const gq_conn *seen[512];
+  size_t nseen;
+  struct
+  {
+    char name[48];
+    char *fields;
+  } nul[64];
+  size_t nnul;
+};
+
+static unsigned long g_seen[64];
+
+static void
+esink_cb (void *user, const gq_conn *conn, uint64_t t, const char *name,
+          const char *fields, size_t len)
+{
+  struct esink *k = user;
+  char where[200];
+  const char *err;
+  size_t i;
+
+  k->events++;
+  for (i = 0; qc_events[i]; i++)
+    if (!strcmp (name + 5, qc_events[i]))
+      g_seen[i]++;
+  if (t < k->last_t)
+    k->bad_order++;
+  k->last_t = t;
+  err = qc_check (name, fields, len, where, sizeof where);
+  if (err)
+    {
+      fprintf (stderr, "qlog event not as the draft says (%s: %s): %s %s\n",
+               err, where, name, fields);
+      k->bad_event++;
+    }
+  if (conn == NULL)
+    {
+      /* Only what belongs to no connection.  */
+      if (strcmp (name, "quic:server_listening")
+          && strcmp (name, "quic:udp_datagrams_received")
+          && strcmp (name, "quic:udp_datagrams_sent")
+          && strcmp (name, "quic:packet_dropped")
+          && strcmp (name, "quic:packet_sent"))
+        {
+          fprintf (stderr, "%s without a connection\n", name);
+          k->bad_null++;
+        }
+      if (k->nnul < 64)
+        {
+          snprintf (k->nul[k->nnul].name, sizeof k->nul[0].name, "%s", name);
+          k->nul[k->nnul].fields = strdup (fields);
+          k->nnul++;
+        }
+      return;
+    }
+  for (i = 0; i < k->nseen; i++)
+    if (k->seen[i] == conn)
+      return;
+  /* The first event of a connection.  */
+  if (strcmp (name, "quic:connection_started") != 0)
+    {
+      fprintf (stderr, "connection begins with %s\n", name);
+      k->bad_first++;
+    }
+  if (k->nseen < 512)
+    k->seen[k->nseen++] = conn;
+}
+
+static void
+esink_free (struct esink *k)
+{
+  size_t i;
+
+  for (i = 0; i < k->nnul; i++)
+    free (k->nul[i].fields);
+  memset (k, 0, sizeof *k);
+}
+
+/* The events without a connection called NAME, containing TEXT.  */
+static size_t
+esink_null (const struct esink *k, const char *name, const char *text)
+{
+  size_t i, c = 0;
+
+  for (i = 0; i < k->nnul; i++)
+    if (!strcmp (k->nul[i].name, name)
+        && (text == NULL || strstr (k->nul[i].fields, text)))
+      c++;
+  return c;
+}
+
 struct pkt
 {
   int to;
@@ -101,6 +201,7 @@ struct net
   size_t first_dcid_len;
   uint8_t late[2048];
   size_t late_len;
+  struct esink qs[MAXNODES];	/* What each node's endpoint logged.  */
 };
 
 static uint8_t
@@ -522,6 +623,8 @@ net_new (const gq_endpoint_config *server_cfg, uint32_t seed,
   sc.server = &scfg;
   sc.conn.wall_seconds = sim_wall;
   sc.conn.wall_user = net;
+  sc.conn.qlog = esink_cb;
+  sc.conn.qlog_user = &net->qs[0];
   memset (&se, 0, sizeof se);
   se.user = &net->node[0];
   se.accept = accept ? accept : ep_accept;
@@ -531,11 +634,14 @@ net_new (const gq_endpoint_config *server_cfg, uint32_t seed,
   memset (&cc, 0, sizeof cc);
   cc.conn.wall_seconds = sim_wall;
   cc.conn.wall_user = net;
+  cc.conn.qlog = esink_cb;
+  cc.conn.qlog_user = &net->qs[1];
   memset (&ce, 0, sizeof ce);
   ce.user = &net->node[1];
   ce.done = ep_done;
   CHECK_EQ (gq_endpoint_new (&net->node[1].ep, &cc, &ce), GQ_OK);
   ce.user = &net->node[2];
+  cc.conn.qlog_user = &net->qs[2];
   CHECK_EQ (gq_endpoint_new (&net->node[2].ep, &cc, &ce), GQ_OK);
   return net;
 }
@@ -546,7 +652,18 @@ net_free (struct net *net)
   int i;
 
   for (i = 0; i < MAXNODES; i++)
-    gq_endpoint_free (net->node[i].ep);
+    {
+      struct esink *k = &net->qs[i];
+
+      gq_endpoint_free (net->node[i].ep);
+      /* Everything logged was as the draft says, in order, and every
+         connection began with its connection_started.  */
+      CHECK_EQ (k->bad_event, 0);
+      CHECK_EQ (k->bad_first, 0);
+      CHECK_EQ (k->bad_null, 0);
+      CHECK_EQ (k->bad_order, 0);
+      esink_free (k);
+    }
   free (net);
 }
 
@@ -561,10 +678,22 @@ client_conn (struct net *net, int node, const gq_conn_config *cfg)
   gq_path path;
   int r;
 
+  gq_conn_config own;
+
   fill_events (&ev, a);
   memset (&path, 0, sizeof path);
   path.local = n->addr;
   path.remote = net->node[0].addr;
+  if (cfg)
+    {
+      own = *cfg;
+      if (own.qlog == NULL)
+        {
+          own.qlog = esink_cb;
+          own.qlog_user = &net->qs[node];
+        }
+      cfg = &own;
+    }
   r = gq_endpoint_connect (n->ep, net->now, &ccfg, cfg, &path, &ev, &a->c);
   CHECK_EQ (r, GQ_OK);
   return a;
@@ -723,6 +852,16 @@ test_retry (void)
   CHECK (run (net, all_clients_done, 60000000));
   CHECK (net->retries >= 4);
   CHECK_EQ (net->node[0].accepted, 4);
+  /* The endpoint says it is listening, and that it asks for a Retry; the
+     Retry packets it sent belong to no connection.  */
+  CHECK_EQ (esink_null (&net->qs[0], "quic:server_listening",
+                        "retry_required=true"), 1);
+  CHECK (esink_null (&net->qs[0], "quic:packet_sent",
+                     "header.packet_type=retry") >= 4);
+  CHECK (esink_null (&net->qs[0], "quic:packet_sent",
+                     "header.token.raw.length=") >= 4);
+  CHECK (esink_null (&net->qs[0], "quic:packet_dropped", "trigger=rejected")
+         >= 4);
   net_free (net);
 
   /* Retry only when busy: the first two connections skip it.  */
@@ -736,6 +875,9 @@ test_retry (void)
   client_conn (net, 2, NULL);
   CHECK (run (net, all_clients_done, 60000000));
   CHECK (net->retries >= 1);
+  CHECK_EQ (esink_null (&net->qs[0], "quic:server_listening", NULL), 1);
+  CHECK_EQ (esink_null (&net->qs[0], "quic:server_listening",
+                        "retry_required"), 0);
   net_free (net);
 }
 
@@ -766,6 +908,16 @@ test_version_negotiation (void)
   CHECK_EQ (b->closed, 1);
   CHECK (b->ci.error == GQ_QERR_VERSION_NEGOTIATION && !b->connected);
   CHECK_EQ (net->node[0].accepted, 1);
+  /* The server's answers: Version Negotiation with the versions it speaks,
+     for an Initial it can not read.  */
+  CHECK (esink_null (&net->qs[0], "quic:packet_sent",
+                     "header.packet_type=version_negotiation") >= 1);
+  CHECK (esink_null (&net->qs[0], "quic:packet_sent",
+                     "supported_versions=00000001") >= 1);
+  CHECK (esink_null (&net->qs[0], "quic:packet_dropped",
+                     "trigger=unsupported") >= 1);
+  /* The client logged receiving it, and the choice it made.  */
+  CHECK (net->qs[1].events > 0);
   net_free (net);
 }
 
@@ -798,6 +950,8 @@ test_stateless_reset (void)
   sc.server = &scfg;
   sc.conn.wall_seconds = sim_wall;
   sc.conn.wall_user = net;
+  sc.conn.qlog = esink_cb;
+  sc.conn.qlog_user = &net->qs[0];
   net->node[0].ep = NULL;
   gq_endpoint_free (old);
   CHECK_EQ (gq_endpoint_new (&net->node[0].ep, &sc, &se), GQ_OK);
@@ -813,6 +967,16 @@ test_stateless_reset (void)
   }
   CHECK_EQ (a->closed, 1);
   CHECK (a->ci.source == GQ_CLOSE_RESET);
+  /* The reset the new server sent, and the datagram that drew it, for a
+     connection it does not have.  */
+  CHECK (esink_null (&net->qs[0], "quic:packet_sent",
+                     "header.packet_type=stateless_reset") >= 1);
+  CHECK (esink_null (&net->qs[0], "quic:packet_sent",
+                     "stateless_reset_token=") >= 1);
+  CHECK (esink_null (&net->qs[0], "quic:packet_dropped",
+                     "trigger=connection_unknown") >= 1);
+  /* The client's side of it: the connection closed by the reset.  */
+  CHECK (net->qs[1].events > 0);
   net_free (net);
 
   /* Rate limit: unknown short packets draw at most the configured number
@@ -842,6 +1006,11 @@ test_stateless_reset (void)
         n++;
       }
     CHECK_EQ (n, 3);
+    /* All ten drew a dropped-packet event; only three were answered.  */
+    CHECK_EQ (esink_null (&net->qs[0], "quic:packet_dropped",
+                          "trigger=connection_unknown"), 10);
+    CHECK_EQ (esink_null (&net->qs[0], "quic:packet_sent",
+                          "header.packet_type=stateless_reset"), 3);
     /* The window moves on.  */
     net->now += 1500000;
     gq_endpoint_recv (net->node[0].ep, net->now, &from, pkt, sizeof pkt);
@@ -1011,6 +1180,13 @@ main (void)
   test_idle_timeouts ();
   test_rebinding_through_endpoint ();
   test_late_initial ();
+  if (getenv ("QLOG_STATS"))
+    {
+      size_t k;
+
+      for (k = 0; qc_events[k]; k++)
+        fprintf (stderr, "  %-36s %lu\n", qc_events[k], g_seen[k]);
+    }
   TST_DONE ();
 }
 

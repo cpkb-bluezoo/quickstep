@@ -50,6 +50,11 @@ cc_init (gq_conn *c)
   pacer_init (&c->pace, c->cc.cwnd, (uint32_t) c->cfg.max_udp_payload);
   c->send_blocked = 1;
   c->pace_deadline = c->pace_wait_us = 0;
+  /* A new path starts the reports over.  */
+  c->ql.cc_state = NULL;
+  c->ql.met.valid = 0;
+  if (c->ql.started)
+    ql_recovery_parameters (c);
 }
 
 /* The pacing rate in bytes per microsecond, 0 while there is no round trip
@@ -181,6 +186,8 @@ requeue_frames (gq_conn *c, int sp, sent_pkt *p)
 {
   space *s = &c->sp[sp];
   uint32_t i;
+
+  ql_marked_for_retransmit (c, p);
 
   for (i = 0; i < p->nframes; i++)
     {
@@ -407,6 +414,7 @@ process_ack (gq_conn *c, int sp, const gq_frame *f, uint64_t now)
       free (x.got);
       return;
     }
+  ql_packets_acked (c, sp, x.got, x.n);
   if (sp == SP_HANDSHAKE)
     c->hs_acked = 1;
   if (!s->have_acked || f->u.ack.largest > s->largest_acked)
@@ -525,6 +533,8 @@ loss_detect (gq_conn *c, int sp, uint64_t now)
           if (p->ack_eliciting && s->ae_in_flight)
             s->ae_in_flight--;
           c->st.packets_lost++;
+          ql_packet_lost (c, sp, p,
+                          p->pn + K_PACKET_THRESHOLD <= s->largest_acked);
           if (!p->requeued)
             requeue_frames (c, sp, p);
           free_sent_frames (p);
@@ -542,13 +552,17 @@ loss_detect (gq_conn *c, int sp, uint64_t now)
   if (any_lost)
     {
       if (cong_on_congestion_event (&c->cc, newest_lost, now))
-        c->congestion_events++;
+        {
+          c->congestion_events++;
+          ql_cc_state (c, "packet_loss");
+        }
       if (c->pc_active && c->have_rtt && c->pc_last_us > c->pc_first_us
           && c->pc_last_us - c->pc_first_us
              >= K_PERSISTENT_CONGESTION_THRESHOLD * conn_pto_base (c, SP_APP))
         {
           cong_on_persistent (&c->cc);
           c->pc_active = 0;
+          ql_cc_state (c, "persistent_congestion");
         }
     }
 }

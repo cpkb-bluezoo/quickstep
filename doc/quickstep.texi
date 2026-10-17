@@ -53,6 +53,7 @@ Documentation License''.
 * Early data::            0-RTT and its anti-replay rules.
 * QUIC connections::      Connection and stream state.
 * Congestion control::    CUBIC, NewReno, HyStart++ and pacing.
+* qlog::                  Logging what a connection does.
 * Endpoint::              Many connections behind one socket.
 * Address validation::    Retry, tokens and the admission step.
 * Version negotiation::   Version Negotiation and RFC 9368.
@@ -932,6 +933,94 @@ change of path the window, recovery state and pacer start again.
 @code{congestion_events} and @code{pacing_rate_bps}.  ECN is not
 implemented.
 
+@node qlog
+@chapter qlog
+
+@cindex qlog
+@cindex logging
+@cindex events
+A connection can report what it does as the events of
+draft-ietf-quic-qlog-quic-events: packets sent, received and dropped,
+frames, streams, keys, the recovery metrics, losses, timers, paths.  Like
+everything in quickstep it is a callback and nothing else: the library opens
+no file, reads no environment variable and writes nothing to stderr.  Set
+@code{gq_conn_config.qlog} (@file{quickstep/qlog.h}) and each event arrives
+as the connection it belongs to, a time, a name and a line of fields.  With
+no callback set, logging costs one pointer test where an event would be.
+
+The draft defines the events, their fields and their units, and leaves the
+serialization open.  This one is lines of text, for the standard Unix tools,
+and not JSON, so that nothing in the library writes or reads it.  An event
+is a time (microseconds, on the clock given to the connection), a name and
+the draft's fields flattened to @code{key=value}:
+
+@example
+1234567 quic:packet_sent header.packet_type=1RTT header.packet_number=42 \
+  frames.0.frame_type=ack frames.0.acked_ranges=3-7,9 \
+  frames.1.frame_type=stream frames.1.stream_id=0 frames.1.raw.length=1200
+@end example
+
+@noindent
+(on one line).  A member of an object is joined to its object by a dot, the
+items of a list of objects are numbered, a list of numbers is one
+comma-separated value, ACK ranges are written @code{low-high}, durations are
+in milliseconds with three decimals, and a space, @samp{%}, control character
+or non-ASCII byte in a value is written @code{%XX}, so that a line splits
+into fields on spaces and each into key and value on its first @samp{=}.  The
+header file has the whole of it.  Finding every lost packet of a trace is
+
+@example
+awk '$2 == "quic:packet_lost"' abcd1234_server.qlog.txt
+@end example
+
+@heading Detail
+@code{qlog_importance} chooses by the draft's levels (Core, Base, Extra; 0,
+the default, is all of them), and @code{qlog_raw} how many bytes of the data
+of CRYPTO, STREAM, DATAGRAM and NEW_TOKEN frames to include as hex; the
+default, none, logs lengths only, since the data can be secret or personal.
+Keys are never logged: @code{key_updated} names the key and its phase.  A
+connection that logs holds about 48 KiB of buffers for it.
+
+@heading Many connections
+An endpoint serves all its connections with one callback, so the callback is
+given the connection (a pointer that is the same for every event of it) and
+tells them apart by it.  It may ask only what reads the connection, such as
+@code{gq_conn_original_dcid}, which names a log by the draft's convention.
+The first event of a connection is its @code{connection_started}.  Events
+that belong to no connection arrive with a null connection: the server
+listening, datagrams that matched no connection, and the Version
+Negotiation, Retry and stateless reset packets the endpoint sends itself.
+Event times never go back, whatever the caller's clock does between calls.
+
+@code{qlog_addr} tells the library how to write the addresses of a path as
+text, which it cannot know; without it the events carry none, as the draft
+allows.
+
+@heading What is logged
+Every event of the draft except these.  The spin bit, path MTU discovery,
+ECN and the buffering of packets that arrive before their keys are not
+implemented (see the issues for each), so @code{spin_bit_updated},
+@code{mtu_updated}, @code{ecn_state_updated} and @code{packet_buffered} have
+nothing to say.  @code{frames_created}, @code{frames_parsed} and
+@code{frames_processed} would repeat what @code{packet_sent} and
+@code{packet_received} already carry, which the draft advises against.  A
+lost packet lists the frames it carried as far as they were kept, and the
+simple stream states (@code{open}, @code{closed}) are used unless the
+importance asks for the most, which gets the detailed ones.  Congestion
+states are slow start, conservative slow start (HyStart++), congestion
+avoidance and recovery.
+
+@heading The interop endpoint
+The endpoint of the interop runner (@file{integration/quic-interop-runner})
+writes a file for each connection into @env{QLOGDIR}, which the runner sets
+and keeps, named by the original destination connection ID and the side
+(@file{abcd1234_server.qlog.txt}), and one for the events of no connection.
+@command{qlog-lint} checks such files against the draft's event
+definitions: the names, the fields each event must and may have, the values
+of the enumerated ones, the types of the numbers.  The unit tests run that
+check on every event of every scenario of the simulated-network tests, and
+the interop workflow on what each run against another implementation wrote.
+
 @node Endpoint
 @chapter Endpoint
 
@@ -1328,7 +1417,7 @@ Gaps found by comparing with Gumdrop and Hopf: certificate compression
 (RFC 9849) including rotation and DTLS; ML-DSA signatures once a backend
 has them; QUIC keep-alive PING; a streams-available event when
 MAX_STREAMS raises the limit; DPLPMTUD; ECN and segmentation
-offload; the server's preferred_address; qlog; caching AEAD
+offload; the server's preferred_address; caching AEAD
 handles for speed; asynchronous crypto offload; and a DANE/TLSA verifier.
 Whether to send Retry by default is also open.
 @end itemize
