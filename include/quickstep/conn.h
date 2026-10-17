@@ -41,8 +41,11 @@
    synchronously inside the call that caused them and must not call
    gq_conn_free; they may call the stream functions.
 
-   Congestion control is NewReno as in RFC 9002 section 7, without
-   pacing or ECN.
+   Congestion control is CUBIC (RFC 9438) or NewReno (RFC 9002 section 7),
+   chosen with gq_conn_config.congestion_control, with HyStart++ (RFC 9406)
+   in slow start, and bulk stream data is paced over the round trip (RFC
+   9002 section 7.7), which makes gq_conn_timeout return the time the pacer
+   next has credit while data is being held back.  There is no ECN.
 
    Version negotiation is both RFC 9000 section 6 (a client restarts after
    a Version Negotiation packet) and RFC 9368 (compatible negotiation
@@ -195,6 +198,16 @@ typedef struct gq_conn_events
   void (*ticket) (void *user, const gq_tls_ticket *ticket, uint32_t version);
 } gq_conn_events;
 
+/* The congestion controller (gq_conn_config.congestion_control).  Both run
+   slow start with HyStart++ (RFC 9406) and pace what they send (RFC 9002
+   section 7.7).  */
+enum gq_cc_algorithm
+{
+  GQ_CC_DEFAULT = 0,		/* GQ_CC_CUBIC.  */
+  GQ_CC_CUBIC,			/* RFC 9438: 0.7 on loss, a cubic recovery.  */
+  GQ_CC_NEWRENO			/* RFC 9002 section 7: halve on loss.  */
+};
+
 /* Zero means the default in every field.  */
 typedef struct gq_conn_config
 {
@@ -221,6 +234,9 @@ typedef struct gq_conn_config
      within a peer's own short timeout under heavy loss, can use less.  0:
      333000.  */
   uint64_t initial_rtt_us;
+  /* Congestion control: a gq_cc_algorithm.  Any other value is taken as the
+     default.  */
+  int congestion_control;
   uint64_t initial_max_data;		/* 0: 1 MiB.  */
   uint64_t initial_max_stream_data;	/* Each stream type; 0: 256 KiB.  */
   uint64_t initial_max_streams_bidi;	/* 0: 100.  */
@@ -368,7 +384,9 @@ int gq_conn_send (gq_conn *c, uint64_t now_us, uint8_t *out, size_t cap,
                   size_t *len);
 
 /* The time at which gq_conn_on_timeout must be called, or 0 if no timer
-   is armed.  */
+   is armed.  Besides the loss, ACK, path and idle timers this includes the
+   pacer's: when stream data is waiting for pacing credit, send again at or
+   after that time (the call to gq_conn_on_timeout is harmless).  */
 uint64_t gq_conn_timeout (const gq_conn *c);
 void gq_conn_on_timeout (gq_conn *c, uint64_t now_us);
 
@@ -495,6 +513,7 @@ typedef struct gq_conn_stats
   uint64_t bytes_in_flight;
   uint64_t cwnd, ssthresh;		/* Congestion controller state.  */
   uint64_t congestion_events;
+  uint64_t pacing_rate_bps;		/* Bits per second; 0: not paced yet.  */
   uint64_t key_updates;
   unsigned pto_count;
   uint64_t path_validations, path_failures, migrations;

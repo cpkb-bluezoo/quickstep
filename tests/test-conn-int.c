@@ -504,8 +504,8 @@ test_persistent_congestion_over_several_rounds (void)
 
   sp_sent_clear (s, SP_APP);
   s->first_rtt_us = 0;
-  s->cwnd = 100000;
-  s->recovery_start = 0;
+  s->cc.cwnd = 100000;
+  s->cc.recovery_start = 0;
   memset (&k, 0, sizeof k);
   k.size = 1200;
   k.ack_eliciting = k.in_flight = 1;
@@ -526,10 +526,10 @@ test_persistent_congestion_over_several_rounds (void)
   /* Round one: packet 0 is lost, by the packet threshold.  */
   s->latest_rtt = s->srtt = 20000;
   loss_detect (s, SP_APP, t0 + 4 * pto + 12);
-  CHECK (s->cwnd > CC_MIN_WINDOW);
+  CHECK (s->cc.cwnd > CC_MIN_WINDOW);
   /* Round two, later: packet 8, sent four periods after it, is lost too.  */
   loss_detect (s, SP_APP, t0 + 4 * pto + 1000000);
-  CHECK_EQ (s->cwnd, CC_MIN_WINDOW);
+  CHECK_EQ (s->cc.cwnd, CC_MIN_WINDOW);
   pair_free (p);
 }
 
@@ -652,6 +652,83 @@ test_challenge_first_on_new_path (void)
   pair_free (p);
 }
 
+/* RFC 9002 section 7.8: a sender that is not using its window, because it
+   has no more to send than the window allows, does not grow it however many
+   acknowledgements arrive.  */
+static void
+test_window_unused_does_not_grow (void)
+{
+  struct pair *p = settled_pair (NULL, NULL);
+  gq_conn *s = p->srv.c;
+  uint64_t before = s->cc.cwnd;
+  int i;
+
+  p->srv.respond = 3000;
+  for (i = 0; i < 20; i++)
+    {
+      uint64_t id;
+      struct sbuf *b;
+
+      CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+      b = sb_get (&p->cli, id);
+      b->out_total = 10;
+      b->out_fin = 1;
+      CHECK (wait_for_stream (p, b, 3000, 5000000));
+    }
+  run (&p->net, NULL, 1000000);
+  CHECK (!s->send_blocked);
+  CHECK_EQ (s->cc.cwnd, before);
+  pair_free (p);
+}
+
+/* The pacer's wait is a deadline of the connection (gq_conn_timeout), so
+   that a caller driven by it comes back when credit has accrued; it is
+   there only while stream data is held back.  */
+static void
+test_pacing_deadline (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  gq_conn *s;
+  const size_t size = 600000;
+  uint64_t id;
+  struct sbuf *b;
+  int seen = 0, guard = 0;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.initial_max_data = 100u << 20;
+  cfg.initial_max_stream_data = 100u << 20;
+  p = pair_new (&cfg, &cfg, 0, 33);
+  s = p->srv.c;
+  p->net.latency = 50000;
+  p->srv.respond = size;
+  CHECK (run (&p->net, both_connected, 30000000));
+  run (&p->net, NULL, 500000);
+  CHECK_EQ (s->pace_deadline, 0);
+  CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+  b = sb_get (&p->cli, id);
+  b->out_total = 10;
+  b->out_fin = 1;
+  while (!(b->fin && b->n == size) && guard++ < 100000)
+    {
+      run (&p->net, NULL, 500);
+      if (s->pace_deadline)
+        {
+          uint64_t t = gq_conn_timeout (s);
+
+          seen++;
+          CHECK (t != 0 && t <= s->pace_deadline);
+          CHECK (s->pace_deadline > s->now);
+          CHECK (s->pace_wait_us > 0);
+        }
+    }
+  CHECK (b->fin && b->n == size);
+  CHECK (seen > 10);
+  run (&p->net, NULL, 1000000);
+  CHECK_EQ (s->pace_deadline, 0);
+  pair_free (p);
+}
+
 int
 main (void)
 {
@@ -672,6 +749,8 @@ main (void)
   test_stream_frames_after_the_end ();
   test_server_first_flight_padded ();
   test_challenge_first_on_new_path ();
+  test_window_unused_does_not_grow ();
+  test_pacing_deadline ();
   TST_DONE ();
 }
 

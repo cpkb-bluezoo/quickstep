@@ -148,6 +148,22 @@ app_pending (gq_conn *c)
   return 0;
 }
 
+/* Something ack-eliciting is waiting in SP, if only the congestion window
+   allowed it out.  */
+static int
+wants_data (gq_conn *c, int sp)
+{
+  space *s = &c->sp[sp];
+
+  if (sp == SP_APP && early_usable (c))
+    return app_pending (c);
+  if (s->discarded || !s->have_wk)
+    return 0;
+  if (gq_sstream_pending (&s->cs, UINT64_MAX))
+    return 1;
+  return sp == SP_APP && app_pending (c);
+}
+
 int
 conn_have_work (gq_conn *c, int sp)
 {
@@ -159,14 +175,7 @@ conn_have_work (gq_conn *c, int sp)
     return 0;
   if (s->ack_now || s->probes)
     return 1;
-  if (conn_can_send_ae (c))
-    {
-      if (gq_sstream_pending (&s->cs, UINT64_MAX))
-        return 1;
-      if (sp == SP_APP && app_pending (c))
-        return 1;
-    }
-  return 0;
+  return conn_can_send_ae (c) && wants_data (c, sp);
 }
 
 /* ---- Frames ---- */
@@ -412,16 +421,46 @@ add_datagrams (gq_conn *c, pk *p)
     }
 }
 
+/* Stream data is the bulk of what a connection sends, and the part that can
+   wait: with the pacer out of credit it is held back (everything else, the
+   ACKs, probes, path validation and close, is not paced), and the time it
+   will take to earn a datagram's worth is noted for the timer.  Returns 0
+   if some stream has data to send but must wait.  */
+static int
+pacing_allows_data (gq_conn *c)
+{
+  uint64_t wait;
+  size_t i;
+
+  wait = pacer_delay (&c->pace, (uint32_t) conn_max_datagram (c), c->now,
+                      conn_pacing_rate (c), c->bytes_in_flight == 0);
+  if (wait == 0)
+    return 1;
+  for (i = 0; i < c->n_streams; i++)
+    if (c->streams[i]->has_send
+        && gq_sstream_pending (&c->streams[i]->s,
+                               window_credit (c->max_data_peer,
+                                              c->data_sent)))
+      {
+        if (c->pace_wait_us == 0 || wait < c->pace_wait_us)
+          c->pace_wait_us = wait;
+        return 0;
+      }
+  return 1;
+}
+
 static void
 add_streams (gq_conn *c, pk *p)
 {
   size_t i, start;
+  int pace;
 
   /* Streams, starting one further along each time for fairness.  */
   start = c->n_streams ? c->rr % c->n_streams : 0;
   for (i = 0; i < c->n_streams; i++)
     add_stream_control (c, p, c->streams[(start + i) % c->n_streams]);
-  for (i = 0; i < c->n_streams; i++)
+  pace = pacing_allows_data (c);
+  for (i = 0; pace && i < c->n_streams; i++)
     add_stream_data (c, p, c->streams[(start + i) % c->n_streams]);
   if (c->n_streams)
     c->rr = (start + 1) % c->n_streams;
@@ -971,9 +1010,9 @@ build_probe (gq_conn *c, uint64_t now, uint8_t *out, size_t cap, size_t *len,
   return r;
 }
 
-int
-conn_build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
-                     size_t *len)
+static int
+build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
+                size_t *len)
 {
   size_t maxdg = conn_max_datagram (c), est = 0;
   static const int order[N_SPACES] = { SP_INITIAL, SP_HANDSHAKE, SP_APP };
@@ -1051,5 +1090,40 @@ conn_build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
   r = finish_datagram (c, now, pks, pns, pnl, n, need_pad, maxdg, c->cur_path,
                        out, len);
   free (storage);
+  return r;
+}
+
+/* Whether the window is what stopped the sending: something is waiting that
+   the congestion window, or the pacer, will not yet let out.  Having
+   nothing to send, or only what the peer's flow control bars, is not.  */
+static int
+window_limited (gq_conn *c)
+{
+  int sp;
+
+  if (c->pace_wait_us)
+    return 1;
+  if (conn_can_send_ae (c))
+    return 0;
+  for (sp = 0; sp < N_SPACES; sp++)
+    if (wants_data (c, sp))
+      return 1;
+  return 0;
+}
+
+int
+conn_build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
+                     size_t *len)
+{
+  int r;
+
+  c->pace_wait_us = 0;
+  r = build_datagram (c, now, out, cap, len);
+  /* The timer is for the pacer to let go of what it holds back: a send that
+     got everything out has none.  */
+  c->pace_deadline = c->pace_wait_us ? now + c->pace_wait_us : 0;
+  /* When a send ends without a datagram, that is where the sender stopped.  */
+  if (*len == 0)
+    c->send_blocked = (uint8_t) window_limited (c);
   return r;
 }

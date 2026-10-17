@@ -32,6 +32,7 @@
 #include <quickstep/stream.h>
 #include <quickstep/tls.h>
 #include <quickstep/conn.h>
+#include "cc.h"
 
 enum { SP_INITIAL, SP_HANDSHAKE, SP_APP, N_SPACES };
 
@@ -42,7 +43,8 @@ enum { SP_INITIAL, SP_HANDSHAKE, SP_APP, N_SPACES };
 #define CONN_INITIAL_RTT(c) \
   ((c)->cfg.initial_rtt_us ? (c)->cfg.initial_rtt_us : (uint64_t) K_INITIAL_RTT)
 #define K_PACKET_THRESHOLD 3
-/* RFC 9002 section 7 (NewReno) constants.  */
+/* RFC 9002 section 7.2: the datagram size congestion control counts in, and
+   the initial and minimum windows.  */
 #define CC_MAX_DATAGRAM 1200u
 #define CC_INITIAL_WINDOW (10u * CC_MAX_DATAGRAM)
 #define CC_MIN_WINDOW (2u * CC_MAX_DATAGRAM)
@@ -271,10 +273,16 @@ struct gq_conn
   /* Amplification and totals.  */
   uint64_t bytes_recv, bytes_sent;
   uint64_t bytes_in_flight;
-  uint64_t cwnd, ssthresh;	/* Congestion window and threshold.  */
-  uint64_t recovery_start;	/* Send time that ends recovery; 0: none.  */
-  uint64_t ca_acked;		/* Bytes acked in congestion avoidance.  */
+  cong cc;			/* Congestion window, threshold and recovery.  */
+  pacer pace;			/* Spreads the window over the round trip.  */
   uint64_t congestion_events;
+  /* The last attempt to send stopped for lack of window or pacing credit
+     (not of data, or of the peer's flow control), so the window is in use
+     and may grow when data is acknowledged (RFC 9002 section 7.8).  */
+  uint8_t send_blocked;
+  /* Stream data is held back until then for lack of pacing credit; 0: not
+     held back.  PACE_WAIT_US is how long, noted while a datagram is built.  */
+  uint64_t pace_deadline, pace_wait_us;
   gq_conn_stats st;
 
   /* Flow control.  */
@@ -358,6 +366,7 @@ void requeue_frames (gq_conn *c, int sp, sent_pkt *p);
 uint64_t pto_interval (const gq_conn *c, int sp);
 int conn_can_send_ae (const gq_conn *c);
 void cc_init (gq_conn *c);
+double conn_pacing_rate (const gq_conn *c);
 
 /* conn_loss.c (0-RTT) */
 void conn_early_rejected (gq_conn *c);

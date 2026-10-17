@@ -92,8 +92,9 @@ Pre-alpha.  What exists today:
   conn     QUIC connection: handshake over CRYPTO frames, packet number
            spaces, ACKs, RTT, loss detection and probe timeouts,
            streams, flow control, connection IDs, key update, idle
-           timeout, close and stateless reset; NewReno congestion control
-           (RFC 9002 section 7); interoperating with quiche
+           timeout, close and stateless reset; CUBIC or NewReno congestion
+           control with HyStart++ and pacing (RFC 9002 section 7, RFC 9438,
+           RFC 9406); interoperating with quiche
 
 Not yet written: pacing and ECN, the server's
 preferred_address, and the HTTP/3 and DoQ examples.  See the manual

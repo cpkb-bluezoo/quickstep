@@ -946,9 +946,10 @@ test_requests (unsigned loss, uint32_t seed, int nreq, size_t req,
 }
 
 /* The server sends SIZE bytes; LOSS_PCT random loss, and optionally a
-   blackout of BLACKOUT_US starting once BLACKOUT_AT bytes have arrived.  */
+   blackout of BLACKOUT_US starting once BLACKOUT_AT bytes have arrived.  ALGO
+   is the server's congestion controller.  */
 static void
-test_congestion (size_t size, unsigned loss, uint64_t blackout_at,
+test_congestion (int algo, size_t size, unsigned loss, uint64_t blackout_at,
                  uint64_t blackout_us, int expect_events, int expect_min)
 {
   gq_conn_config cfg;
@@ -958,10 +959,12 @@ test_congestion (size_t size, unsigned loss, uint64_t blackout_at,
   int done = 0;
 
   if (getenv ("QDBG"))
-    fprintf (stderr, "--- congestion size=%zu loss=%u\n", size, loss);
+    fprintf (stderr, "--- congestion algo=%d size=%zu loss=%u\n", algo, size,
+             loss);
   memset (&cfg, 0, sizeof cfg);
   cfg.initial_max_data = 100u << 20;
   cfg.initial_max_stream_data = 100u << 20;
+  cfg.congestion_control = algo;
   p = pair_new (&cfg, &cfg, 0, 21);
   p->srv.respond = size;
   CHECK (run (&p->net, both_connected, 30000000));
@@ -993,9 +996,11 @@ test_congestion (size_t size, unsigned loss, uint64_t blackout_at,
   CHECK (done);
   CHECK_EQ (p->cli.bad, 0);
   /* The window starts at ten datagrams, grows, and never lets more than one
-     datagram beyond it into flight.  */
+     datagram beyond it into flight.  After a congestion event the window
+     can sit below what is already in flight (a reduction does not recall
+     packets), so that holds only while there has been none.  */
   CHECK (p->net.max_cwnd > 12000);
-  if (!loss && !blackout_us)
+  if (!expect_events)
     CHECK (p->net.max_over < 1200);
   if (expect_events)
     CHECK (p->net.events > 0);
@@ -1005,6 +1010,116 @@ test_congestion (size_t size, unsigned loss, uint64_t blackout_at,
     CHECK_EQ (p->net.min_cwnd, 2400);
   else
     CHECK (p->net.min_cwnd > 2400);
+  pair_free (p);
+}
+
+/* What the server's datagrams look like to the network: how many leave at
+   the same instant.  */
+struct pace_obs
+{
+  int armed;
+  uint64_t at;
+  unsigned run, max_run, over;
+  uint64_t max_allowed_rate;
+};
+
+static void
+pace_tap (struct net *n, int from, const gq_path *to, void *user)
+{
+  struct pace_obs *o = user;
+  gq_conn_stats st;
+  unsigned allowed;
+
+  (void) to;
+  if (!o->armed || from != 1)
+    return;
+  if (n->now == o->at)
+    o->run++;
+  else
+    {
+      o->at = n->now;
+      o->run = 1;
+    }
+  if (o->run > o->max_run)
+    o->max_run = o->run;
+  /* The initial window may leave at once from idle, and a millisecond's
+     worth of credit at the pacing rate (a timer is no finer): a few more
+     datagrams for the one that arrives with an acknowledgement.  */
+  gq_conn_get_stats (n->app[1]->c, &st);
+  allowed = (unsigned) (st.pacing_rate_bps / 8000 / 1200) + 1;
+  if (allowed < 10)
+    allowed = 10;
+  allowed += 2;
+  if (o->run > allowed)
+    o->over++;
+}
+
+/* Run until stream S has delivered SIZE bytes and its end, or BUDGET_US
+   passes.  */
+static int
+wait_for_stream (struct pair *p, struct sbuf *s, size_t size,
+                 uint64_t budget_us)
+{
+  uint64_t deadline = p->net.now + budget_us;
+  int guard = 0;
+
+  while (!(s->fin && s->n == size) && p->net.now < deadline
+         && guard++ < 100000)
+    run (&p->net, NULL, 20000);
+  return s->fin && s->n == size;
+}
+
+/* RFC 9002 section 7.7: after a transfer has grown the window, a second one
+   from idle does not put the whole window on the wire at once, but spreads
+   it over the round trip, with the timer the pacer asks for waking the
+   connection.  Without pacing the second response, up to the send buffer
+   (256 KiB), would leave in a single burst.  */
+static void
+test_pacing (int algo)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  struct pace_obs obs;
+  gq_conn_stats st;
+  uint64_t id;
+  struct sbuf *s;
+  const size_t size = 1000000;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.initial_max_data = 100u << 20;
+  cfg.initial_max_stream_data = 100u << 20;
+  cfg.congestion_control = algo;
+  p = pair_new (&cfg, &cfg, 0, 31);
+  p->net.latency = 50000;		/* A 100 ms round trip.  */
+  p->srv.respond = size;
+  CHECK (run (&p->net, both_connected, 30000000));
+  run (&p->net, NULL, 500000);
+  CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+  s = sb_get (&p->cli, id);
+  s->out_total = 10;
+  s->out_fin = 1;
+  CHECK (wait_for_stream (p, s, size, 120000000));
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK (st.pacing_rate_bps > 0);
+  /* The first transfer opened the window well beyond a burst's worth.  */
+  CHECK (st.cwnd > 100000);
+
+  /* Idle for a while, then ask again.  */
+  run (&p->net, NULL, 2000000);
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK_EQ (st.bytes_in_flight, 0);
+  memset (&obs, 0, sizeof obs);
+  obs.armed = 1;
+  p->net.tap = pace_tap;
+  p->net.tap_user = &obs;
+  CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+  s = sb_get (&p->cli, id);
+  s->out_total = 10;
+  s->out_fin = 1;
+  CHECK (wait_for_stream (p, s, size, 120000000));
+  CHECK_EQ (p->cli.bad + p->srv.bad, 0);
+  CHECK_EQ (obs.over, 0);
+  CHECK (obs.max_run >= 2);
   pair_free (p);
 }
 
@@ -2513,9 +2628,19 @@ main (void)
     small.send_buffer = 4000;
     test_requests (10, 15, 12, 30, 90000, &small, &small, 0);
   }
-  test_congestion (2000000, 0, 0, 0, 0, 0);
-  test_congestion (2000000, 3, 0, 0, 1, 0);
-  test_congestion (4000000, 0, 1000000, 3000000, 1, 1);
+  {
+    int algo;
+
+    for (algo = GQ_CC_CUBIC; algo <= GQ_CC_NEWRENO; algo++)
+      {
+        test_congestion (algo, 2000000, 0, 0, 0, 0, 0);
+        test_congestion (algo, 2000000, 3, 0, 0, 1, 0);
+        test_congestion (algo, 4000000, 0, 1000000, 3000000, 1, 1);
+      }
+    test_congestion (GQ_CC_DEFAULT, 2000000, 0, 0, 0, 0, 0);
+    test_pacing (GQ_CC_CUBIC);
+    test_pacing (GQ_CC_NEWRENO);
+  }
   test_retry (0, 0, 40);
   test_retry (GQ_VERSION_2, 0, 41);
   test_retry (0, 20, 42);

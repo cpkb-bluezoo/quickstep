@@ -1136,8 +1136,9 @@ gq_conn_get_stats (const gq_conn *c, gq_conn_stats *st)
   st->min_rtt_us = c->min_rtt;
   st->rttvar_us = c->rttvar;
   st->bytes_in_flight = c->bytes_in_flight;
-  st->cwnd = c->cwnd;
-  st->ssthresh = c->ssthresh;
+  st->cwnd = c->cc.cwnd;
+  st->ssthresh = c->cc.ssthresh;
+  st->pacing_rate_bps = (uint64_t) (conn_pacing_rate (c) * 8e6);
   st->congestion_events = c->congestion_events;
   st->pto_count = c->pto_count;
   st->key_updates = c->key_updates;
@@ -1218,6 +1219,7 @@ gq_conn_timeout (const gq_conn *c)
       EARLIER (c->sp[i].ack_deadline);
   EARLIER (conn_loss_deadline (c));
   EARLIER (conn_path_deadline (c));
+  EARLIER (c->pace_deadline);
 #undef EARLIER
   return t;
 }
@@ -1258,6 +1260,9 @@ gq_conn_on_timeout (gq_conn *c, uint64_t now_us)
           s->ack_deadline = 0;
         }
     }
+  /* The pacer has earned its credit: a send will use it.  */
+  if (c->pace_deadline && now_us >= c->pace_deadline)
+    c->pace_deadline = 0;
   on_loss_timeout (c, now_us);
   conn_path_on_timeout (c, now_us);
 }

@@ -52,6 +52,7 @@ Documentation License''.
 * Security policy::       What is negotiated, and what is absent.
 * Early data::            0-RTT and its anti-replay rules.
 * QUIC connections::      Connection and stream state.
+* Congestion control::    CUBIC, NewReno, HyStart++ and pacing.
 * Endpoint::              Many connections behind one socket.
 * Address validation::    Retry, tokens and the admission step.
 * Version negotiation::   Version Negotiation and RFC 9368.
@@ -71,10 +72,10 @@ over UDP.  It is released under the GNU General Public License,
 version 3 or any later version.
 
 For QUIC it provides versions 1 and 2 with compatible version negotiation,
-streams and flow control, loss recovery with NewReno congestion control,
-address validation (Retry and tokens), 0-RTT, path validation and
-migration, DATAGRAM frames, and an endpoint layer that serves many
-connections from one socket.  Pacing, ECN and the server's
+streams and flow control, loss recovery with CUBIC or NewReno congestion
+control and pacing, address validation (Retry and tokens), 0-RTT, path
+validation and migration, DATAGRAM frames, and an endpoint layer that
+serves many connections from one socket.  ECN and the server's
 preferred_address are not implemented.
 
 The library is the C member of a family: Gumdrop (Java) and Hopf (Rust)
@@ -850,8 +851,8 @@ packets are protected and deprotected in place; coalesced packets are
 handled; duplicates are dropped by packet number.  ACKs are sent at once
 for the handshake spaces and after two packets or 25 ms otherwise (at
 once on a gap).  Loss detection follows RFC 9002 (packet and time
-thresholds, probe timeouts with back-off) and the NewReno controller
-of RFC 9002 section 7 limits what is in flight; what a lost packet carried is
+thresholds, probe timeouts with back-off) and a congestion controller
+limits what is in flight (@ref{Congestion control}); what a lost packet carried is
 put back on the queues frame by frame.  A server obeys the
 anti-amplification limit and pads datagrams that carry ack-eliciting
 Initial packets to 1200 bytes; a client pads all its Initial datagrams.
@@ -869,9 +870,67 @@ event delivers received ones, and @code{datagram_acked} and
 @code{datagram_lost} report the fate of each sent one by id.
 
 @heading Limits of this step
-Pacing and ECN are not implemented yet.  The receiving side treats a few limits as
+ECN is not implemented yet.  The receiving side treats a few limits as
 fixed: 64 tracked packet number ranges per space and 8 connection IDs
 in each direction.
+
+@node Congestion control
+@chapter Congestion control
+
+@cindex congestion control
+@cindex pacing
+@cindex CUBIC
+@cindex NewReno
+@cindex HyStart++
+What a connection may have in flight is limited by a congestion window
+(@file{src/cc.c}, apart from the connection and testable on its own).
+@code{gq_conn_config.congestion_control} chooses the controller:
+@code{GQ_CC_CUBIC} (the default; RFC 9438) or @code{GQ_CC_NEWRENO} (RFC 9002
+section 7).  Both start from the initial window of RFC 9002 section 7.2
+(ten datagrams) and share slow start, recovery periods and persistent
+congestion; they differ in how far the window falls on loss (0.7 for CUBIC,
+0.5 for NewReno) and how it grows afterwards.  CUBIC follows
+@math{C (t - K)^3 + W_max} from the reduced window through a plateau at the
+window where the loss happened and on beyond it, grows like Reno while that
+would be faster (a small window on a short path), and lowers @math{W_max}
+further when a loss comes before the last maximum was regained (fast
+convergence).
+
+@heading Slow start
+Slow start runs HyStart++ (RFC 9406) for both controllers, so that a path
+with a deep queue is not overrun every time.  Each round trip's minimum
+round trip time is compared with the previous round's; a rise of an eighth
+(bounded to between 4 and 16 ms), seen in at least eight samples, slows the
+growth to a quarter, and five such rounds end slow start without waiting
+for a loss.  A round trip time that falls back returns to normal slow start.
+
+@heading Pacing
+Bulk stream data is paced (RFC 9002 section 7.7): a token bucket spreads the
+window over the round trip at 1.25 windows per round trip, or 2 in slow
+start, rather than putting it on the wire back to back.  From idle the
+initial window may leave at once.  With data in flight, credit is held to one
+datagram plus a millisecond's worth at the current rate: enough for any rate
+with a millisecond timer, while at the rates a contended bottleneck allows it
+releases datagrams one at a time instead of the pairs an acknowledgement
+would otherwise free together, which lose a packet at a nearly full queue
+where a single one gets through.  Nothing is paced until the first round
+trip sample exists.  Acknowledgements, probes, handshake data, path
+validation, DATAGRAM frames and close are not paced.
+
+When the pacer holds stream data back, @code{gq_conn_timeout} returns the
+time it will have credit, so a caller that sends when its timer fires needs
+nothing more.  Credit accrues from the time of the check, not the time it
+was due: a late timer makes the next release larger and never lowers the
+average rate.
+
+@heading When the window grows
+The window grows only while it is in use (RFC 9002 section 7.8): when the
+last attempt to send ended because the window or the pacer would not let
+more out, not for lack of data or because of the peer's flow control.  On a
+change of path the window, recovery state and pacer start again.
+@code{gq_conn_get_stats} reports @code{cwnd}, @code{ssthresh},
+@code{congestion_events} and @code{pacing_rate_bps}.  ECN is not
+implemented.
 
 @node Endpoint
 @chapter Endpoint
@@ -1175,10 +1234,11 @@ Verified by simulated-network tests (loss, reordering, corruption, tight
 flow control) and against quiche in both directions.
 
 @item
-@strong{Done.}  Congestion control: NewReno as in RFC 9002 section 7
-(slow start, congestion avoidance, recovery periods, persistent
-congestion, window growth only while the window is in use).  Still open:
-pacing, ECN, and a pluggable controller (CUBIC, BBR).
+@strong{Done.}  Congestion control and pacing (@ref{Congestion control}):
+CUBIC (RFC 9438) or NewReno (RFC 9002 section 7), HyStart++ (RFC 9406) in
+slow start, persistent congestion, window growth only while the window is
+in use, and a token bucket that spreads the window over the round trip
+(RFC 9002 section 7.7).  Still open: ECN, and further controllers (BBR).
 
 @item
 @strong{Done.}  Address validation (@ref{Address validation}): Retry and
@@ -1247,7 +1307,7 @@ shims are needed); Encrypted Client Hello and certificate compression,
 which Gumdrop has and are deferred here.  (The timer interface was
 decided: a ``next timeout'' query, for connections and endpoints alike.)
 
-Not implemented anywhere yet: pacing and ECN, the server's
+Not implemented anywhere yet: ECN, the server's
 preferred_address, multipath, and DTLS 1.3 connection IDs.
 
 @subheading Planned
@@ -1267,7 +1327,7 @@ Gaps found by comparing with Gumdrop and Hopf: certificate compression
 (RFC 8879); @code{record_size_limit} (RFC 8449); Encrypted Client Hello
 (RFC 9849) including rotation and DTLS; ML-DSA signatures once a backend
 has them; QUIC keep-alive PING; a streams-available event when
-MAX_STREAMS raises the limit; DPLPMTUD; pacing, ECN and segmentation
+MAX_STREAMS raises the limit; DPLPMTUD; ECN and segmentation
 offload; the server's preferred_address; qlog; caching AEAD
 handles for speed; asynchronous crypto offload; and a DANE/TLSA verifier.
 Whether to send Retry by default is also open.

@@ -13,6 +13,19 @@ quickstep.pc.  The C API (gq_ / GQ_) is unchanged.
 * Noteworthy changes in development (unreleased)
 
 ** Initial development.
+** Congestion control is CUBIC (RFC 9438) by default, with HyStart++ (RFC
+9406) ending slow start when the round trip time starts to rise.  NewReno
+remains available: set gq_conn_config.congestion_control to GQ_CC_NEWRENO.
+Windows are reduced to 0.7 on loss rather than 0.5 by default, so a
+connection that relied on the old behaviour will see a different one.
+** Bulk stream data is paced over the round trip (RFC 9002 section 7.7)
+instead of leaving as one burst of up to the whole window.  gq_conn_timeout
+now also returns the time the pacer will next have credit while data is held
+back, so a caller driven by it needs no change.
+** The congestion window grows only while the sender is held back by the
+window or the pacer, as RFC 9002 section 7.8 says, rather than by a guess
+from the bytes in flight.
+** gq_conn_stats gains pacing_rate_bps.
 ** A client can send a token of up to 512 bytes in its Initial packets.  A
 token over 100 bytes (quic-go's Retry token is about 110) overflowed a
 buffer in the length calculation of the packet header, so the first flight

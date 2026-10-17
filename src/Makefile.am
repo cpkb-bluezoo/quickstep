@@ -19,6 +19,8 @@
 lib_LTLIBRARIES = libquickstep.la
 
 libquickstep_la_SOURCES = \
+  cc.c \
+  cc.h \
   crypto.c \
   dtls.c \
   endpoint.c \
