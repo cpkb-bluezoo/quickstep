@@ -40,8 +40,6 @@
 
 #include "conn_int.h"
 
-#define ECN_TEST_PACKETS 10
-
 static void
 set_state (gq_conn *c, enum gq_ecn_state st)
 {
@@ -59,6 +57,7 @@ start_test (gq_conn *c)
   c->ecn_gen++;
   c->ecn_test_sent = c->ecn_test_ae = c->ecn_test_acked = 0;
   c->ecn_test_lost = 0;
+  c->ecn_n_test_pns = 0;
   set_state (c, GQ_ECN_TESTING);
 }
 
@@ -89,10 +88,13 @@ conn_ecn_marks (gq_conn *c, int dest, const int *spaces, const uint8_t *early,
   return c->ecn_state == GQ_ECN_TESTING || c->ecn_state == GQ_ECN_CAPABLE;
 }
 
-/* One packet of ours, AE if ack-eliciting, went out marked.  Returns the
-   generation to keep with it if it is tracked, else 0.  */
+/* One packet of ours, number PN, AE if ack-eliciting, went out marked.
+   Returns the generation to keep with it if it is tracked, else 0.  A packet
+   of the test that is not ack-eliciting (an endpoint that is downloading
+   sends little else) is not tracked, but its number is kept, as the peer
+   acknowledges it all the same and its counts include it.  */
 uint32_t
-conn_ecn_sent (gq_conn *c, int ae)
+conn_ecn_sent (gq_conn *c, int ae, uint64_t pn)
 {
   c->sp[SP_APP].ecn_sent++;
   c->ecn_marked_sent++;
@@ -101,8 +103,29 @@ conn_ecn_sent (gq_conn *c, int ae)
       c->ecn_test_sent++;
       if (ae)
         c->ecn_test_ae++;
+      else if (c->ecn_n_test_pns < ECN_TEST_PACKETS)
+        c->ecn_test_pns[c->ecn_n_test_pns++] = pn;
     }
   return ae ? c->ecn_gen : 0;
+}
+
+/* The ranges of an ACK frame, against the test packets that were not
+   tracked: those it covers are forgotten and counted.  */
+static int
+ack_test_pns (void *user, uint64_t lo, uint64_t hi)
+{
+  gq_conn *c = user;
+  unsigned i = 0;
+
+  while (i < c->ecn_n_test_pns)
+    if (c->ecn_test_pns[i] >= lo && c->ecn_test_pns[i] <= hi)
+      {
+        c->ecn_test_pns[i] = c->ecn_test_pns[--c->ecn_n_test_pns];
+        c->ecn_test_acked_pns++;
+      }
+    else
+      i++;
+  return 0;
 }
 
 /* The datagram is out: ten marked packets end the testing.  */
@@ -171,6 +194,10 @@ conn_ecn_on_ack (gq_conn *c, int sp, const gq_frame *f, const sent_pkt *got,
         if (got[i].ecn_gen == c->ecn_gen)
           current++;
       }
+  c->ecn_test_acked_pns = 0;
+  gq_ack_foreach (f, ack_test_pns, c);
+  marked += c->ecn_test_acked_pns;
+  current += c->ecn_test_acked_pns;
   if (c->ecn_state == GQ_ECN_FAILED)
     {
       if (f->u.ack.has_ecn)

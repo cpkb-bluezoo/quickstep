@@ -148,6 +148,20 @@ case_ ()
   esac
   case $tc in
     keyupdate) grep -q '^KEY_UPDATE' "$name.cli.log" || rc=1 ;;
+    ecn)
+      # Both ends found that the path keeps the marks and counts them: the
+      # sockets read and set the ECN field of the datagrams.
+      for side in client server; do
+        grep -q ' quic:ecn_state_updated .*new=capable' \
+          "ql-$name"/*_$side.qlog.txt \
+          || { echo "     $side did not validate ECN"; rc=1; }
+        grep -q ' quic:udp_datagrams_sent .*ecn=ECT(0)' \
+          "ql-$name"/*_$side.qlog.txt \
+          || { echo "     $side marked nothing"; rc=1; }
+        grep -q ' quic:udp_datagrams_received .*ecn=ECT(0)' \
+          "ql-$name"/*_$side.qlog.txt \
+          || { echo "     $side saw no mark"; rc=1; }
+      done ;;
     zerortt)
       grep -q 'EARLY_DATA accepted=1' "$name.cli.log" || rc=1
       grep -q '^CLIENT_EARLY_TRAFFIC_SECRET ' "keys-$name.cli" || rc=1
@@ -162,6 +176,7 @@ case_ chacha20 chacha20 localhost small tiny
 case_ retry retry localhost small tiny
 case_ v2 v2 localhost small tiny
 case_ keyupdate keyupdate localhost big
+case_ ecn ecn localhost small tiny big
 case_ zerortt-names zerortt localhost small $longs
 case_ multiconnect multiconnect localhost small tiny f1 f2 f3
 case_ resumption resumption localhost small tiny f1
@@ -173,7 +188,7 @@ case_ ipv6 ipv6 '[::1]' small tiny
 
 # What the endpoint does not implement is reported as such (exit 127), which
 # the runner reads as "unsupported"; so is any name it does not know.
-for tc in http3 ecn connectionmigration no-such-case; do
+for tc in http3 connectionmigration no-such-case; do
   want "unsupported-$tc" || continue
   ROLE=client TESTCASE=$tc REQUESTS=https://localhost:1/x "$EP" >/dev/null 2>&1
   [ $? = 127 ] && rc=0 || rc=1

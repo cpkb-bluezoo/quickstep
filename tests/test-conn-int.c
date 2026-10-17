@@ -1689,6 +1689,43 @@ ecn_forge_ack (gq_conn *from, gq_conn *to, uint64_t now, uint64_t lo,
   forge (from, to, now, NULL, &f, 1, 0);
 }
 
+/* As ecn_send_three, but three packets that carry only an ACK, as those of
+   a connection that is downloading do: the peer acknowledges them in its
+   ranges but they are not ack-eliciting, so are not themselves tracked.  */
+static struct ecn_sent
+ecn_send_three_acks (gq_conn *a, gq_conn *b, const gq_path *to_a,
+                     uint64_t *now, int *marked)
+{
+  struct ecn_sent r;
+  uint8_t out[1500];
+  int k;
+
+  r.lo = a->sp[SP_APP].next_pn;
+  *marked = 0;
+  for (k = 0; k < 3; k++)
+    {
+      size_t len = 0;
+      int ecn = -1;
+      gq_frame f;
+
+      /* A PING from the peer makes an ACK owed.  */
+      memset (&f, 0, sizeof f);
+      f.type = GQ_FRAME_PING;
+      forge (b, a, *now, to_a, &f, 1, 0);
+      *now += 30000;
+      gq_conn_on_timeout (a, *now);
+      CHECK_EQ (gq_conn_send_ecn (a, *now, out, sizeof out, &len, NULL,
+                                  &ecn), GQ_OK);
+      CHECK (len > 0);
+      if (ecn == GQ_ECN_ECT0)
+        (*marked)++;
+    }
+  r.hi = a->sp[SP_APP].next_pn - 1;
+  CHECK_EQ (r.hi - r.lo + 1, 3);
+  CHECK_EQ (a->sp[SP_APP].n_sent, 0);	/* None was ack-eliciting.  */
+  return r;
+}
+
 enum ack_kind
 {
   ACK_GOOD, ACK_GOOD_WITH_CE, ACK_NO_COUNTS, ACK_UNDERCOUNT, ACK_ECT1,
@@ -1698,7 +1735,7 @@ enum ack_kind
 /* RFC 9000 section 13.4.2.1: the counts in the ACK frame that acknowledges
    the marked packets of the test are right, or validation fails.  */
 static void
-ecn_ack_case (enum ack_kind kind)
+ecn_ack_case (enum ack_kind kind, int ack_only)
 {
   struct pair *p = settled_pair (NULL, NULL);
   gq_conn *a = p->cli.c, *b = p->srv.c;
@@ -1711,7 +1748,10 @@ ecn_ack_case (enum ack_kind kind)
   int marked = 0, ecn = -1;
 
   conn_ecn_restart (a);
-  r = ecn_send_three (p, a, &now, &marked);
+  if (ack_only)
+    r = ecn_send_three_acks (a, b, NULL, &now, &marked);
+  else
+    r = ecn_send_three (p, a, &now, &marked);
   CHECK_EQ (marked, 3);
   b0 = s->ecn_peer[0];
   b1 = s->ecn_peer[1];
@@ -1723,7 +1763,10 @@ ecn_ack_case (enum ack_kind kind)
       ecn_forge_ack (b, a, now, r.lo, r.hi, 1, b0 + 3, b1, bce);
       CHECK_EQ (ecn_state_of (a), GQ_ECN_CAPABLE);
       b0 += 3;
-      r = ecn_send_three (p, a, &now, &marked);
+      if (ack_only)
+        r = ecn_send_three_acks (a, b, NULL, &now, &marked);
+      else
+        r = ecn_send_three (p, a, &now, &marked);
       CHECK_EQ (marked, 3);
     }
   gq_conn_get_stats (a, &before);
@@ -1789,7 +1832,10 @@ test_ecn_validation_of_counts (void)
   enum ack_kind k;
 
   for (k = ACK_GOOD; k <= ACK_OVERCOUNT; k++)
-    ecn_ack_case (k);
+    {
+      ecn_ack_case (k, 0);
+      ecn_ack_case (k, 1);
+    }
 }
 
 /* A new path starts the test again (RFC 9000 section 13.4.2): the server

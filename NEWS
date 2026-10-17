@@ -55,7 +55,9 @@ section 13.4.2 (the first ten are the test; the handshake is never marked).
 An increase in the peer's CE count reduces the window as a loss does, without
 persistent congestion.  gq_conn_stats gains ecn_state, ecn_marked_sent and the
 counts received, and qlog reports ecn_state_updated and the codepoint of
-datagrams.
+datagrams.  The quic-interop-runner endpoint reads and sets the ECN field of
+its datagrams, and so takes part in the runner's ecn test case instead of
+answering 127.
 ** The interop endpoint writes a log for each connection into QLOGDIR, which
 the runner sets, and qlog-lint checks such files against the draft; the
 interop workflow runs it on what each run wrote.

@@ -55,6 +55,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -85,15 +86,17 @@
 enum testcase
 {
   TC_HANDSHAKE, TC_TRANSFER, TC_MULTICONNECT, TC_CHACHA20, TC_RETRY,
-  TC_RESUMPTION, TC_ZERORTT, TC_KEYUPDATE, TC_V2, TC_IPV6, TC_UNSUPPORTED
+  TC_RESUMPTION, TC_ZERORTT, TC_KEYUPDATE, TC_V2, TC_IPV6, TC_ECN,
+  TC_UNSUPPORTED
 };
 
 /* What the runner may ask for.  The server side of keyupdate, blackhole,
    multiplexing and the like arrives as "transfer"; the client side of
    multiplexing, loss and corruption as "transfer" or "multiconnect".  Left
-   out, and answered with 127: http3 (no HTTP/3 here), ecn (no ECN
-   codepoints in the library), connectionmigration (the server's
-   preferred_address is not used) and versionnegotiation.  */
+   out, and answered with 127: http3 (no HTTP/3 here), connectionmigration
+   (the server's preferred_address is not used) and versionnegotiation.
+   ecn is a transfer: the sockets pass the ECN field to and from the
+   library, which marks and validates whatever the case.  */
 static const struct
 {
   const char *name;
@@ -103,7 +106,7 @@ static const struct
   { "multiconnect", TC_MULTICONNECT }, { "chacha20", TC_CHACHA20 },
   { "retry", TC_RETRY }, { "resumption", TC_RESUMPTION },
   { "zerortt", TC_ZERORTT }, { "keyupdate", TC_KEYUPDATE },
-  { "v2", TC_V2 }, { "ipv6", TC_IPV6 }
+  { "v2", TC_V2 }, { "ipv6", TC_IPV6 }, { "ecn", TC_ECN }
 };
 
 /* ---- Environment ---- */
@@ -521,6 +524,159 @@ addr_to_sa (int family, const gq_addr *a, struct sockaddr_storage *ss)
     }
 }
 
+/* ---- The ECN field of datagrams ----
+
+   The library neither reads nor sets it (it has no sockets), so this does:
+   the socket is asked to report the type of service of each datagram it
+   receives, and a datagram to be marked carries it as ancillary data, which
+   applies to that one datagram.  The ECN field is the low two bits.  IPv4
+   reports it as IP_TOS (IP_RECVTOS on BSD and macOS), IPv6 as the traffic
+   class; a dual-stack socket gets either for the peer it talks to, and is
+   given both when it sends, as the one that does not fit is skipped.  */
+
+static void
+ecn_enable (int fd, int family)
+{
+  int on = 1;
+
+#ifdef IP_RECVTOS
+  (void) setsockopt (fd, IPPROTO_IP, IP_RECVTOS, &on, sizeof on);
+#endif
+#ifdef IPV6_RECVTCLASS
+  if (family == AF_INET6)
+    (void) setsockopt (fd, IPPROTO_IPV6, IPV6_RECVTCLASS, &on, sizeof on);
+#endif
+  (void) family;
+}
+
+/* Receive a datagram.  *ECN is its ECN field, or -1 if the socket did not
+   say.  */
+static ssize_t
+net_recv (struct net *n, uint8_t *buf, size_t cap,
+          struct sockaddr_storage *from, socklen_t *fl, int *ecn)
+{
+  struct iovec iov;
+  struct msghdr mh;
+  struct cmsghdr *cm;
+  union
+  {
+    struct cmsghdr align;
+    char space[CMSG_SPACE (sizeof (int)) * 2];
+  } ctl;
+  ssize_t got;
+
+  iov.iov_base = buf;
+  iov.iov_len = cap;
+  memset (&mh, 0, sizeof mh);
+  mh.msg_name = from;
+  mh.msg_namelen = *fl;
+  mh.msg_iov = &iov;
+  mh.msg_iovlen = 1;
+  mh.msg_control = ctl.space;
+  mh.msg_controllen = sizeof ctl.space;
+  got = recvmsg (n->fd, &mh, 0);
+  if (got < 0)
+    return got;
+  *fl = mh.msg_namelen;
+  *ecn = -1;
+  for (cm = CMSG_FIRSTHDR (&mh); cm; cm = CMSG_NXTHDR (&mh, cm))
+    {
+      int tos = -1;
+
+      if (cm->cmsg_level == IPPROTO_IP
+          && (cm->cmsg_type == IP_TOS
+#ifdef IP_RECVTOS
+              || cm->cmsg_type == IP_RECVTOS
+#endif
+              )
+          && cm->cmsg_len >= CMSG_LEN (sizeof (unsigned char)))
+        tos = *(unsigned char *) CMSG_DATA (cm);
+#ifdef IPV6_TCLASS
+      else if (cm->cmsg_level == IPPROTO_IPV6 && cm->cmsg_type == IPV6_TCLASS
+               && cm->cmsg_len >= CMSG_LEN (sizeof (int)))
+        {
+          int v;
+
+          memcpy (&v, CMSG_DATA (cm), sizeof v);
+          tos = v & 0xff;
+        }
+#endif
+      if (tos >= 0)
+        *ecn = tos & 3;
+    }
+  return got;
+}
+
+/* Send a datagram marked ECN (a gq_ecn).  A datagram that is not marked
+   carries no ancillary data.  */
+static ssize_t
+net_send (struct net *n, uint8_t *out, size_t len, struct sockaddr *dest,
+          socklen_t dl, int ecn)
+{
+  struct iovec iov;
+  struct msghdr mh;
+  union
+  {
+    struct cmsghdr align;
+    char space[CMSG_SPACE (sizeof (int)) * 2];
+  } ctl;
+  size_t used = 0;
+
+  iov.iov_base = out;
+  iov.iov_len = len;
+  memset (&mh, 0, sizeof mh);
+  mh.msg_name = dest;
+  mh.msg_namelen = dl;
+  mh.msg_iov = &iov;
+  mh.msg_iovlen = 1;
+  if (ecn != GQ_ECN_NOT_ECT)
+    {
+      struct cmsghdr *cm;
+      int v = ecn;
+
+      memset (&ctl, 0, sizeof ctl);
+      mh.msg_control = ctl.space;
+      mh.msg_controllen = sizeof ctl.space;
+      cm = CMSG_FIRSTHDR (&mh);
+      if (n->family == AF_INET)
+        {
+          cm->cmsg_level = IPPROTO_IP;
+          cm->cmsg_type = IP_TOS;
+        }
+      else
+        {
+#ifdef IPV6_TCLASS
+          cm->cmsg_level = IPPROTO_IPV6;
+          cm->cmsg_type = IPV6_TCLASS;
+#else
+          cm->cmsg_level = IPPROTO_IP;
+          cm->cmsg_type = IP_TOS;
+#endif
+        }
+      cm->cmsg_len = CMSG_LEN (sizeof v);
+      memcpy (CMSG_DATA (cm), &v, sizeof v);
+      used = CMSG_SPACE (sizeof v);
+#if defined IPV6_TCLASS
+      /* A dual-stack socket sending to an IPv4 peer: the kernel reads the
+         IPv4 form for it.  */
+      if (n->family == AF_INET6 && dest->sa_family == AF_INET6
+          && IN6_IS_ADDR_V4MAPPED (&((struct sockaddr_in6 *) dest)->sin6_addr))
+        {
+          struct cmsghdr *c2 = (struct cmsghdr *) ((char *) cm
+                                                   + CMSG_SPACE (sizeof v));
+
+          c2->cmsg_level = IPPROTO_IP;
+          c2->cmsg_type = IP_TOS;
+          c2->cmsg_len = CMSG_LEN (sizeof v);
+          memcpy (CMSG_DATA (c2), &v, sizeof v);
+          used += CMSG_SPACE (sizeof v);
+        }
+#endif
+      mh.msg_controllen = used;
+    }
+  return sendmsg (n->fd, &mh, 0);
+}
+
 static void
 set_buffers (int fd)
 {
@@ -576,6 +732,7 @@ net_listen (struct net *n, const char *port)
     }
   fcntl (n->fd, F_SETFL, fcntl (n->fd, F_GETFL) | O_NONBLOCK);
   set_buffers (n->fd);
+  ecn_enable (n->fd, n->family);
   if (getsockname (n->fd, (struct sockaddr *) &ss, &sl) == 0)
     sa_to_addr ((struct sockaddr *) &ss, &n->local);
   return 0;
@@ -617,6 +774,7 @@ net_open (struct net *n, int family)
     }
   fcntl (n->fd, F_SETFL, fcntl (n->fd, F_GETFL) | O_NONBLOCK);
   set_buffers (n->fd);
+  ecn_enable (n->fd, n->family);
   sl = sizeof ss;
   if (getsockname (n->fd, (struct sockaddr *) &ss, &sl) == 0)
     sa_to_addr ((struct sockaddr *) &ss, &n->local);
@@ -636,16 +794,18 @@ net_flush (gq_endpoint *ep, struct net *n)
     {
       struct sockaddr_storage dest;
       socklen_t dl;
+      int ecn = GQ_ECN_NOT_ECT;
 
       memset (&to, 0, sizeof to);
-      if (gq_endpoint_send (ep, now_us (), out, sizeof out, &len, &to) != GQ_OK
+      if (gq_endpoint_send_ecn (ep, now_us (), out, sizeof out, &len, &to,
+                                &ecn) != GQ_OK
           || len == 0)
         break;
       if (to.remote.len != (n->family == AF_INET6 ? 18 : 6))
         continue;
       dl = addr_to_sa (n->family, &to.remote, &dest);
       /* A full socket buffer is a lost packet, which QUIC recovers from.  */
-      (void) sendto (n->fd, out, len, 0, (struct sockaddr *) &dest, dl);
+      (void) net_send (n, out, len, (struct sockaddr *) &dest, dl, ecn);
     }
 }
 
@@ -675,14 +835,18 @@ net_service (gq_endpoint *ep, struct net *n, int ms)
         struct sockaddr_storage from;
         socklen_t fl = sizeof from;
         gq_path path;
-        ssize_t got = recvfrom (n->fd, buf, sizeof buf, 0,
-                                (struct sockaddr *) &from, &fl);
+        int ecn;
+        ssize_t got = net_recv (n, buf, sizeof buf, &from, &fl, &ecn);
 
         if (got <= 0)
           break;
         path.local = n->local;
         sa_to_addr ((struct sockaddr *) &from, &path.remote);
-        gq_endpoint_recv (ep, now_us (), &path, buf, (size_t) got);
+        if (ecn < 0)
+          gq_endpoint_recv (ep, now_us (), &path, buf, (size_t) got);
+        else
+          gq_endpoint_recv_ecn (ep, now_us (), &path, ecn, buf,
+                                (size_t) got);
       }
   t = gq_endpoint_timeout (ep);
   if (t && t <= now_us ())

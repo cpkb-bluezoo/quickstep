@@ -973,7 +973,7 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
       if (p->ack_valid)
         conn_note_ack_sent (c, p->sp, pns[i], p->ack_largest);
       if (marked && !p->ae)
-        conn_ecn_sent (c, 0);
+        conn_ecn_sent (c, 0, pns[i]);
       if (p->ae)
         {
           sent_pkt sp;
@@ -987,7 +987,7 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
           sp.in_flight = 1;
           sp.early = (uint8_t) p->early;
           if (marked)
-            sp.ecn_gen = conn_ecn_sent (c, 1);
+            sp.ecn_gen = conn_ecn_sent (c, 1, pns[i]);
           if (p->nsf)
             {
               sp.frames = malloc (p->nsf * sizeof *sp.frames);

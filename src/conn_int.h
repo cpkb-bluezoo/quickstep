@@ -74,6 +74,9 @@ typedef struct sent_frame
   uint64_t a, b;
 } sent_frame;
 
+/* The packets of an ECN test (RFC 9000 section 13.4.2).  */
+#define ECN_TEST_PACKETS 10
+
 typedef struct sent_pkt
 {
   uint64_t pn;
@@ -267,6 +270,9 @@ struct gq_conn
 				   it, and none is 0.  */
   uint64_t ecn_test_sent, ecn_test_ae, ecn_test_acked, ecn_test_lost;
   uint64_t ecn_marked_sent;
+  uint64_t ecn_test_pns[ECN_TEST_PACKETS];	/* Packet numbers of the test that carry only
+				   an ACK and so are not in a sent list.  */
+  unsigned ecn_n_test_pns, ecn_test_acked_pns;
   uint8_t tx_ecn_ok;		/* The send in progress may mark packets.  */
   uint8_t tx_ecn;		/* The codepoint of the datagram it made.  */
   int8_t rx_ecn;		/* ECN field of the datagram being processed
@@ -364,7 +370,7 @@ void conn_fail (gq_conn *c, uint64_t code, const char *reason);
 void conn_ecn_restart (gq_conn *c);
 int conn_ecn_marks (gq_conn *c, int dest, const int *spaces,
                     const uint8_t *early, int n);
-uint32_t conn_ecn_sent (gq_conn *c, int ae);
+uint32_t conn_ecn_sent (gq_conn *c, int ae, uint64_t pn);
 void conn_ecn_datagram_sent (gq_conn *c);
 void conn_ecn_lost (gq_conn *c, const sent_pkt *p);
 void conn_ecn_on_ack (gq_conn *c, int sp, const gq_frame *f,
