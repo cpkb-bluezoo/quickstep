@@ -708,14 +708,45 @@ on_loss_timeout (gq_conn *c, uint64_t now)
         && gq_sstream_pending (&c->sp[i].cs, UINT64_MAX))
       c->sp[i].probes = 2;
   /* Retransmit what the oldest outstanding packet carried: it is the one
-     most likely to be lost.  */
+     most likely to be lost.  A PING probe carried nothing to retransmit,
+     and must not be taken for the packet that did.  */
   for (i = 0; i < s->n_sent; i++)
-    if (s->sent[i].ack_eliciting && !s->sent[i].requeued)
+    if (s->sent[i].ack_eliciting && !s->sent[i].requeued
+        && s->sent[i].nframes)
       {
         requeue_frames (c, sp, &s->sent[i]);
         s->sent[i].requeued = 1;
         break;
       }
+}
+
+/* A probe in the Initial or Handshake space (RFC 9002 section 6.2.4) is
+   to carry CRYPTO data still in flight, the oldest packet's, when none is
+   waiting to go: a PING there is no use if the flight was lost, since a
+   server with no state for the connection ignores it (and some close on an
+   Initial with no CRYPTO frame).  Both probes of a PTO carry it, so the
+   second repeats what the first sent.  What is acknowledged in the meantime
+   is not sent (gq_sstream_on_lost).  */
+void
+conn_probe_crypto (gq_conn *c, int sp)
+{
+  space *s = &c->sp[sp];
+  size_t i;
+  uint32_t k;
+  int found = 0;
+
+  if (sp == SP_APP || s->discarded
+      || gq_sstream_pending (&s->cs, UINT64_MAX))
+    return;
+  for (i = 0; i < s->n_sent && !found; i++)
+    if (s->sent[i].ack_eliciting)
+      for (k = 0; k < s->sent[i].nframes; k++)
+        if (s->sent[i].frames[k].type == SF_CRYPTO)
+          {
+            gq_sstream_on_lost (&s->cs, s->sent[i].frames[k].a,
+                                s->sent[i].frames[k].len, 0);
+            found = 1;
+          }
 }
 
 int

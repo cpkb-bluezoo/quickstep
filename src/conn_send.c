@@ -784,6 +784,8 @@ assemble (gq_conn *c, int sp, uint64_t now, size_t budget, size_t maxdg,
     return p->len > 0;
   if (conn_can_send_ae (c) || s->probes)
     {
+      if (s->probes)
+        conn_probe_crypto (c, sp);
       add_crypto (c, p);
       if (sp == SP_APP)
         add_app_frames (c, p);

@@ -653,6 +653,61 @@ test_padding_not_in_1rtt (void)
   pair_free (p);
 }
 
+/* Whether the sent packet K carries CRYPTO data.  */
+static int
+sent_has_crypto (const sent_pkt *k)
+{
+  uint32_t i;
+
+  for (i = 0; i < k->nframes; i++)
+    if (k->frames[i].type == SF_CRYPTO)
+      return 1;
+  return 0;
+}
+
+/* RFC 9002 section 6.2.4: a probe in the Initial or Handshake space
+   carries the CRYPTO data still in flight.  A PING-only Initial probe is no
+   use when the first Initial was lost: a server with no connection for it
+   ignores it, and some (aioquic) close on an Initial with no CRYPTO frame.
+   A PTO used to requeue the oldest packet not yet requeued, which after a
+   round or two was one of the PING probes, so some probes had nothing to
+   carry.  Every ack-eliciting Initial the client sends while it hears
+   nothing carries CRYPTO.  */
+static void
+test_handshake_probes_carry_crypto (void)
+{
+  struct pair *p = pair_new (NULL, NULL, 0, 1);
+  gq_conn *c = p->cli.c;
+  space *s = &c->sp[SP_INITIAL];
+  uint64_t now = p->net.now, t, first;
+  size_t i;
+  int round, probes = 0;
+
+  /* The first flight is sent, and lost.  */
+  hand_over (c, p->srv.c, now, 0);
+  CHECK (s->next_pn >= 1);
+  for (round = 0; round < 12 && probes < 6; round++)
+    {
+      /* Packets declared lost leave the list, so go by packet number.  */
+      first = s->next_pn;
+      t = gq_conn_timeout (c);
+      CHECK (t != 0);
+      if (t > now)
+        now = t;
+      gq_conn_on_timeout (c, now);
+      hand_over (c, p->srv.c, now, 0);
+      for (i = 0; i < s->n_sent; i++)
+        if (s->sent[i].pn >= first && s->sent[i].ack_eliciting)
+          {
+            probes++;
+            CHECK (sent_has_crypto (&s->sent[i]));
+          }
+    }
+  /* Not every timer is a probe timeout: some declare packets lost.  */
+  CHECK (probes >= 5);
+  pair_free (p);
+}
+
 /* The first datagram a server sends to a client's new address (RFC 9000
    section 9.3) carries the PATH_CHALLENGE, even when the packets it has in
    flight, all lost with the old address, fill the congestion window.  Only
@@ -3118,6 +3173,7 @@ main (void)
   test_stream_frames_after_the_end ();
   test_server_first_flight_padded ();
   test_padding_not_in_1rtt ();
+  test_handshake_probes_carry_crypto ();
   test_challenge_first_on_new_path ();
   test_window_unused_does_not_grow ();
   test_pacing_deadline ();

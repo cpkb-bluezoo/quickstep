@@ -532,6 +532,7 @@ void loss_detect (gq_conn *c, int sp, uint64_t now);
 uint64_t conn_loss_deadline (const gq_conn *c);
 void on_loss_timeout (gq_conn *c, uint64_t now);
 void requeue_frames (gq_conn *c, int sp, sent_pkt *p);
+void conn_probe_crypto (gq_conn *c, int sp);
 uint64_t pto_interval (const gq_conn *c, int sp);
 int conn_can_send_ae (const gq_conn *c);
 void cc_init (gq_conn *c);
