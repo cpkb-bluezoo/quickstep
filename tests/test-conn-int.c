@@ -589,6 +589,70 @@ test_server_first_flight_padded (void)
   pair_free (p);
 }
 
+/* The packets of a datagram: for each, its size and whether its header is
+   long.  Returns how many; a short header packet runs to the end.  */
+static int
+datagram_packets (const uint8_t *d, size_t len, size_t *size, int *is_long,
+                  int max)
+{
+  size_t off = 0;
+  int n = 0;
+
+  while (off < len && n < max)
+    {
+      size_t used = len - off;
+      gq_long_header h;
+
+      is_long[n] = (d[off] & 0x80) != 0;
+      if (is_long[n])
+        {
+          CHECK_EQ (gq_long_header_parse (d + off, len - off, &h), GQ_OK);
+          used = h.packet_len;
+        }
+      size[n++] = used;
+      off += used;
+    }
+  return n;
+}
+
+/* RFC 9000 section 14.1 only asks for the datagram to be 1200 bytes.  The
+   interop runner's 0-RTT test counts the client's 1-RTT payload, PADDING
+   included, so the padding of the client's third flight (Initial ACK,
+   Handshake Finished and the first 1-RTT packet in one datagram) goes in
+   the Initial packet, which no one counts, and not in the 1-RTT one.  */
+static void
+test_padding_not_in_1rtt (void)
+{
+  struct pair *p = pair_new (NULL, NULL, 0, 1);
+  gq_conn *c = p->cli.c, *s = p->srv.c;
+  uint64_t now = p->net.now;
+  uint8_t buf[2048];
+  size_t len, size[8];
+  int is_long[8], n, k, found = 0;
+
+  hand_over (c, s, now, 1);
+  now += 10000;
+  hand_over (s, c, now, 1);
+  now += 10000;
+  for (k = 0; k < 8; k++)
+    {
+      CHECK_EQ (gq_conn_send_path (c, now, buf, sizeof buf, &len, NULL), GQ_OK);
+      if (len == 0)
+        break;
+      n = datagram_packets (buf, len, size, is_long, 8);
+      if (n >= 2 && is_long[0] && !is_long[n - 1])
+        {
+          found++;
+          CHECK (len >= GQ_MIN_INITIAL_DATAGRAM);
+          /* A 1-RTT packet with a few control frames, not the filler.  */
+          CHECK (size[n - 1] < 300);
+        }
+      gq_conn_recv (s, now, buf, len);
+    }
+  CHECK (found >= 1);
+  pair_free (p);
+}
+
 /* The first datagram a server sends to a client's new address (RFC 9000
    section 9.3) carries the PATH_CHALLENGE, even when the packets it has in
    flight, all lost with the old address, fill the congestion window.  Only
@@ -3053,6 +3117,7 @@ main (void)
   test_persistent_congestion_over_several_rounds ();
   test_stream_frames_after_the_end ();
   test_server_first_flight_padded ();
+  test_padding_not_in_1rtt ();
   test_challenge_first_on_new_path ();
   test_window_unused_does_not_grow ();
   test_pacing_deadline ();

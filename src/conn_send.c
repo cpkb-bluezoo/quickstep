@@ -924,7 +924,12 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
 
   if (pad_to && maxdg >= pad_to)
     {
-      pk *last = pks[n - 1];
+      /* The filler goes in the Initial packet when there is one, which
+         comes first.  A later packet would carry it as payload: the
+         interop runner's 0-RTT test counts the client's 1-RTT payload,
+         and a client's third flight (Initial ACK, Handshake Finished and
+         1-RTT in one datagram) otherwise puts most of 1200 bytes there.  */
+      pk *last = pks[0]->sp == SP_INITIAL ? pks[0] : pks[n - 1];
       size_t t = 0, guard, padded = 0;
 
       for (guard = 0; guard < 3; guard++)
