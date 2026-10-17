@@ -99,6 +99,7 @@ struct pkt
   uint8_t d[2048];
   gq_path from;
   int has_from;
+  int ecn;			/* gq_ecn the datagram arrives with.  */
 };
 
 struct net
@@ -138,6 +139,7 @@ struct net
   void (*snoop) (struct net *, int from, const uint8_t *d, size_t len,
                  void *user);
   void *snoop_user;
+  int mark[2];			/* gq_ecn of what each app sends, as received.  */
   int hold;			/* Stash datagrams to EXT-0 instead of sending.  */
   struct pkt *held[8];
   int n_held;
@@ -561,6 +563,7 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len,
   p->len = len;
   p->from = src;
   p->has_from = has_from;
+  p->ecn = n->mark[from];
   memcpy (p->d, d, len);
   if (n->corrupt && index % n->corrupt == 0)
     p->d[rnd (n) % len] ^= 0x20;
@@ -677,8 +680,9 @@ run (struct net *n, int (*done) (struct net *), uint64_t budget_us)
               continue;
             }
           if (n->app[p.to]->c)
-            gq_conn_recv_path (n->app[p.to]->c, n->now,
-                               p.has_from ? &p.from : NULL, p.d, p.len);
+            gq_conn_recv_ecn (n->app[p.to]->c, n->now,
+                              p.has_from ? &p.from : NULL, p.ecn, p.d,
+                              p.len);
           continue;
         }
       for (s = 0; s < 2; s++)

@@ -38,8 +38,9 @@ int test_conn_main (void);
 
 #include "../src/conn_int.h"
 
-/* The spin bit forge puts in its packets.  */
-static int forge_spin;
+/* The spin bit forge puts in its packets, and the ECN field they arrive
+   with.  */
+static int forge_spin, forge_ecn;
 
 /* Seal FR (N frames) as a 1-RTT packet from FROM to TO, with FROM's keys and
    next packet number.  FROM is not asked to send anything itself.  BAD flips
@@ -69,10 +70,7 @@ forge (gq_conn *from, gq_conn *to, uint64_t now, const gq_path *from_path,
                             &out), GQ_OK);
   if (bad)
     pkt[out - 1] ^= 1;
-  if (from_path)
-    gq_conn_recv_path (to, now, from_path, pkt, out);
-  else
-    gq_conn_recv (to, now, pkt, out);
+  gq_conn_recv_ecn (to, now, from_path, forge_ecn, pkt, out);
 }
 
 /* A connected pair, settled: nothing more to say on either side.  */
@@ -1079,6 +1077,286 @@ test_spin_bit_qlog (void)
   pair_free (p);
 }
 
+/* The ECN counts of the newest 1-RTT ACK frame END's qlog has for a packet
+   it sent (EVENT is packet_sent) or received.  1 if there was one.  */
+static int
+last_ack_ecn (const struct qsink *k, const char *event, uint64_t v[3])
+{
+  size_t i, f;
+
+  for (i = k->n; i-- > 0;)
+    {
+      qline q;
+
+      if (strcmp (k->e[i].name, event)
+          || !qline_parse (k->e[i].fields, strlen (k->e[i].fields), &q))
+        continue;
+      if (qline_is (&q, "header.packet_type", "1RTT"))
+        for (f = 0; f < 8; f++)
+          {
+            char key[48];
+            const char *t;
+
+            snprintf (key, sizeof key, "frames.%zu.frame_type", f);
+            t = qline_get (&q, key);
+            if (t && !strcmp (t, "ack"))
+              {
+                const char *e0, *e1, *ce;
+
+                snprintf (key, sizeof key, "frames.%zu.ect0", f);
+                e0 = qline_get (&q, key);
+                snprintf (key, sizeof key, "frames.%zu.ect1", f);
+                e1 = qline_get (&q, key);
+                snprintf (key, sizeof key, "frames.%zu.ce", f);
+                ce = qline_get (&q, key);
+                if (e0 && e1 && ce)
+                  {
+                    v[0] = strtoull (e0, NULL, 10);
+                    v[1] = strtoull (e1, NULL, 10);
+                    v[2] = strtoull (ce, NULL, 10);
+                    qline_free (&q);
+                    return 1;
+                  }
+                qline_free (&q);
+                return 0;
+              }
+          }
+      qline_free (&q);
+    }
+  return 0;
+}
+
+/* A PING from FROM to TO carrying ECN.  */
+static void
+ecn_ping (gq_conn *from, gq_conn *to, uint64_t now, const gq_path *path,
+          int ecn)
+{
+  gq_frame f;
+
+  memset (&f, 0, sizeof f);
+  f.type = GQ_FRAME_PING;
+  forge_ecn = ecn;
+  forge (from, to, now, path, &f, 1, 0);
+  forge_ecn = 0;
+}
+
+/* RFC 9000 section 13.4.1: each packet's ECN codepoint is counted in its
+   packet number space, a duplicate or an invalid packet not at all, the
+   counts go back in ACK frames (type 0x03), and RFC 9000 section 13.2.1: one
+   marked CE is acknowledged without delay.  */
+static void
+test_ecn_receive_counts (void)
+{
+  struct pair *p;
+  gq_conn *cli, *srv;
+  space *cs, *ss;
+  gq_path to_srv;
+  uint64_t v[3], pn, now;
+  uint8_t buf[1500];
+  size_t len;
+  gq_conn_stats st;
+  int i;
+
+  p = pair_new_paths (&(gq_conn_config) { 0 }, &(gq_conn_config) { 0 }, 63);
+  settle (p);
+  cli = p->cli.c;
+  srv = p->srv.c;
+  cs = &cli->sp[SP_APP];
+  ss = &srv->sp[SP_APP];
+  to_srv.local = p->net.S;
+  to_srv.remote = p->net.m[0].ext;
+  p->qlog_sink[1].keep = 1;
+  memset (ss->ecn_in, 0, sizeof ss->ecn_in);
+  now = p->net.now;
+
+  /* Three ECT(0), two ECT(1), one CE, and one without a codepoint.  */
+  for (i = 0; i < 3; i++)
+    ecn_ping (cli, srv, now, &to_srv, GQ_ECN_ECT0);
+  for (i = 0; i < 2; i++)
+    ecn_ping (cli, srv, now, &to_srv, GQ_ECN_ECT1);
+  ecn_ping (cli, srv, now, &to_srv, GQ_ECN_CE);
+  ecn_ping (cli, srv, now, &to_srv, GQ_ECN_NOT_ECT);
+  CHECK_EQ (ss->ecn_in[0], 3);
+  CHECK_EQ (ss->ecn_in[1], 2);
+  CHECK_EQ (ss->ecn_in[2], 1);
+  gq_conn_get_stats (srv, &st);
+  CHECK_EQ (st.ecn_ect0_received, 3);
+  CHECK_EQ (st.ecn_ect1_received, 2);
+  CHECK_EQ (st.ecn_ce_received, 1);
+
+  /* The same packet number again is a duplicate: not counted.  */
+  pn = cs->next_pn;
+  cs->next_pn = pn - 1;
+  ecn_ping (cli, srv, now, &to_srv, GQ_ECN_ECT0);
+  cs->next_pn = pn;
+  CHECK_EQ (ss->ecn_in[0], 3);
+  /* One that does not authenticate is not counted either.  */
+  {
+    gq_frame f;
+
+    memset (&f, 0, sizeof f);
+    f.type = GQ_FRAME_PING;
+    forge_ecn = GQ_ECN_CE;
+    forge (cli, srv, now, &to_srv, &f, 1, 1);
+    forge_ecn = 0;
+  }
+  CHECK_EQ (ss->ecn_in[2], 1);
+
+  /* The ACK the server sends carries the counts.  */
+  gq_conn_on_timeout (srv, now + 50000);
+  CHECK_EQ (gq_conn_send (srv, now + 50000, buf, sizeof buf, &len), GQ_OK);
+  CHECK (len > 0);
+  CHECK (last_ack_ecn (&p->qlog_sink[1], "quic:packet_sent", v));
+  CHECK_EQ (v[0], 3);
+  CHECK_EQ (v[1], 2);
+  CHECK_EQ (v[2], 1);
+  pair_free (p);
+
+  /* Without a codepoint on anything, the ACK is the plain type.  */
+  p = pair_new_paths (&(gq_conn_config) { 0 }, &(gq_conn_config) { 0 }, 64);
+  settle (p);
+  p->qlog_sink[1].keep = 1;
+  to_srv.local = p->net.S;
+  to_srv.remote = p->net.m[0].ext;
+  now = p->net.now;
+  ecn_ping (p->cli.c, p->srv.c, now, &to_srv, GQ_ECN_NOT_ECT);
+  ecn_ping (p->cli.c, p->srv.c, now, &to_srv, GQ_ECN_NOT_ECT);
+  gq_conn_on_timeout (p->srv.c, now + 50000);
+  CHECK_EQ (gq_conn_send (p->srv.c, now + 50000, buf, sizeof buf, &len),
+            GQ_OK);
+  CHECK (len > 0);
+  CHECK (!last_ack_ecn (&p->qlog_sink[1], "quic:packet_sent", v));
+  pair_free (p);
+
+  /* A value that is not a codepoint.  */
+  p = pair_new_paths (&(gq_conn_config) { 0 }, &(gq_conn_config) { 0 }, 65);
+  settle (p);
+  buf[0] = 0;
+  CHECK_EQ (gq_conn_recv_ecn (p->srv.c, p->net.now, NULL, 4, buf, 1),
+            GQ_ERR_INVAL);
+  CHECK_EQ (gq_conn_recv_ecn (p->srv.c, p->net.now, NULL, -1, buf, 1),
+            GQ_ERR_INVAL);
+  pair_free (p);
+}
+
+/* A packet marked CE is acknowledged at once; one with ECT(0), a lone
+   packet in order, waits for the delay as any other.  */
+static void
+test_ecn_ce_acked_at_once (void)
+{
+  int ecn;
+
+  for (ecn = GQ_ECN_NOT_ECT; ecn <= GQ_ECN_CE; ecn++)
+    {
+      struct pair *p;
+      gq_path to_srv;
+
+      p = pair_new_paths (&(gq_conn_config) { 0 }, &(gq_conn_config) { 0 },
+                          66);
+      settle (p);
+      to_srv.local = p->net.S;
+      to_srv.remote = p->net.m[0].ext;
+      p->srv.c->sp[SP_APP].ack_now = 0;
+      p->srv.c->sp[SP_APP].ae_since_ack = 0;
+      ecn_ping (p->cli.c, p->srv.c, p->net.now, &to_srv, ecn);
+      CHECK_EQ (p->srv.c->sp[SP_APP].ack_now, ecn == GQ_ECN_CE);
+      pair_free (p);
+    }
+}
+
+/* Everything the server sends arrives marked ECT(0): the client counts
+   them, says so in its ACK frames, the counts only grow, and the log shows
+   the codepoint of each datagram.  */
+static void
+test_ecn_receive_transfer (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  struct sbuf *s;
+  uint64_t id, last[3] = { 0, 0, 0 }, v[3];
+  gq_conn_stats st;
+  size_t i, n, marked = 0;
+  const struct qsink *k;
+
+  memset (&cfg, 0, sizeof cfg);
+  p = pair_new (&cfg, &cfg, 0, 67);
+  p->qlog_sink[0].keep = p->qlog_sink[1].keep = 1;
+  p->net.mark[1] = GQ_ECN_ECT0;
+  p->srv.respond = 200000;
+  CHECK (run (&p->net, both_connected, 30000000));
+  CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+  s = sb_get (&p->cli, id);
+  s->out_total = 10;
+  s->out_fin = 1;
+  CHECK (wait_for_stream (p, s, 200000, 30000000));
+  run (&p->net, NULL, 500000);
+  CHECK_EQ (p->cli.bad + p->srv.bad, 0);
+  gq_conn_get_stats (p->cli.c, &st);
+  CHECK (st.ecn_ect0_received > 100);
+  CHECK_EQ (st.ecn_ect1_received + st.ecn_ce_received, 0);
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK_EQ (st.ecn_ect0_received + st.ecn_ect1_received
+            + st.ecn_ce_received, 0);
+  /* What the server heard from the client, newest last: it only grows.  */
+  k = &p->qlog_sink[1];
+  n = qsink_count (k, "quic:packet_received");
+  for (i = 0; i < n; i++)
+    {
+      qline q;
+      size_t f;
+
+      CHECK (qsink_nth (k, "quic:packet_received", i, &q));
+      for (f = 0; f < 8; f++)
+        {
+          char key[48];
+          const char *e0;
+
+          snprintf (key, sizeof key, "frames.%zu.ect0", f);
+          if ((e0 = qline_get (&q, key)) != NULL)
+            {
+              uint64_t x = strtoull (e0, NULL, 10);
+
+              CHECK (x >= last[0] || qline_is (&q, "header.packet_type",
+                                               "handshake"));
+              if (qline_is (&q, "header.packet_type", "1RTT"))
+                last[0] = x;
+            }
+        }
+      qline_free (&q);
+    }
+  CHECK (last[0] > 0);
+  CHECK (last_ack_ecn (&p->qlog_sink[1], "quic:packet_received", v));
+  CHECK_EQ (v[1] + v[2], 0);
+  /* The client's log names the codepoint of the datagrams it received.  */
+  k = &p->qlog_sink[0];
+  n = qsink_count (k, "quic:udp_datagrams_received");
+  for (i = 0; i < n; i++)
+    {
+      qline q;
+
+      CHECK (qsink_nth (k, "quic:udp_datagrams_received", i, &q));
+      if (qline_is (&q, "ecn", "ECT(0)"))
+        marked++;
+      else
+        CHECK (qline_is (&q, "ecn", "Not-ECT"));
+      qline_free (&q);
+    }
+  CHECK (marked > 100);
+  CHECK_EQ (k->bad_event + k->bad_line, 0);
+  /* The server's own datagrams are not marked and say nothing of it.  */
+  k = &p->qlog_sink[1];
+  n = qsink_count (k, "quic:udp_datagrams_sent");
+  for (i = 0; i < n; i++)
+    {
+      qline q;
+
+      CHECK (qsink_nth (k, "quic:udp_datagrams_sent", i, &q));
+      CHECK (qline_get (&q, "ecn") == NULL);
+      qline_free (&q);
+    }
+  pair_free (p);
+}
+
 int
 main (void)
 {
@@ -1107,6 +1385,9 @@ main (void)
   test_spin_bit ();
   test_spin_bit_disabled ();
   test_spin_bit_qlog ();
+  test_ecn_receive_counts ();
+  test_ecn_ce_acked_at_once ();
+  test_ecn_receive_transfer ();
   TST_DONE ();
 }
 

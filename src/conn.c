@@ -888,6 +888,7 @@ conn_alloc (enum gq_role role, const gq_conn_config *config,
   if (c == NULL)
     return NULL;
   c->role = role;
+  c->rx_ecn = -1;
   c->state = GQ_CONN_HANDSHAKE;
   if (config)
     c->cfg = *config;
@@ -1311,11 +1312,15 @@ gq_conn_get_stats (const gq_conn *c, gq_conn_stats *st)
   st->datagrams_sent = c->datagrams_sent;
   st->datagrams_received = c->datagrams_received;
   st->datagrams_dropped = c->datagrams_dropped;
+  st->ecn_ect0_received = c->ecn_in[0];
+  st->ecn_ect1_received = c->ecn_in[1];
+  st->ecn_ce_received = c->ecn_in[2];
 }
 
-int
-gq_conn_recv_path (gq_conn *c, uint64_t now_us, const gq_path *from,
-                   uint8_t *data, size_t len)
+/* ECN is a gq_ecn, or -1 when the caller does not say.  */
+static int
+recv_datagram (gq_conn *c, uint64_t now_us, const gq_path *from, int ecn,
+               uint8_t *data, size_t len)
 {
   int r;
 
@@ -1328,11 +1333,30 @@ gq_conn_recv_path (gq_conn *c, uint64_t now_us, const gq_path *from,
       conn_path_rx_end (c);
       return GQ_OK;
     }
+  c->rx_ecn = (int8_t) ecn;
   r = conn_receive_datagram (c, now_us, data, len);
+  c->rx_ecn = -1;
   conn_path_rx_end (c);
   ql_after (c);
   return r;
 }
+
+int
+gq_conn_recv_ecn (gq_conn *c, uint64_t now_us, const gq_path *from, int ecn,
+                  uint8_t *data, size_t len)
+{
+  if (ecn < GQ_ECN_NOT_ECT || ecn > GQ_ECN_CE)
+    return GQ_ERR_INVAL;
+  return recv_datagram (c, now_us, from, ecn, data, len);
+}
+
+int
+gq_conn_recv_path (gq_conn *c, uint64_t now_us, const gq_path *from,
+                   uint8_t *data, size_t len)
+{
+  return recv_datagram (c, now_us, from, -1, data, len);
+}
+
 
 int
 gq_conn_recv (gq_conn *c, uint64_t now_us, uint8_t *data, size_t len)

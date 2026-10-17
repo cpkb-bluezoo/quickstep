@@ -218,6 +218,7 @@ typedef struct qlog_conn
   uint8_t started, hs_started, validated, closed;
   uint8_t pending_dgram;	/* A datagram came before the log began.  */
   size_t pending_len;
+  int pending_ecn;		/* Its ECN codepoint, or -1: not known.  */
   uint8_t have_dcid;
   uint8_t dcid[20];
   uint8_t dcid_len;

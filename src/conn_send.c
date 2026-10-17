@@ -239,6 +239,15 @@ add_ack (gq_conn *c, pk *p, uint64_t now)
   f.u.ack.range_count = n - 1;
   f.u.ack.ranges.data = enc;
   f.u.ack.ranges.len = w;
+  /* Once a packet has come with a codepoint, the ACK frames say how many
+     (RFC 9000 section 13.4.1).  */
+  if (s->ecn_in[0] || s->ecn_in[1] || s->ecn_in[2])
+    {
+      f.u.ack.has_ecn = 1;
+      f.u.ack.ect0 = s->ecn_in[0];
+      f.u.ack.ect1 = s->ecn_in[1];
+      f.u.ack.ecn_ce = s->ecn_in[2];
+    }
   if (add (p, &f, 0, NULL) == 0)
     {
       p->ack_valid = 1;
@@ -990,7 +999,7 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
       return r;
     }
   *len = total;
-  ql_datagram (c, QE_UDP_DATAGRAMS_SENT, did, total);
+  ql_datagram (c, QE_UDP_DATAGRAMS_SENT, did, total, -1);
   conn_path_note_sent (c, dest, total);
   c->st.bytes_sent += total;
   if (c->state == GQ_CONN_CLOSING)

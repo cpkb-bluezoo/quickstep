@@ -384,6 +384,25 @@ int gq_conn_recv (gq_conn *c, uint64_t now_us, uint8_t *data, size_t len);
    path) go elsewhere and must be sent there exactly.  */
 int gq_conn_recv_path (gq_conn *c, uint64_t now_us, const gq_path *from,
                        uint8_t *data, size_t len);
+
+/* Explicit Congestion Notification (RFC 9000 section 13.4).  The library
+   does not touch sockets, so the application passes on the ECN field of the
+   IP header of each datagram it receives: one of gq_ecn.  */
+enum gq_ecn
+{
+  GQ_ECN_NOT_ECT = 0,		/* Not ECN-capable transport.  */
+  GQ_ECN_ECT1 = 1,		/* ECN-capable transport (1).  */
+  GQ_ECN_ECT0 = 2,		/* ECN-capable transport (0).  */
+  GQ_ECN_CE = 3			/* Congestion experienced.  */
+};
+
+/* As gq_conn_recv_path, with the ECN field of the datagram.  The packets in
+   it are counted by codepoint for the ACK frames that go back to the peer
+   (section 13.4.1), and one marked CE is acknowledged at once.  Returns
+   GQ_ERR_INVAL if ECN is not one of gq_ecn.  gq_conn_recv and
+   gq_conn_recv_path are this with GQ_ECN_NOT_ECT.  */
+int gq_conn_recv_ecn (gq_conn *c, uint64_t now_us, const gq_path *from,
+                      int ecn, uint8_t *data, size_t len);
 int gq_conn_send_path (gq_conn *c, uint64_t now_us, uint8_t *out, size_t cap,
                        size_t *len, gq_path *to);
 
@@ -553,6 +572,8 @@ typedef struct gq_conn_stats
   unsigned pto_count;
   uint64_t path_validations, path_failures, migrations;
   uint64_t datagrams_sent, datagrams_received, datagrams_dropped;
+  /* Packets received with each ECN codepoint, in all packet number spaces.  */
+  uint64_t ecn_ect0_received, ecn_ect1_received, ecn_ce_received;
 } gq_conn_stats;
 
 void gq_conn_get_stats (const gq_conn *c, gq_conn_stats *st);

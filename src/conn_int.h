@@ -119,6 +119,7 @@ typedef struct space
     uint64_t pn, largest;	/* The packet, and what its ACK frame named.  */
   } ack_sent[ACK_SENT_MAX];
   unsigned n_ack_sent;
+  uint64_t ecn_in[3];		/* Received with ECT(0), ECT(1), CE.  */
 } space;
 
 typedef struct lcid
@@ -253,6 +254,9 @@ struct gq_conn
   uint8_t w_phase_acked;
   uint64_t rk_prev_until;	/* When the previous phase's read keys go.  */
   uint64_t aead_failed;		/* Packets that failed authentication.  */
+  int8_t rx_ecn;		/* ECN field of the datagram being processed
+				   (a gq_ecn), or -1 if we are not told.  */
+  uint64_t ecn_in[3];		/* Packets received with ECT(0), ECT(1), CE.  */
   uint8_t spin_on;		/* The spin bit is in use (else random).  */
   uint8_t spin_val;		/* The value the next packet carries.  */
   uint64_t spin_bits, spin_nbits;	/* Random bits for when it is off.  */
@@ -415,7 +419,7 @@ void ql_frames_add (char *buf, size_t cap, size_t *len, unsigned *n,
                     const gq_frame *f, unsigned ack_delay_exp, size_t raw_max);
 void ql_frames_add_padding (char *buf, size_t cap, size_t *len, unsigned *n,
                             size_t pad);
-void ql_datagram (gq_conn *c, int ev, uint32_t id, size_t len);
+void ql_datagram (gq_conn *c, int ev, uint32_t id, size_t len, int ecn);
 void ql_rx_datagram (gq_conn *c, size_t len);
 void ql_datagram_dropped (gq_conn *c, size_t len);
 void ql_packet_sent (gq_conn *c, const qlog_hdr *h, size_t raw_len,
