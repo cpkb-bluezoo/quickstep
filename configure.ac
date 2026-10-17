@@ -90,8 +90,10 @@ AS_IF([test "x$with_gnutls" != xno],
       dnl Without its enumerators the schemes are simply not available.
       gq_save_CPPFLAGS=$CPPFLAGS
       CPPFLAGS="$CPPFLAGS $GNUTLS_CFLAGS"
-      AC_CHECK_DECLS([GNUTLS_PK_MLDSA65, GNUTLS_SIGN_MLDSA65], [], [],
-                     [[#include <gnutls/gnutls.h>]])
+      AC_CHECK_DECLS([GNUTLS_PK_MLDSA65, GNUTLS_SIGN_MLDSA65,
+                     GNUTLS_PKCS_MLDSA_SEED, GNUTLS_PKCS_MLDSA_EXPANDED], [], [],
+                     [[#include <gnutls/gnutls.h>
+#include <gnutls/x509.h>]])
       CPPFLAGS=$gq_save_CPPFLAGS],
      [AC_MSG_ERROR([GnuTLS >= 3.8.0 not found; use --without-gnutls to build without certificate validation])])])
 GNUTLS_PC_REQUIRES=

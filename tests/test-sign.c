@@ -45,7 +45,8 @@ static const unsigned all_schemes[] = {
   GQ_SIG_ECDSA_SECP256R1_SHA256, GQ_SIG_ECDSA_SECP384R1_SHA384,
   GQ_SIG_RSA_PSS_RSAE_SHA256, GQ_SIG_RSA_PSS_RSAE_SHA384,
   GQ_SIG_RSA_PSS_RSAE_SHA512, GQ_SIG_ED25519,
-  GQ_SIG_RSA_PKCS1_SHA256, GQ_SIG_RSA_PKCS1_SHA384, GQ_SIG_RSA_PKCS1_SHA512
+  GQ_SIG_RSA_PKCS1_SHA256, GQ_SIG_RSA_PKCS1_SHA384, GQ_SIG_RSA_PKCS1_SHA512,
+  GQ_SIG_MLDSA44, GQ_SIG_MLDSA65, GQ_SIG_MLDSA87
 };
 
 static const char message[] = "TLS 1.3, server CertificateVerify";
@@ -204,57 +205,108 @@ test_weak_rsa (void)
   tst_free_cert (&c);
 }
 
+#if TST_HAVE_MLDSA
+
+static const struct
+{
+  enum tst_key kind;
+  unsigned scheme;
+  size_t size;			/* The signature, FIPS 204 table 2.  */
+} mldsa_kinds[] = {
+  { TST_MLDSA44, GQ_SIG_MLDSA44, 2420 },
+  { TST_MLDSA65, GQ_SIG_MLDSA65, 3309 },
+  { TST_MLDSA87, GQ_SIG_MLDSA87, 4627 }
+};
+
+/* One ML-DSA parameter set: the checks every key gets (a signature checks,
+   any change or truncation of it or of the message does not, the other
+   schemes are refused), the size of the signature, and a private key in
+   each of the encodings RFC 9881 gives it: the seed, the expanded key, or
+   both.  */
+static void
+test_mldsa_key (enum tst_key kind, unsigned scheme, size_t size)
+{
+  static const unsigned flags[] = {
+    0,				/* GnuTLS's default: both, if it has the seed.  */
+#if HAVE_DECL_GNUTLS_PKCS_MLDSA_SEED && HAVE_DECL_GNUTLS_PKCS_MLDSA_EXPANDED
+    GNUTLS_PKCS_MLDSA_SEED, GNUTLS_PKCS_MLDSA_EXPANDED,
+    GNUTLS_PKCS_MLDSA_SEED | GNUTLS_PKCS_MLDSA_EXPANDED
+#endif
+  };
+  unsigned fit[1];
+  struct tst_cert c;
+  gq_privkey *priv, *k;
+  gq_pubkey *pub;
+  uint8_t sig[GQ_SIGNATURE_MAX];
+  size_t n, i;
+
+  fit[0] = scheme;
+  CHECK (gq_sigscheme_available (scheme));
+  test_key (kind, fit, 1);
+
+  load (kind, &c, &priv, &pub);
+  if (priv == NULL || pub == NULL)
+    return;
+  CHECK_EQ (gq_privkey_sign (priv, scheme, message, sizeof message, sig,
+                             sizeof sig, &n), GQ_OK);
+  CHECK_EQ (n, size);
+
+  for (i = 0; i < sizeof flags / sizeof flags[0]; i++)
+    {
+      gnutls_datum_t pem;
+
+      CHECK_EQ (gnutls_x509_privkey_export2_pkcs8 (c.key,
+                                                   GNUTLS_X509_FMT_PEM, NULL,
+                                                   flags[i], &pem), 0);
+      if (gq_privkey_from_pem (&k, pem.data, pem.size) != GQ_OK)
+        {
+          fprintf (stderr, "private key encoding 0x%x not loaded\n", flags[i]);
+          tst_failures++;
+        }
+      else
+        {
+          CHECK (gq_privkey_supports (k, scheme));
+          CHECK_EQ (gq_privkey_sign (k, scheme, message, sizeof message, sig,
+                                     sizeof sig, &n), GQ_OK);
+          CHECK_EQ (n, size);
+          CHECK_EQ (gq_pubkey_verify (pub, scheme, message, sizeof message,
+                                      sig, n), GQ_OK);
+          gq_privkey_free (k);
+        }
+      gnutls_free (pem.data);
+    }
+
+  gq_privkey_free (priv);
+  gq_pubkey_free (pub);
+  tst_free_cert (&c);
+}
+
+#endif /* TST_HAVE_MLDSA */
+
 /* GQ_SIGNATURE_MAX is documented as always enough; ML-DSA signatures are
    several kilobytes (FIPS 204: 2420, 3309 and 4627 octets), and the engines
-   sign into buffers of that size.  */
+   sign into buffers of that size.  The signing itself needs a GnuTLS with
+   an ML-DSA backend: where the build says it has one (GQ_EXPECT_MLDSA), its
+   absence fails the test.  */
 static void
-test_mldsa_size (void)
+test_mldsa (void)
 {
-#if !(HAVE_DECL_GNUTLS_PK_MLDSA65 && HAVE_DECL_GNUTLS_SIGN_MLDSA65)
-  /* A GnuTLS without ML-DSA: nothing offers it.  */
   CHECK (GQ_SIGNATURE_MAX >= 4627);
+#if !TST_HAVE_MLDSA
+  /* A GnuTLS that does not even name ML-DSA: nothing offers it.  */
   CHECK (!gq_sigscheme_available (GQ_SIG_MLDSA65));
+  tst_mldsa_ready (0, "the ML-DSA signature tests");
 #else
-  static const struct
   {
-    unsigned scheme;
-    gnutls_pk_algorithm_t pk;
-    size_t size;
-  } kinds[] = {
-    { GQ_SIG_MLDSA44, GNUTLS_PK_MLDSA44, 2420 },
-    { GQ_SIG_MLDSA65, GNUTLS_PK_MLDSA65, 3309 },
-    { GQ_SIG_MLDSA87, GNUTLS_PK_MLDSA87, 4627 }
-  };
-  size_t i;
+    size_t i;
 
-  /* Whatever the backend: the buffer must hold the largest signature.  */
-  CHECK (GQ_SIGNATURE_MAX >= 4627);
-  for (i = 0; i < sizeof kinds / sizeof kinds[0]; i++)
-    {
-      gnutls_x509_privkey_t key;
-      gnutls_datum_t pem;
-      gq_privkey *priv;
-      uint8_t sig[GQ_SIGNATURE_MAX];
-      size_t n = 0;
-
-      if (!gq_sigscheme_available (kinds[i].scheme))
-        {
-          fprintf (stderr, "note: no ML-DSA here; skipped\n");
-          return;
-        }
-      CHECK_EQ (gnutls_x509_privkey_init (&key), 0);
-      CHECK_EQ (gnutls_x509_privkey_generate (key, kinds[i].pk, 0, 0), 0);
-      CHECK_EQ (gnutls_x509_privkey_export2_pkcs8 (key, GNUTLS_X509_FMT_PEM,
-                                                   NULL, GNUTLS_PKCS_PLAIN,
-                                                   &pem), 0);
-      CHECK_EQ (gq_privkey_from_pem (&priv, pem.data, pem.size), GQ_OK);
-      CHECK_EQ (gq_privkey_sign (priv, kinds[i].scheme, message,
-                                 sizeof message, sig, sizeof sig, &n), GQ_OK);
-      CHECK_EQ (n, kinds[i].size);
-      gq_privkey_free (priv);
-      gnutls_free (pem.data);
-      gnutls_x509_privkey_deinit (key);
-    }
+    if (!tst_mldsa_ready (gq_sigscheme_available (GQ_SIG_MLDSA65),
+                          "the ML-DSA signature tests"))
+      return;
+    for (i = 0; i < sizeof mldsa_kinds / sizeof mldsa_kinds[0]; i++)
+      test_mldsa_key (mldsa_kinds[i].kind, mldsa_kinds[i].scheme,
+                      mldsa_kinds[i].size);
+  }
 #endif
 }
 
@@ -277,7 +329,7 @@ main (void)
   test_key (TST_RSA2048, rsa, 6);
   test_policy_and_errors ();
   test_weak_rsa ();
-  test_mldsa_size ();
+  test_mldsa ();
   TST_DONE ();
 }
 

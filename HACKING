@@ -79,6 +79,16 @@ Each skips itself (exit 77) when what it needs is missing.  Set
 GQ_NO_INTEROP=1 to skip the interop scripts, or OPENSSL / GNUTLS_SERV to
 choose the binaries.
 
+ML-DSA needs a GnuTLS built with leancrypto (./configure --with-leancrypto);
+the distributions' GnuTLS does not have it, so the ML-DSA unit tests (in
+test-sign, test-trust, test-tls-server and test-conn) note that they are
+skipped.  A skipped test must not look like a passing one where the backend
+is meant to be there: with GQ_EXPECT_MLDSA=1 in the environment they fail
+instead.  CI runs them that way in the "ML-DSA" job, built by the
+check-mldsa target of integration/quic-interop-runner/Dockerfile:
+
+  docker build --target check-mldsa -f integration/quic-interop-runner/Dockerfile .
+
 Copyright assignment
 --------------------
 

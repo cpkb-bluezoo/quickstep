@@ -28,9 +28,14 @@
 #include <gnutls/abstract.h>
 #include <gnutls/x509.h>
 
+/* Does the GnuTLS we build against name ML-DSA at all?  (Whether it can do
+   it is another matter: gq_sigscheme_available.)  */
+#define TST_HAVE_MLDSA (HAVE_DECL_GNUTLS_PK_MLDSA65 && HAVE_DECL_GNUTLS_SIGN_MLDSA65)
+
 enum tst_key
 {
-  TST_ECDSA256, TST_ECDSA384, TST_ED25519, TST_RSA2048, TST_RSA1024
+  TST_ECDSA256, TST_ECDSA384, TST_ED25519, TST_RSA2048, TST_RSA1024,
+  TST_MLDSA44, TST_MLDSA65, TST_MLDSA87
 };
 
 struct tst_cert
@@ -64,6 +69,17 @@ tst_make_cert_eku (struct tst_cert *out, enum tst_key kind, const char *cn,
       break;
     case TST_RSA2048: pk = GNUTLS_PK_RSA; bits = 2048; break;
     case TST_RSA1024: pk = GNUTLS_PK_RSA; bits = 1024; break;
+#if TST_HAVE_MLDSA
+    case TST_MLDSA44: pk = GNUTLS_PK_MLDSA44; bits = 0; dig = GNUTLS_DIG_UNKNOWN;
+      break;
+    case TST_MLDSA65: pk = GNUTLS_PK_MLDSA65; bits = 0; dig = GNUTLS_DIG_UNKNOWN;
+      break;
+    case TST_MLDSA87: pk = GNUTLS_PK_MLDSA87; bits = 0; dig = GNUTLS_DIG_UNKNOWN;
+      break;
+#else
+    case TST_MLDSA44: case TST_MLDSA65: case TST_MLDSA87:
+      return GNUTLS_E_UNIMPLEMENTED_FEATURE;
+#endif
     }
 
   gnutls_x509_privkey_init (&out->key);

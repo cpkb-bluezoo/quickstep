@@ -729,6 +729,7 @@ assemble_early (gq_conn *c, uint64_t now, size_t budget, pk *p)
     return 0;
   p->sp = SP_APP;
   p->early = 1;
+  p->pmtu_probe = 0;
   p->len = 0;
   p->nsf = 0;
   p->ae = 0;
@@ -757,6 +758,9 @@ assemble (gq_conn *c, int sp, uint64_t now, size_t budget, size_t maxdg,
     return 0;
   memset (&p->sf, 0, 0);
   p->sp = sp;
+  p->pmtu_probe = 0;	/* The storage is not cleared: only build_pmtu_probe
+			   makes a probe, and loss does not resend a probe's
+			   frames (conn_loss.c).  */
   p->len = 0;
   p->nsf = 0;
   p->ae = 0;

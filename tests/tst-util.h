@@ -67,6 +67,30 @@ tst_unhex (const char *hex, uint8_t *out, size_t cap)
   return n;
 }
 
+/* The ML-DSA tests need a GnuTLS with an ML-DSA backend (leancrypto), which
+   most builds lack.  Where one is expected, the CI job that builds it sets
+   GQ_EXPECT_MLDSA, and then a missing backend is a failure: a test that
+   skipped itself must not look like one that passed.  AVAILABLE is whether
+   the backend works; the result is whether the caller may go on to run
+   WHAT.  */
+static inline int
+tst_mldsa_ready (int available, const char *what)
+{
+  const char *e = getenv ("GQ_EXPECT_MLDSA");
+
+  if (available)
+    return 1;
+  if (e != NULL && *e != '\0' && strcmp (e, "0") != 0)
+    {
+      fprintf (stderr, "%s: GQ_EXPECT_MLDSA is set but this GnuTLS has no "
+               "ML-DSA backend\n", what);
+      tst_failures++;
+      return 0;
+    }
+  fprintf (stderr, "note: no ML-DSA here; %s skipped\n", what);
+  return 0;
+}
+
 /* Decode a NULL-terminated list of hex pieces (see vectors-mlkem.h) into
    OUT, one after the other; returns the byte count.  */
 static inline size_t

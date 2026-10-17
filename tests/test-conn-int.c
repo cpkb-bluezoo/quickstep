@@ -2998,11 +2998,47 @@ test_preferred_address_declined_then_taken (void)
   pair_free (p);
 }
 
+/* The packets a connection sends in the ordinary way are not path MTU
+   probes, whatever the heap held when they were made: the mark is part of
+   the storage a packet is assembled in, which is not cleared.  Looked at
+   while the first flights are still unacknowledged (the latency is 10 ms
+   each way, so the client's Initial packets are known to the server and
+   the server's flight is on its way).  */
+static void
+test_ordinary_packets_are_not_mtu_probes (void)
+{
+  struct pair *p;
+  gq_conn_config cfg;
+  int k, s;
+  size_t j, seen[2] = { 0, 0 };
+
+  memset (&cfg, 0, sizeof cfg);
+  g_server_ident = &fx_rsa;
+  p = pair_new (&cfg, &cfg, 0, 1);
+  g_server_ident = NULL;
+  run (&p->net, NULL, 15000);
+  for (k = 0; k < 2; k++)
+    for (s = 0; s < N_SPACES; s++)
+      {
+        const space *sp = &(k ? p->srv.c : p->cli.c)->sp[s];
+
+        for (j = 0; j < sp->n_sent; j++)
+          {
+            CHECK_EQ (sp->sent[j].pmtu_probe, 0);
+            seen[k]++;
+          }
+      }
+  CHECK (seen[0] >= 2 && seen[1] >= 4);	/* There was something to look at.  */
+  pair_free (p);
+}
+
 int
 main (void)
 {
+  perturb_allocations ();
   gq_crypto_init ();
   fx_setup ();
+  test_ordinary_packets_are_not_mtu_probes ();
   test_retired_cid_on_all_paths ();
   test_pto_backoff_kept_until_validated ();
   test_blackout_is_not_persistent_congestion ();

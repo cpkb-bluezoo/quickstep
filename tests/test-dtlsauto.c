@@ -519,10 +519,14 @@ main (void)
         one (D13, D12, front, lose, 0);
         one (D12, D13, front, lose, 0);
       }
+  /* Every fourth datagram is lost, not every third: the hello is sent in
+     three datagrams each time (more than two, once the hello offers ML-DSA
+     schemes), and with every third lost the same one of them would be lost
+     for ever, whatever the retransmissions.  */
   big_ticket (0, 0);
-  big_ticket (0, 3);
+  big_ticket (0, 4);
   big_ticket (1, 0);
-  big_ticket (1, 3);
+  big_ticket (1, 4);
   fragmented_classify (BOTH, 0xfefc);
   fragmented_classify (D12, 0xfefd);
   sentinel (BOTH, 1);

@@ -23,6 +23,7 @@
 #ifndef GQ_TST_FIX12_H
 #define GQ_TST_FIX12_H
 
+#include <quickstep/policy.h>
 #include <quickstep/sign.h>
 #include <quickstep/trust.h>
 #include <quickstep/tls.h>
@@ -42,6 +43,12 @@ static struct tst_cert fx_ca;
 static gq_trust *fx_trust;
 static struct ident fx_ec, fx_ec384, fx_ed, fx_rsa, fx_cli_ec, fx_cli_rsa,
   fx_cli_ed;
+#if TST_HAVE_MLDSA
+/* ML-DSA server identities under the same (ECDSA) CA.  Made only if the
+   GnuTLS in use can (gq_sigscheme_available); the tests that need them say
+   so through tst_mldsa_ready.  */
+static struct ident fx_mldsa44, fx_mldsa65, fx_mldsa87;
+#endif
 
 static void
 make_ident (struct ident *id, enum tst_key kind, const char *cn,
@@ -88,6 +95,17 @@ fx_setup (void)
               GNUTLS_KP_TLS_WWW_CLIENT);
   make_ident (&fx_cli_ed, TST_ED25519, "clied", "client.test",
               GNUTLS_KP_TLS_WWW_CLIENT);
+#if TST_HAVE_MLDSA
+  if (gq_sigscheme_available (GQ_SIG_MLDSA65))
+    {
+      make_ident (&fx_mldsa44, TST_MLDSA44, "mldsa44", "example.test",
+                  GNUTLS_KP_TLS_WWW_SERVER);
+      make_ident (&fx_mldsa65, TST_MLDSA65, "mldsa65", "example.test",
+                  GNUTLS_KP_TLS_WWW_SERVER);
+      make_ident (&fx_mldsa87, TST_MLDSA87, "mldsa87", "example.test",
+                  GNUTLS_KP_TLS_WWW_SERVER);
+    }
+#endif
 }
 
 #endif

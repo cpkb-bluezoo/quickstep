@@ -24,6 +24,11 @@
 # include <config.h>
 #endif
 
+#include <stdlib.h>
+#if defined __GLIBC__
+# include <malloc.h>		/* M_PERTURB.  */
+#endif
+
 #include <quickstep/status.h>
 #include <quickstep/conn.h>
 #include <quickstep/listen.h>
@@ -991,6 +996,7 @@ fill_events (gq_conn_events *e, struct app *a)
 /* Groups the client offers (NULL: the policy's).  */
 static const uint16_t *g_cgroups;
 static size_t g_n_cgroups;
+static const struct ident *g_server_ident;	/* NULL: fx_ec.  */
 
 /* The ceiling on datagram size the connections get when the test does not
    say: 1200, so that the tests that do not concern path MTU discovery see
@@ -1017,9 +1023,9 @@ pair_new (const gq_conn_config *ccfg, const gq_conn_config *scfg,
   p->ccfg.trust = fx_trust;
   p->ccfg.alpn = alpn_list;
   p->ccfg.n_alpn = 1;
-  p->scfg.credentials.chain = fx_ec.chain;
+  p->scfg.credentials.chain = (g_server_ident ? g_server_ident : &fx_ec)->chain;
   p->scfg.credentials.n_chain = 1;
-  p->scfg.credentials.key = fx_ec.key;
+  p->scfg.credentials.key = (g_server_ident ? g_server_ident : &fx_ec)->key;
   p->scfg.alpn = alpn_list;
   p->scfg.n_alpn = 1;
   p->scfg.ticket_keys = g_ring;
@@ -1197,6 +1203,105 @@ test_handshake (uint32_t version, unsigned loss, uint32_t seed)
     CHECK (st.srtt_us < 100000 && st.srtt_us > 10000);
   pair_free (p);
 }
+
+/* glibc can fill every allocation with a fixed pattern before it is handed
+   out, so that memory used before it was written is never the zeros that a
+   fresh heap tends to hold (M_PERTURB; other C libraries have nothing like
+   it, and then this does nothing).  The packets of a datagram are assembled
+   in storage that is allocated for each send, and one field of it was never
+   cleared: whether a packet was taken for a path MTU probe depended on what
+   the heap held, which went unnoticed on a fresh heap.  */
+static void
+perturb_allocations (void)
+{
+#ifdef M_PERTURB
+  mallopt (M_PERTURB, 165);
+#endif
+}
+
+/* A datagram of the server's first flights is lost, whichever it is in
+   turn, and the data in it has to be sent again: the handshake completes.
+   The server's certificate is a big one (RSA), so the flight is several
+   packets.  A lost packet that was taken for a path MTU probe is not sent
+   again (its loss says nothing of congestion or of the data, RFC 9000
+   section 14.4), so a stale probe mark on an ordinary packet stalls the
+   handshake for good.  */
+static void
+test_lost_handshake_datagram (void)
+{
+  unsigned drop;
+
+  for (drop = 2; drop <= 8; drop++)	/* The datagrams of the handshake.  */
+    {
+      struct pair *p;
+      gq_conn_config cfg;
+
+      memset (&cfg, 0, sizeof cfg);
+      g_server_ident = &fx_rsa;
+      p = pair_new (&cfg, &cfg, 0, 1);
+      g_server_ident = NULL;
+      p->net.drop_index = (int) drop;
+      run (&p->net, both_connected, 30000000);
+      if (!both_connected (&p->net))
+        fprintf (stderr, "datagram %u lost: handshake did not complete\n",
+                 drop);
+      CHECK (p->cli.connected && p->srv.connected);
+      CHECK_EQ (p->net.dropped, 1);
+      pair_free (p);
+    }
+}
+
+#if TST_HAVE_MLDSA
+
+/* A QUIC handshake with an ML-DSA server certificate: its chain and the
+   CertificateVerify signature (2420 to 4627 bytes) make the server's
+   handshake flight several kilobytes, which has to be split over packets,
+   held back by the amplification limit until the client's address is
+   validated, and recovered if some are lost.  */
+static void
+test_mldsa_handshake (void)
+{
+  static const struct ident *ids[3];
+  static const uint32_t versions[] = { GQ_VERSION_1, GQ_VERSION_2 };
+  size_t i, v;
+  unsigned loss;
+
+  if (!tst_mldsa_ready (gq_sigscheme_available (GQ_SIG_MLDSA65),
+                        "the QUIC ML-DSA handshake tests"))
+    return;
+  ids[0] = &fx_mldsa44;
+  ids[1] = &fx_mldsa65;
+  ids[2] = &fx_mldsa87;
+  for (i = 0; i < 3; i++)
+    for (v = 0; v < 2; v++)
+      for (loss = 0; loss <= 10; loss += 10)
+        {
+          struct pair *p;
+          gq_conn_config cfg;
+
+          memset (&cfg, 0, sizeof cfg);
+          cfg.version = versions[v];
+          g_server_ident = ids[i];
+          p = pair_new (&cfg, &cfg, loss, (uint32_t) (7 + i * 3 + v));
+          g_server_ident = NULL;
+          CHECK (run (&p->net, both_connected, 60000000));
+          CHECK (p->cli.connected && p->srv.connected);
+          CHECK (gq_conn_is_established (p->cli.c));
+          CHECK (gq_conn_is_established (p->srv.c));
+          CHECK_EQ (gq_conn_version (p->cli.c), versions[v]);
+          pair_free (p);
+        }
+}
+
+#else
+
+static void
+test_mldsa_handshake (void)
+{
+  tst_mldsa_ready (0, "the QUIC ML-DSA handshake tests");
+}
+
+#endif
 
 /* NREQ requests of REQ bytes, each answered with RESP bytes.  */
 static void
@@ -3208,12 +3313,15 @@ test_garbage (void)
 int
 main (void)
 {
+  perturb_allocations ();
   gq_crypto_init ();
   fx_setup ();
   test_handshake (0, 0, 1);		/* Both speak v2 by default.  */
   test_handshake (GQ_VERSION_1, 0, 4);
   test_handshake (GQ_VERSION_2, 0, 2);
   test_handshake (0, 20, 3);
+  test_lost_handshake_datagram ();
+  test_mldsa_handshake ();
   test_requests (0, 11, 1, 20, 100, NULL, NULL, 0);
   test_requests (0, 12, 10, 50, 300000, NULL, NULL, 0);
   test_requests (5, 13, 8, 5000, 100000, NULL, NULL, 0);
