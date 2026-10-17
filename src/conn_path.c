@@ -238,6 +238,7 @@ switch_to (gq_conn *c, int idx)
      (RFC 9000 section 9.4).  */
   cc_init (c);
   conn_spin_reset (c);
+  conn_ecn_restart (c);
   c->have_rtt = 0;
   c->srtt = CONN_INITIAL_RTT (c);
   c->rttvar = CONN_INITIAL_RTT (c) / 2;

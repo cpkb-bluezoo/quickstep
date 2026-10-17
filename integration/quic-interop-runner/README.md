@@ -55,9 +55,9 @@ The runner knows nothing about quickstep; it only runs the image.
 | `resumption` | yes | yes | The first file on one connection, the rest on a second that resumes its session ticket |
 | `zerortt` | yes | yes | As `resumption`, with the requests of the second connection sent in 0-RTT |
 | `v2` | yes | yes | Compatible version negotiation to QUIC v2 (RFC 9368, RFC 9369): the client opens in v1 and lists v2 first; the server moves it there. Every other case stays in v1 |
+| `ecn` | yes | yes | A transfer in which the sockets pass the ECN field of each datagram to and from the library (`IP_RECVTOS` / `IPV6_RECVTCLASS` on receipt, `IP_TOS` / `IPV6_TCLASS` as ancillary data on send), so it marks 1-RTT packets ECT(0), validates the peer's counts and reacts to CE |
 | `keyupdate` | yes | yes | The client updates its keys after the first 100 KiB; the server follows a peer's update in every case |
 | `http3` | 127 | 127 | No HTTP/3 in quickstep |
-| `ecn` | 127 | 127 | The library neither reads nor sets the ECN codepoints |
 | `connectionmigration` | 127 | - | The library does not use the server's `preferred_address` |
 
 The endpoint assumes a 100 ms round trip until it measures one (the library

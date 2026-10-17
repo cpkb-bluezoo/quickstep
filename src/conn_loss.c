@@ -409,6 +409,7 @@ process_ack (gq_conn *c, int sp, const gq_frame *f, uint64_t now)
   gq_ack_foreach (f, ack_range, &x);
   if (x.fail)
     conn_fail (c, GQ_QERR_INTERNAL, "out of memory");
+  conn_ecn_on_ack (c, sp, f, x.got, x.n, now);
   if (x.n == 0)
     {
       free (x.got);
@@ -533,6 +534,7 @@ loss_detect (gq_conn *c, int sp, uint64_t now)
           if (p->ack_eliciting && s->ae_in_flight)
             s->ae_in_flight--;
           c->st.packets_lost++;
+          conn_ecn_lost (c, p);
           ql_packet_lost (c, sp, p,
                           p->pn + K_PACKET_THRESHOLD <= s->largest_acked);
           if (!p->requeued)

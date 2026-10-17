@@ -184,6 +184,7 @@ struct pkt
   gq_path from;
   size_t len;
   uint8_t d[2048];
+  int ecn;			/* The ECN field it arrives with.  */
 };
 
 struct net
@@ -403,7 +404,7 @@ node_by_addr (struct net *net, const gq_addr *a)
 
 static void
 enqueue (struct net *net, struct node *from, const uint8_t *d, size_t len,
-         const gq_path *to)
+         const gq_path *to, int ecn)
 {
   struct node *dest = node_by_addr (net, &to->remote);
   struct pkt *p;
@@ -437,6 +438,7 @@ enqueue (struct net *net, struct node *from, const uint8_t *d, size_t len,
   p->to = (int) (dest - net->node);
   p->at = net->now + net->latency;
   p->len = len;
+  p->ecn = ecn;
   memcpy (p->d, d, len);
   p->from.local = dest->addr;
   p->from.remote = from->ext;	/* What the receiver sees.  */
@@ -498,7 +500,7 @@ flush (struct net *net)
       uint8_t buf[2048];
       size_t len;
       gq_path to;
-      int guard = 0;
+      int guard = 0, ecn;
 
       if (n->ep == NULL)
         continue;
@@ -506,11 +508,13 @@ flush (struct net *net)
       while (guard++ < 500)
         {
           memset (&to, 0, sizeof to);
-          CHECK_EQ (gq_endpoint_send (n->ep, net->now, buf, sizeof buf, &len,
-                                      &to), GQ_OK);
+          ecn = -1;
+          CHECK_EQ (gq_endpoint_send_ecn (n->ep, net->now, buf, sizeof buf,
+                                          &len, &to, &ecn), GQ_OK);
           if (len == 0)
             break;
-          enqueue (net, n, buf, len, &to);
+          CHECK (ecn >= GQ_ECN_NOT_ECT && ecn <= GQ_ECN_CE);
+          enqueue (net, n, buf, len, &to, ecn);
         }
     }
 }
@@ -558,8 +562,8 @@ run (struct net *net, int (*done) (struct net *), uint64_t budget)
                    (size_t) (net->nq - best - 1) * sizeof net->q[0]);
           net->nq--;
           if (net->node[p.to].ep)
-            gq_endpoint_recv (net->node[p.to].ep, net->now, &p.from, p.d,
-                              p.len);
+            gq_endpoint_recv_ecn (net->node[p.to].ep, net->now, &p.from,
+                                  p.ecn, p.d, p.len);
           continue;
         }
       for (i = 0; i < MAXNODES; i++)
@@ -834,6 +838,26 @@ test_many_connections (void)
   CHECK_EQ (gq_endpoint_connections (net->node[0].ep), 0);
   CHECK_EQ (gq_endpoint_connections (net->node[1].ep), 0);
   CHECK_EQ (gq_endpoint_timeout (net->node[0].ep), 0);
+  net_free (net);
+}
+
+/* The endpoint passes the ECN field of what arrives to the connection and
+   that of what the connection sends on: both ends validate, and the server's
+   connection and the client's count what the other marked.  */
+static void
+test_ecn (void)
+{
+  struct net *net = net_new (NULL, 5, NULL);
+  struct capp *a;
+  gq_conn_stats st;
+
+  a = client_conn (net, 1, NULL);
+  CHECK (run (net, all_clients_done, 60000000));
+  gq_conn_get_stats (a->c, &st);
+  CHECK_EQ (st.ecn_state, GQ_ECN_CAPABLE);
+  CHECK (st.ecn_marked_sent > 0);
+  CHECK (st.ecn_ect0_received > 0);
+  CHECK_EQ (st.ecn_ce_received, 0);
   net_free (net);
 }
 
@@ -1173,6 +1197,7 @@ main (void)
   setup_tls ();
   test_many_connections ();
   test_early_data ();
+  test_ecn ();
   test_retry ();
   test_version_negotiation ();
   test_stateless_reset ();

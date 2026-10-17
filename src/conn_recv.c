@@ -563,6 +563,13 @@ process_payload (gq_conn *c, int sp, const uint8_t *p, size_t n, int *ae,
 
 /* ---- Packet acceptance ---- */
 
+/* The index of ECN codepoint ECN in the counts: ECT(0), ECT(1), CE.  */
+static int
+ecn_slot (int ecn)
+{
+  return ecn == GQ_ECN_ECT0 ? 0 : ecn == GQ_ECN_ECT1 ? 1 : 2;
+}
+
 static void
 note_received (gq_conn *c, int sp, uint64_t pn, int ae, uint64_t now)
 {
@@ -581,11 +588,21 @@ note_received (gq_conn *c, int sp, uint64_t pn, int ae, uint64_t now)
   c->st.packets_received++;
   c->idle_send_reset = 0;
   conn_recompute_idle (c, now);
+  /* RFC 9000 section 13.4.1: count the codepoint of each packet processed,
+     per space, for the ACK frames.  Not-ECT has no count.  */
+  if (c->rx_ecn == GQ_ECN_ECT0 || c->rx_ecn == GQ_ECN_ECT1
+      || c->rx_ecn == GQ_ECN_CE)
+    {
+      s->ecn_in[ecn_slot (c->rx_ecn)]++;
+      c->ecn_in[ecn_slot (c->rx_ecn)]++;
+    }
   if (!ae)
     return;
   s->ack_pending = 1;
   s->ae_since_ack++;
-  if (sp != SP_APP || gap || s->ae_since_ack >= 2)
+  /* A packet marked CE is acknowledged at once, so the peer hears of the
+     congestion as soon as it can (section 13.2.1).  */
+  if (sp != SP_APP || gap || s->ae_since_ack >= 2 || c->rx_ecn == GQ_ECN_CE)
     s->ack_now = 1;
   else if (s->ack_deadline == 0)
     s->ack_deadline = now + 25000;

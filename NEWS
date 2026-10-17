@@ -31,9 +31,9 @@ draft-ietf-quic-qlog-quic-events: set gq_conn_config.qlog (see
 quickstep/qlog.h) and each event arrives as a connection, a time, a name
 and a line of key=value fields, for awk and the other text tools.  The
 detail is chosen with qlog_importance and qlog_raw; secrets are never
-logged.  Every event of the draft is reported except path MTU discovery,
-ECN and the buffering of packets, which the library does not do yet, and
-the three that repeat what the packet events carry.  An endpoint
+logged.  Every event of the draft is reported except path MTU discovery
+and the buffering of packets, which the library does not do yet, and the
+three that repeat what the packet events carry.  An endpoint
 reports the events that belong to no connection through the same callback.
 gq_conn_original_dcid names a log by the draft's convention.
 ** The latency spin bit (RFC 9000 section 17.4) is implemented, so an
@@ -44,6 +44,20 @@ eight (the RFC requires one in sixteen) and when the connection moves to a
 new path, which starts again.  Set gq_conn_config.disable_spin_bit to turn
 it off for every connection.  qlog reports spin_bit_updated and the bit in
 1-RTT packets.
+** ECN (RFC 9000 section 13.4, RFC 9002 section 7.1) is implemented for an
+application that passes on the ECN field of datagrams: gq_conn_recv_ecn and
+gq_conn_send_ecn (and gq_endpoint_recv_ecn and gq_endpoint_send_ecn) take
+and return it as a gq_ecn, and the existing calls are unchanged and never
+mark anything.  Received codepoints are counted per packet number space and
+reported in ACK frames, a packet marked CE is acknowledged at once, and 1-RTT
+packets are marked ECT(0) once the path passes the validation of RFC 9000
+section 13.4.2 (the first ten are the test; the handshake is never marked).
+An increase in the peer's CE count reduces the window as a loss does, without
+persistent congestion.  gq_conn_stats gains ecn_state, ecn_marked_sent and the
+counts received, and qlog reports ecn_state_updated and the codepoint of
+datagrams.  The quic-interop-runner endpoint reads and sets the ECN field of
+its datagrams, and so takes part in the runner's ecn test case instead of
+answering 127.
 ** The interop endpoint writes a log for each connection into QLOGDIR, which
 the runner sets, and qlog-lint checks such files against the draft; the
 interop workflow runs it on what each run wrote.

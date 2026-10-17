@@ -206,7 +206,7 @@ ql_connection_started (gq_conn *c)
     {
       c->ql.pending_dgram = 0;
       ql_datagram (c, QE_UDP_DATAGRAMS_RECEIVED, c->ql.dgram_id,
-                   c->ql.pending_len);
+                   c->ql.pending_len, c->ql.pending_ecn);
     }
 }
 
@@ -721,8 +721,18 @@ packet_tail (qkv *w, size_t raw_len, size_t payload_len, uint32_t dgram_id)
   qkv_u64 (w, "datagram_id", dgram_id);
 }
 
+/* The name the draft gives ECN codepoint ECN.  */
+static const char *
+ecn_name (int ecn)
+{
+  return ecn == GQ_ECN_ECT0 ? "ECT(0)" : ecn == GQ_ECN_ECT1 ? "ECT(1)"
+         : ecn == GQ_ECN_CE ? "CE" : "Not-ECT";
+}
+
+/* A datagram of LEN bytes, with the ECN codepoint ECN, or -1 if that is not
+   known (the application did not say).  */
 void
-ql_datagram (gq_conn *c, int ev, uint32_t id, size_t len)
+ql_datagram (gq_conn *c, int ev, uint32_t id, size_t len, int ecn)
 {
   qkv *w;
 
@@ -732,6 +742,12 @@ ql_datagram (gq_conn *c, int ev, uint32_t id, size_t len)
   qkv_push_i (w, "raw", 0);
   qkv_u64 (w, "length", len);
   qkv_pop (w);
+  if (ecn >= 0)
+    {
+      qkv_list (w, "ecn");
+      qkv_item_str (w, ecn_name (ecn));
+      qkv_end_list (w);
+    }
   qkv_list (w, "datagram_ids");
   qkv_item_u64 (w, id);
   qkv_end_list (w);
@@ -748,9 +764,10 @@ ql_rx_datagram (gq_conn *c, size_t len)
       /* A server's first datagram: reported once the connection is.  */
       c->ql.pending_dgram = 1;
       c->ql.pending_len = len;
+      c->ql.pending_ecn = c->rx_ecn;
       return;
     }
-  ql_datagram (c, QE_UDP_DATAGRAMS_RECEIVED, c->ql.dgram_id, len);
+  ql_datagram (c, QE_UDP_DATAGRAMS_RECEIVED, c->ql.dgram_id, len, c->rx_ecn);
 }
 
 void
@@ -1338,6 +1355,22 @@ ql_tuple_assigned (gq_conn *c, int idx, int abandoned)
       endpoint_out (c, w, "tuple_local", &e->p.local, NULL);
     }
   qlog_end (c, QE_TUPLE_ASSIGNED);
+}
+
+/* ECN validation went from state OLD (a gq_ecn_state) to STATE.  */
+void
+ql_ecn_state_updated (gq_conn *c, int old, int state)
+{
+  static const char *const name[] = { NULL, "testing", "unknown", "capable",
+                                      "failed" };
+  qkv *w;
+
+  if ((w = qlog_begin (c, QE_ECN_STATE_UPDATED, NULL)) == NULL)
+    return;
+  if (old != GQ_ECN_OFF)
+    qkv_str (w, "old", name[old]);
+  qkv_str (w, "new", name[state]);
+  qlog_end (c, QE_ECN_STATE_UPDATED);
 }
 
 /* The spin bit we send changed to STATE.  */

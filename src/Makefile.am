@@ -48,6 +48,7 @@ libquickstep_la_SOURCES = \
   ranges.c \
   conn.c \
   conn_datagram.c \
+  conn_ecn.c \
   conn_loss.c \
   conn_path.c \
   conn_recv.c \

@@ -239,6 +239,15 @@ add_ack (gq_conn *c, pk *p, uint64_t now)
   f.u.ack.range_count = n - 1;
   f.u.ack.ranges.data = enc;
   f.u.ack.ranges.len = w;
+  /* Once a packet has come with a codepoint, the ACK frames say how many
+     (RFC 9000 section 13.4.1).  */
+  if (s->ecn_in[0] || s->ecn_in[1] || s->ecn_in[2])
+    {
+      f.u.ack.has_ecn = 1;
+      f.u.ack.ect0 = s->ecn_in[0];
+      f.u.ack.ect1 = s->ecn_in[1];
+      f.u.ack.ecn_ce = s->ecn_in[2];
+    }
   if (add (p, &f, 0, NULL) == 0)
     {
       p->ack_valid = 1;
@@ -903,7 +912,7 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
                  int dest, uint8_t *out, size_t *len)
 {
   size_t total = 0;
-  int i, ae = 0, sent_handshake = 0, r = GQ_OK;
+  int i, ae = 0, sent_handshake = 0, r = GQ_OK, marked;
   uint32_t did = c->ql.next_dgram_id++;
 
   if (need_pad && maxdg >= GQ_MIN_INITIAL_DATAGRAM)
@@ -938,6 +947,17 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
         }
       last->pad += padded;
     }
+  {
+    int spaces[N_SPACES];
+    uint8_t early[N_SPACES];
+
+    for (i = 0; i < n && i < N_SPACES; i++)
+      {
+        spaces[i] = pks[i]->sp;
+        early[i] = (uint8_t) pks[i]->early;
+      }
+    marked = n <= N_SPACES && conn_ecn_marks (c, dest, spaces, early, n);
+  }
   for (i = 0; i < n && r == GQ_OK; i++)
     {
       pk *p = pks[i];
@@ -952,6 +972,8 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
         log_sent (c, p, pns[i], pnl[i], w, did, dest);
       if (p->ack_valid)
         conn_note_ack_sent (c, p->sp, pns[i], p->ack_largest);
+      if (marked && !p->ae)
+        conn_ecn_sent (c, 0, pns[i]);
       if (p->ae)
         {
           sent_pkt sp;
@@ -964,6 +986,8 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
           sp.ack_eliciting = 1;
           sp.in_flight = 1;
           sp.early = (uint8_t) p->early;
+          if (marked)
+            sp.ecn_gen = conn_ecn_sent (c, 1, pns[i]);
           if (p->nsf)
             {
               sp.frames = malloc (p->nsf * sizeof *sp.frames);
@@ -990,7 +1014,13 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
       return r;
     }
   *len = total;
-  ql_datagram (c, QE_UDP_DATAGRAMS_SENT, did, total);
+  if (marked)
+    {
+      c->tx_ecn = GQ_ECN_ECT0;
+      conn_ecn_datagram_sent (c);
+    }
+  ql_datagram (c, QE_UDP_DATAGRAMS_SENT, did, total,
+               c->tx_ecn_ok ? (marked ? GQ_ECN_ECT0 : GQ_ECN_NOT_ECT) : -1);
   conn_path_note_sent (c, dest, total);
   c->st.bytes_sent += total;
   if (c->state == GQ_CONN_CLOSING)
