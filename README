@@ -94,7 +94,8 @@ Pre-alpha.  What exists today:
            streams, flow control, connection IDs, key update, idle
            timeout, close and stateless reset; CUBIC or NewReno congestion
            control with HyStart++ and pacing (RFC 9002 section 7, RFC 9438,
-           RFC 9406); ECN (RFC 9000 section 13.4, RFC 9002 section 7.1),
+           RFC 9406); path MTU discovery (RFC 9000 section 14.3, RFC 8899); ECN
+           (RFC 9000 section 13.4, RFC 9002 section 7.1),
            for an application that passes on the ECN field of datagrams;
            qlog events as lines of text; interoperating with quiche
 

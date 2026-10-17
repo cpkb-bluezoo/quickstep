@@ -31,9 +31,9 @@ draft-ietf-quic-qlog-quic-events: set gq_conn_config.qlog (see
 quickstep/qlog.h) and each event arrives as a connection, a time, a name
 and a line of key=value fields, for awk and the other text tools.  The
 detail is chosen with qlog_importance and qlog_raw; secrets are never
-logged.  Every event of the draft is reported except path MTU discovery
-and the buffering of packets, which the library does not do yet, and the
-three that repeat what the packet events carry.  An endpoint
+logged.  Every event of the draft is reported except the buffering of
+packets, which the library does not do yet, and the three that repeat what
+the packet events carry.  An endpoint
 reports the events that belong to no connection through the same callback.
 gq_conn_original_dcid names a log by the draft's convention.
 ** The latency spin bit (RFC 9000 section 17.4) is implemented, so an
@@ -58,6 +58,15 @@ counts received, and qlog reports ecn_state_updated and the codepoint of
 datagrams.  The quic-interop-runner endpoint reads and sets the ECN field of
 its datagrams, and so takes part in the runner's ecn test case instead of
 answering 127.
+** Path MTU discovery (RFC 9000 section 14.3, RFC 8899).  Datagrams start
+at 1200 bytes and, once the handshake is confirmed, probes find what the
+path takes, up to gq_conn_config.max_udp_payload, which is now a ceiling and
+defaults to 1452 (it was the size used, and 1200).  A caller must give
+gq_conn_send a buffer of at least that for probing to take place.  The
+search is made again on a change of path and after a black hole, and every
+600 seconds when it ended short of the ceiling; a lost probe is not
+congestion.  gq_conn_stats gains max_datagram_size and pmtu_done, and qlog
+reports mtu_updated and is_mtu_probe_packet.
 ** The interop endpoint writes a log for each connection into QLOGDIR, which
 the runner sets, and qlog-lint checks such files against the draft; the
 interop workflow runs it on what each run wrote.

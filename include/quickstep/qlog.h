@@ -41,11 +41,11 @@
    included.  Secrets are never logged: key_updated names the key and its
    phase but carries no key bytes.
 
-   Every event of the draft is produced but these.  Path MTU discovery and the
-   buffering of packets that arrive before their keys are not implemented, so
-   mtu_updated and packet_buffered have nothing to report.  frames_created,
-   frames_parsed and frames_processed repeat what packet_sent and
-   packet_received carry, which the draft advises against.
+   Every event of the draft is produced but these.  The buffering of packets
+   that arrive before their keys is not implemented, so packet_buffered has
+   nothing to report.  frames_created, frames_parsed and frames_processed
+   repeat what packet_sent and packet_received carry, which the draft advises
+   against.
 
    The line
 

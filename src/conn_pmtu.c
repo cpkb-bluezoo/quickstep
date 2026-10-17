@@ -77,11 +77,16 @@ ceiling_of (const gq_conn *c)
 static void
 set_size (gq_conn *c, size_t size)
 {
-  if (c->pmtu_cur == size)
+  size_t old = c->pmtu_cur;
+
+  if (old == size)
     return;
   c->pmtu_cur = (uint32_t) size;
   cong_set_mss (&c->cc, (uint32_t) size);
   pacer_set_dgram (&c->pace, (uint32_t) size);
+  ql_mtu_updated (c, old, size, 0);
+  if (c->ql.started)
+    ql_recovery_parameters (c);
 }
 
 /* What to probe next, or done: sets the size and the state.  */
@@ -103,6 +108,7 @@ plan (gq_conn *c)
       c->pmtu_state = PMTU_DONE;
       /* A size short of the ceiling is tried again later.  */
       c->pmtu_raise_at = c->pmtu_cur < ceiling ? c->now + PMTU_RAISE_US : 0;
+      ql_mtu_updated (c, 0, c->pmtu_cur, 1);
       return;
     }
   c->pmtu_probe_size = c->pmtu_hi > ceiling ? (uint32_t) ceiling
@@ -222,6 +228,7 @@ conn_pmtu_switch (gq_conn *c, int old, int idx)
       c->pmtu_lo = (uint32_t) want;
       set_size (c, want);
       c->pmtu_raise_at = want < ceiling_of (c) ? c->now + PMTU_RAISE_US : 0;
+      ql_mtu_updated (c, 0, want, 1);
     }
 }
 

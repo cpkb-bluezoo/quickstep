@@ -417,7 +417,7 @@ static const char *const qc_milli_keys[] = {
   "time_threshold", "loss_reduction_factor", NULL
 };
 static const char *const qc_bool_keys[] = {
-  "fin", "key_phase_bit", "spin_bit", "disable_active_migration",
+  "fin", "key_phase_bit", "spin_bit", "is_mtu_probe_packet", "disable_active_migration",
   "resumption_allowed", "early_data_enabled", "retry_required", "done",
   "grease_quic_bit", "reset_stream_at", "state", NULL
 };

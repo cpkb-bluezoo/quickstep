@@ -787,7 +787,8 @@ ql_datagram_dropped (gq_conn *c, size_t len)
 void
 ql_packet_sent (gq_conn *c, const qlog_hdr *h, size_t raw_len,
                 size_t payload_len, const char *frames, size_t frames_len,
-                uint32_t dgram_id, const char *trigger, int path_idx)
+                uint32_t dgram_id, const char *trigger, int path_idx,
+                int mtu_probe)
 {
   qkv *w;
 
@@ -796,6 +797,8 @@ ql_packet_sent (gq_conn *c, const qlog_hdr *h, size_t raw_len,
   qlog_header (w, h, c->ql.raw_max);
   qkv_append (w, frames, frames_len);
   packet_tail (w, raw_len, payload_len, dgram_id);
+  if (mtu_probe)
+    qkv_bool (w, "is_mtu_probe_packet", 1);
   if (trigger)
     qkv_str (w, "trigger", trigger);
   qlog_end (c, QE_PACKET_SENT);
@@ -907,6 +910,8 @@ ql_packet_lost (gq_conn *c, int sp, const sent_pkt *p, int reordering)
         n++;
       qkv_pop (w);
     }
+  if (p->pmtu_probe)
+    qkv_bool (w, "is_mtu_probe_packet", 1);
   qkv_str (w, "trigger", reordering ? "reordering_threshold" : "time_threshold");
   qlog_end (c, QE_PACKET_LOST);
 }
@@ -1355,6 +1360,22 @@ ql_tuple_assigned (gq_conn *c, int idx, int abandoned)
       endpoint_out (c, w, "tuple_local", &e->p.local, NULL);
     }
   qlog_end (c, QE_TUPLE_ASSIGNED);
+}
+
+/* The datagram size changed from OLD (0: not given) to NEW, or, with DONE,
+   the search for the path MTU ended at NEW.  */
+void
+ql_mtu_updated (gq_conn *c, size_t old, size_t new, int done)
+{
+  qkv *w;
+
+  if ((w = qlog_begin (c, QE_MTU_UPDATED, NULL)) == NULL)
+    return;
+  if (old)
+    qkv_u64 (w, "old", old);
+  qkv_u64 (w, "new", new);
+  qkv_bool (w, "done", done);
+  qlog_end (c, QE_MTU_UPDATED);
 }
 
 /* ECN validation went from state OLD (a gq_ecn_state) to STATE.  */

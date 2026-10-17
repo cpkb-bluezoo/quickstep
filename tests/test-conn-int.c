@@ -2213,6 +2213,110 @@ test_pmtu_size_is_kept_per_path (void)
   pair_free (p);
 }
 
+/* The log of the search: mtu_updated for each change of size and when the
+   search ends, the probes marked as such in packet_sent and packet_lost, and
+   the recovery parameters again when the datagram size they name changes.  */
+static void
+test_pmtu_qlog (void)
+{
+  struct pmtu_obs obs;
+  struct pair *p = pmtu_transfer (1452, 1400, 1000000, &obs);
+  gq_conn_stats st;
+  size_t lost_probes = 0, e;
+
+  for (e = 0; e < 2; e++)
+    {
+      const struct qsink *k = &p->qlog_sink[e];
+      size_t i, n = qsink_count (k, "quic:mtu_updated");
+      size_t probes = 0, big_probe = 0;
+      uint64_t last_new = 0, first_old = 0;
+      qline q;
+
+      gq_conn_get_stats (e ? p->srv.c : p->cli.c, &st);
+      CHECK (n >= 3);
+      for (i = 0; i < n; i++)
+        {
+          CHECK (qsink_nth (k, "quic:mtu_updated", i, &q));
+          if (i == 0 && qline_get (&q, "old"))
+            first_old = strtoull (qline_get (&q, "old"), NULL, 10);
+          if (i + 1 < n)
+            {
+              /* A change of size, and not the end of the search.  */
+              CHECK (qline_is (&q, "done", "false"));
+              CHECK (strtoull (qline_get (&q, "new"), NULL, 10)
+                     > strtoull (qline_get (&q, "old"), NULL, 10));
+            }
+          else
+            {
+              CHECK (qline_is (&q, "done", "true"));
+              last_new = strtoull (qline_get (&q, "new"), NULL, 10);
+            }
+          qline_free (&q);
+        }
+      CHECK_EQ (first_old, 1200);
+      CHECK_EQ (last_new, st.max_datagram_size);
+      for (i = 0; i < qsink_count (k, "quic:packet_sent"); i++)
+        {
+          CHECK (qsink_nth (k, "quic:packet_sent", i, &q));
+          if (qline_is (&q, "is_mtu_probe_packet", "true"))
+            {
+              probes++;
+              CHECK (strtoull (qline_get (&q, "raw.length"), NULL, 10) > 1200);
+              if (qline_is_u (&q, "raw.length", 1452))
+                big_probe++;
+            }
+          else
+            CHECK (qline_get (&q, "is_mtu_probe_packet") == NULL);
+          qline_free (&q);
+        }
+      CHECK (probes >= 4);
+      CHECK (big_probe >= 3);
+      for (i = 0; i < qsink_count (k, "quic:packet_lost"); i++)
+        {
+          CHECK (qsink_nth (k, "quic:packet_lost", i, &q));
+          if (qline_is (&q, "is_mtu_probe_packet", "true"))
+            lost_probes++;
+          qline_free (&q);
+        }
+      /* The parameters are given at the start (the client's came before
+         the test began to keep the log) and again for each new size, the
+         last of them with the size now in use.  */
+      n = qsink_count (k, "quic:recovery_parameters_set");
+      CHECK (n >= qsink_count (k, "quic:mtu_updated") - 1);
+      if (e == 1)
+        {
+          CHECK (qsink_nth (k, "quic:recovery_parameters_set", 0, &q));
+          CHECK (qline_is_u (&q, "max_datagram_size", 1200));
+          qline_free (&q);
+        }
+      CHECK (qsink_nth (k, "quic:recovery_parameters_set", n - 1, &q));
+      CHECK (qline_is_u (&q, "max_datagram_size", st.max_datagram_size));
+      qline_free (&q);
+      CHECK_EQ (k->bad_event + k->bad_line, 0);
+    }
+  /* Every datagram the path dropped was a probe, and each was reported.  */
+  CHECK_EQ (lost_probes, p->net.mtu_drops);
+  pair_free (p);
+}
+
+/* A search that has nothing to find says so once.  */
+static void
+test_pmtu_qlog_nothing_to_find (void)
+{
+  struct pmtu_obs obs;
+  struct pair *p = pmtu_transfer (1200, 0, 100000, &obs);
+  const struct qsink *k = &p->qlog_sink[1];
+  qline q;
+
+  CHECK_EQ (qsink_count (k, "quic:mtu_updated"), 1);
+  CHECK (qsink_nth (k, "quic:mtu_updated", 0, &q));
+  CHECK (qline_is (&q, "done", "true"));
+  CHECK (qline_is_u (&q, "new", 1200));
+  qline_free (&q);
+  CHECK_EQ (qsink_count (k, "quic:recovery_parameters_set"), 1);
+  pair_free (p);
+}
+
 int
 main (void)
 {
@@ -2262,6 +2366,8 @@ main (void)
   test_pmtu_raise_timer ();
   test_pmtu_new_path_is_smaller ();
   test_pmtu_size_is_kept_per_path ();
+  test_pmtu_qlog ();
+  test_pmtu_qlog_nothing_to_find ();
   TST_DONE ();
 }
 

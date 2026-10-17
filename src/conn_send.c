@@ -902,7 +902,8 @@ log_sent (gq_conn *c, pk *p, uint64_t pn, size_t pnl, size_t w, uint32_t did,
         }
     }
   ql_frames_add_padding (p->qf, p->qf_cap, &p->qf_len, &p->qf_n, p->pad);
-  ql_packet_sent (c, &h, w, p->len, p->qf, p->qf_len, did, p->qtrigger, dest);
+  ql_packet_sent (c, &h, w, p->len, p->qf, p->qf_len, did, p->qtrigger, dest,
+                  p->pmtu_probe);
 }
 
 /* Pad, protect and account for the N packets of one datagram bound for

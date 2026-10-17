@@ -438,6 +438,7 @@ void ql_closed (gq_conn *c, int source, int application, uint64_t error,
 void ql_cid_check (gq_conn *c);
 void ql_spin_bit_updated (gq_conn *c, int state);
 void ql_ecn_state_updated (gq_conn *c, int old, int state);
+void ql_mtu_updated (gq_conn *c, size_t old, size_t new, int done);
 void ql_rx_cid (gq_conn *c, const uint8_t *cid, size_t len);
 void ql_version_information (gq_conn *c, const uint32_t *client,
                              size_t nclient, const uint32_t *server,
@@ -482,7 +483,7 @@ void ql_datagram_dropped (gq_conn *c, size_t len);
 void ql_packet_sent (gq_conn *c, const qlog_hdr *h, size_t raw_len,
                      size_t payload_len, const char *frames,
                      size_t frames_len, uint32_t dgram_id,
-                     const char *trigger, int path_idx);
+                     const char *trigger, int path_idx, int mtu_probe);
 void ql_packet_received (gq_conn *c, const qlog_hdr *h, size_t raw_len,
                          const uint8_t *payload, size_t payload_len,
                          int path_idx, const uint32_t *vn, size_t n_vn,

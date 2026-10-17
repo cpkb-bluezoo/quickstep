@@ -957,6 +957,39 @@ the round trip (never persistent congestion).  @code{gq_conn_get_stats}
 reports @code{ecn_state}, @code{ecn_marked_sent} and the counts received,
 and qlog has @code{ecn_state_updated} and the codepoint of each datagram.
 
+@heading Path MTU discovery
+Datagrams start at 1200 bytes, which every path carries (RFC 9000 section
+14), and grow (RFC 9000 section 14.3, RFC 8899).  Once the handshake is
+confirmed a probe is sent: a PING and padding in a datagram of the size to
+try, alone, so that it is acknowledged if the path takes the size and lost if
+not.  @code{gq_conn_config.max_udp_payload} is the ceiling, 1452 by default
+(within 1200 and 2048), and the peer's @code{max_udp_payload_size} bounds it
+too.  The first probe is at the ceiling, which most paths take.  After three
+lost probes of a size it is given up, the search halves what is left, and it
+ends when the sizes still in question are 16 bytes apart.  Probes are sent
+only when the congestion window and the buffer given to @code{gq_conn_send}
+(of at least @code{max_udp_payload} bytes) hold them, and not while the
+amplification limit applies.
+
+A probe that is lost is not congestion (RFC 9000 section 14.4): it is not
+counted as a lost packet, causes no congestion event, does not count towards
+persistent congestion and is not marked for ECN.  The size is the path's own.
+On a change of path it starts from 1200 and the search is made again; a path
+the connection returns to has the size it had.  Three timeouts in a row while
+datagrams are larger than 1200 bytes (a path that no longer takes the size,
+a ``black hole'') take the size back to 1200 and the search runs below the
+old size; and a search that ended below the ceiling is made again after 600
+seconds, as the path may have improved.  The congestion controller and the
+pacer count in the size in use, so the minimum window and the growth per
+round trip follow it.  @code{gq_conn_get_stats} reports
+@code{max_datagram_size} and @code{pmtu_done}, and qlog has
+@code{mtu_updated}, @code{is_mtu_probe_packet} and the recovery parameters
+again at each new size.
+
+An endpoint that only sends small packets, such as one downloading, does not
+notice that its size has become too large until it sends something large.
+Receive buffers must hold datagrams of @code{max_udp_payload}.
+
 @node qlog
 @chapter qlog
 
@@ -1021,10 +1054,9 @@ text, which it cannot know; without it the events carry none, as the draft
 allows.
 
 @heading What is logged
-Every event of the draft except these.  Path MTU discovery and the
-buffering of packets that arrive before their keys are not implemented (see
-the issues for each), so @code{mtu_updated} and @code{packet_buffered} have
-nothing to say.  @code{frames_created}, @code{frames_parsed} and
+Every event of the draft except these.  The buffering of packets that
+arrive before their keys is not implemented (see the issue), so
+@code{packet_buffered} has nothing to say.  @code{frames_created}, @code{frames_parsed} and
 @code{frames_processed} would repeat what @code{packet_sent} and
 @code{packet_received} already carry, which the draft advises against.  A
 lost packet lists the frames it carried as far as they were kept, and the
@@ -1449,7 +1481,7 @@ Gaps found by comparing with Gumdrop and Hopf: certificate compression
 (RFC 8879); @code{record_size_limit} (RFC 8449); Encrypted Client Hello
 (RFC 9849) including rotation and DTLS; ML-DSA signatures once a backend
 has them; QUIC keep-alive PING; a streams-available event when
-MAX_STREAMS raises the limit; DPLPMTUD; segmentation
+MAX_STREAMS raises the limit; segmentation
 offload; the server's preferred_address; caching AEAD
 handles for speed; asynchronous crypto offload; and a DANE/TLSA verifier.
 Whether to send Retry by default is also open.
