@@ -113,7 +113,10 @@ case_ ()
   done
   reqs=
   for f in "$@"; do reqs="$reqs https://$host:$port/$f"; done
-  ROLE=client TESTCASE=$tc INTEROP_DOWNLOADS="dl-$name" INTEROP_CERTS=certs \
+  # The runner starts a client that is to migrate as a plain transfer.
+  ctc=$tc
+  [ "$tc" = connectionmigration ] && ctc=transfer
+  ROLE=client TESTCASE=$ctc INTEROP_DOWNLOADS="dl-$name" INTEROP_CERTS=certs \
     REQUESTS="$reqs" SSLKEYLOGFILE="keys-$name.cli" QLOGDIR="ql-$name/" \
     "$EP" > "$name.cli.log" 2>&1
   rc=$?
@@ -148,6 +151,21 @@ case_ ()
   esac
   case $tc in
     keyupdate) grep -q '^KEY_UPDATE' "$name.cli.log" || rc=1 ;;
+    connectionmigration*)
+      # The server offered its second port, the client moved to it, and both
+      # ends validated the path and switched.
+      grep -q ' quic:parameters_set .*preferred_address' \
+        "ql-$name"/*_client.qlog.txt \
+        || { echo "     no preferred address offered"; rc=1; }
+      # The server heard the client on the second port.
+      grep -q ' quic:tuple_assigned .*port_v[46]=4433' \
+        "ql-$name"/*_server.qlog.txt \
+        || { echo "     nothing on the second port"; rc=1; }
+      for side in client server; do
+        grep -q ' quic:migration_state_updated .*new=migration_complete' \
+          "ql-$name"/*_$side.qlog.txt \
+          || { echo "     $side did not complete a migration"; rc=1; }
+      done ;;
     ecn)
       # Both ends found that the path keeps the marks and counts them: the
       # sockets read and set the ECN field of the datagrams.
@@ -177,6 +195,9 @@ case_ retry retry localhost small tiny
 case_ v2 v2 localhost small tiny
 case_ keyupdate keyupdate localhost big
 case_ ecn ecn localhost small tiny big
+case_ connectionmigration connectionmigration localhost small tiny big
+case_ connectionmigration4 connectionmigration 127.0.0.1 big
+case_ connectionmigration6 connectionmigration '[::1]' big
 case_ zerortt-names zerortt localhost small $longs
 case_ multiconnect multiconnect localhost small tiny f1 f2 f3
 case_ resumption resumption localhost small tiny f1
@@ -188,7 +209,7 @@ case_ ipv6 ipv6 '[::1]' small tiny
 
 # What the endpoint does not implement is reported as such (exit 127), which
 # the runner reads as "unsupported"; so is any name it does not know.
-for tc in http3 connectionmigration no-such-case; do
+for tc in http3 no-such-case; do
   want "unsupported-$tc" || continue
   ROLE=client TESTCASE=$tc REQUESTS=https://localhost:1/x "$EP" >/dev/null 2>&1
   [ $? = 127 ] && rc=0 || rc=1

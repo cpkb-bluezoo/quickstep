@@ -74,6 +74,16 @@ Initial that makes the connection (the endpoint holds those for a second).
 gq_conn_config.max_buffered_packets bounds it, 16 by default and negative
 for none; gq_conn_stats gains packets_buffered, and qlog reports
 packet_buffered and the keys_available trigger of packet_received.
+** A server can offer its clients a preferred address (RFC 9000 section
+9.6): gq_conn_config.preferred_address is called for each connection as it
+starts, with the path of the client's first Initial, and fills in the
+addresses to offer.  The connection adds a connection ID of sequence number
+1, with its stateless reset token, to the transport parameters.  A client is
+told by the new preferred_address event when the handshake is confirmed, and
+takes the address up with gq_conn_migrate_preferred, which is allowed even if
+the server set disable_active_migration.  The quic-interop-runner endpoint
+offers a second port for the connectionmigration case, and any client of it
+migrates to an address it is offered.
 ** The interop endpoint writes a log for each connection into QLOGDIR, which
 the runner sets, and qlog-lint checks such files against the draft; the
 interop workflow runs it on what each run wrote.

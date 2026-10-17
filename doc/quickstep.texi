@@ -78,7 +78,7 @@ control and pacing, address validation (Retry and tokens), 0-RTT, path
 validation and migration, DATAGRAM frames, and an endpoint layer that
 serves many connections from one socket.  ECN is supported, for an
 application that passes the ECN field of datagrams to and from the library;
-the server's preferred_address is not implemented.
+the server's preferred address is offered and taken up.
 
 The library is the C member of a family: Gumdrop (Java) and Hopf (Rust)
 established the architecture, and this project ports it to C under the
@@ -1300,6 +1300,31 @@ connection ID.  A client keeps accepting datagrams from the server's
 address on any of its sockets, because a server goes on using the old path
 until it has validated the new one; datagrams from other addresses are
 ignored.  Events report path_validated, path_failed and migrated.
+
+@heading The preferred address
+A server can offer clients another address of its own to move to (RFC 9000
+section 9.6, for instance to hand a connection to a machine closer to it).
+It sets @code{gq_conn_config.preferred_address}, a function called once for
+each connection as it starts, with the path the client's first Initial came
+by; the function fills in the server's IPv4 and IPv6 addresses and ports, as
+it may choose for that client, and returns nonzero to offer them.  The
+connection adds a connection ID, of sequence number 1 and not repeated in a
+NEW_CONNECTION_ID frame, and its stateless reset token (which an endpoint
+derives from its key like any other, so that a restarted server can answer
+for it).  The server must receive on, and send from, the addresses it names;
+the local address of the path it is given tells it which.
+
+A client keeps the connection ID and token, and when the handshake is
+confirmed is told by the @code{preferred_address} event.  It decides
+whether and how to go: the library cannot turn the address in the
+parameter into the application's own kind of address, so the application
+builds the @code{gq_path} (the server's address of a family the socket can
+reach, and the local address to send from) and calls
+@code{gq_conn_migrate_preferred}.  The path is validated and then used as for
+@code{gq_conn_migrate}, with the connection ID that came with the address;
+the call is allowed when the server set @code{disable_active_migration}, as
+RFC 9000 section 18.2 says.  If validation fails the connection stays on
+the original address.
 
 @heading The spin bit
 The latency spin bit (RFC 9000 section 17.4) lets an observer on the path

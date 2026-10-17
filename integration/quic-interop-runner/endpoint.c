@@ -30,7 +30,10 @@
    (client: where to put what was fetched) and /certs (priv.key and cert.pem
    for a server, ca.pem for a client).  The server listens on UDP port 443.
    INTEROP_WWW, INTEROP_DOWNLOADS, INTEROP_CERTS and INTEROP_PORT override
-   the paths and the port, to run it outside the container.
+   the paths and the port, to run it outside the container.  A server run
+   for connectionmigration also listens on a second UDP port (4433, or
+   INTEROP_PORT2) and offers it to clients as its preferred address
+   (RFC 9000 section 9.6); a client takes up any such offer.
 
    Every test case but http3 speaks "hq-interop": HTTP/0.9 over QUIC, one
    "GET /path" request per bidirectional stream, answered with the file and
@@ -87,16 +90,18 @@ enum testcase
 {
   TC_HANDSHAKE, TC_TRANSFER, TC_MULTICONNECT, TC_CHACHA20, TC_RETRY,
   TC_RESUMPTION, TC_ZERORTT, TC_KEYUPDATE, TC_V2, TC_IPV6, TC_ECN,
-  TC_UNSUPPORTED
+  TC_MIGRATION, TC_UNSUPPORTED
 };
 
 /* What the runner may ask for.  The server side of keyupdate, blackhole,
    multiplexing and the like arrives as "transfer"; the client side of
    multiplexing, loss and corruption as "transfer" or "multiconnect".  Left
-   out, and answered with 127: http3 (no HTTP/3 here), connectionmigration
-   (the server's preferred_address is not used) and versionnegotiation.
-   ecn is a transfer: the sockets pass the ECN field to and from the
-   library, which marks and validates whatever the case.  */
+   out, and answered with 127: http3 (no HTTP/3 here) and
+   versionnegotiation.  ecn is a transfer: the sockets pass the ECN field to
+   and from the library, which marks and validates whatever the case.
+   connectionmigration is a transfer too, from a server that offers a
+   preferred address (the runner starts the client that is to migrate as a
+   plain transfer, and any client here takes up an offer).  */
 static const struct
 {
   const char *name;
@@ -106,7 +111,8 @@ static const struct
   { "multiconnect", TC_MULTICONNECT }, { "chacha20", TC_CHACHA20 },
   { "retry", TC_RETRY }, { "resumption", TC_RESUMPTION },
   { "zerortt", TC_ZERORTT }, { "keyupdate", TC_KEYUPDATE },
-  { "v2", TC_V2 }, { "ipv6", TC_IPV6 }, { "ecn", TC_ECN }
+  { "v2", TC_V2 }, { "ipv6", TC_IPV6 }, { "ecn", TC_ECN },
+  { "connectionmigration", TC_MIGRATION }
 };
 
 /* ---- Environment ---- */
@@ -131,7 +137,7 @@ struct run
 {
   int server;
   enum testcase tc;
-  const char *www, *downloads, *certs, *port;
+  const char *www, *downloads, *certs, *port, *port2;
   struct url *urls;
   size_t n_urls;
   FILE *keylog;
@@ -476,6 +482,10 @@ struct net
   int fd;
   int family;
   gq_addr local;
+  /* A server's second socket, for its preferred address: another port, the
+     same addresses.  */
+  int fd2, have2;
+  gq_addr local2;
 };
 
 static void
@@ -738,6 +748,63 @@ net_listen (struct net *n, const char *port)
   return 0;
 }
 
+/* A second socket for the server, on PORT of the wildcard address of the
+   family of the first.  */
+static int
+net_listen_second (struct net *n, const char *port)
+{
+  struct sockaddr_storage ss;
+  socklen_t sl = sizeof ss, bl;
+  int off = 0;
+
+  memset (&ss, 0, sizeof ss);
+  n->fd2 = socket (n->family, SOCK_DGRAM, 0);
+  if (n->fd2 < 0)
+    return -1;
+  if (n->family == AF_INET6)
+    {
+      struct sockaddr_in6 *s6 = (struct sockaddr_in6 *) &ss;
+
+      setsockopt (n->fd2, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof off);
+      s6->sin6_family = AF_INET6;
+      s6->sin6_addr = in6addr_any;
+      s6->sin6_port = htons ((uint16_t) atoi (port));
+      bl = sizeof *s6;
+    }
+  else
+    {
+      struct sockaddr_in *s4 = (struct sockaddr_in *) &ss;
+
+      s4->sin_family = AF_INET;
+      s4->sin_addr.s_addr = htonl (INADDR_ANY);
+      s4->sin_port = htons ((uint16_t) atoi (port));
+      bl = sizeof *s4;
+    }
+  if (bind (n->fd2, (struct sockaddr *) &ss, bl) != 0)
+    {
+      perror ("bind");
+      close (n->fd2);
+      return -1;
+    }
+  fcntl (n->fd2, F_SETFL, fcntl (n->fd2, F_GETFL) | O_NONBLOCK);
+  set_buffers (n->fd2);
+  ecn_enable (n->fd2, n->family);
+  sl = sizeof ss;
+  if (getsockname (n->fd2, (struct sockaddr *) &ss, &sl) == 0)
+    sa_to_addr ((struct sockaddr *) &ss, &n->local2);
+  n->have2 = 1;
+  return 0;
+}
+
+/* Do the addresses A and B end in the same port?  The sockets of a server
+   differ only in that.  */
+static int
+same_port (const gq_addr *a, const gq_addr *b)
+{
+  return a->len == b->len && a->len >= 2
+         && memcmp (a->data + a->len - 2, b->data + b->len - 2, 2) == 0;
+}
+
 /* An unbound-port UDP socket of the family the server's address is in.  */
 static int
 net_open (struct net *n, int family)
@@ -804,8 +871,16 @@ net_flush (gq_endpoint *ep, struct net *n)
       if (to.remote.len != (n->family == AF_INET6 ? 18 : 6))
         continue;
       dl = addr_to_sa (n->family, &to.remote, &dest);
-      /* A full socket buffer is a lost packet, which QUIC recovers from.  */
-      (void) net_send (n, out, len, (struct sockaddr *) &dest, dl, ecn);
+      {
+        /* From the socket the path says: a server answers on the address a
+           client was told to use as it does on the one it came to.  */
+        struct net via = *n;
+
+        if (n->have2 && same_port (&to.local, &n->local2))
+          via.fd = n->fd2;
+        /* A full socket buffer is a lost packet, which QUIC recovers from.  */
+        (void) net_send (&via, out, len, (struct sockaddr *) &dest, dl, ecn);
+      }
     }
 }
 
@@ -815,9 +890,9 @@ static void
 net_service (gq_endpoint *ep, struct net *n, int ms)
 {
   static uint8_t buf[65536];
-  struct pollfd pfd;
+  struct pollfd pfd[2];
   uint64_t t = gq_endpoint_timeout (ep), now = now_us ();
-  int k;
+  int k, w, nfd = 1;
 
   if (t)
     {
@@ -826,27 +901,42 @@ net_service (gq_endpoint *ep, struct net *n, int ms)
       if (until < ms)
         ms = until;
     }
-  pfd.fd = n->fd;
-  pfd.events = POLLIN;
-  pfd.revents = 0;
-  if (poll (&pfd, 1, ms) > 0 && (pfd.revents & POLLIN))
-    for (k = 0; k < 256; k++)
+  pfd[0].fd = n->fd;
+  pfd[0].events = POLLIN;
+  pfd[0].revents = 0;
+  if (n->have2)
+    {
+      pfd[1].fd = n->fd2;
+      pfd[1].events = POLLIN;
+      pfd[1].revents = 0;
+      nfd = 2;
+    }
+  if (poll (pfd, (nfds_t) nfd, ms) > 0)
+    for (w = 0; w < nfd; w++)
       {
-        struct sockaddr_storage from;
-        socklen_t fl = sizeof from;
-        gq_path path;
-        int ecn;
-        ssize_t got = net_recv (n, buf, sizeof buf, &from, &fl, &ecn);
+        struct net via = *n;
 
-        if (got <= 0)
-          break;
-        path.local = n->local;
-        sa_to_addr ((struct sockaddr *) &from, &path.remote);
-        if (ecn < 0)
-          gq_endpoint_recv (ep, now_us (), &path, buf, (size_t) got);
-        else
-          gq_endpoint_recv_ecn (ep, now_us (), &path, ecn, buf,
-                                (size_t) got);
+        if (!(pfd[w].revents & POLLIN))
+          continue;
+        via.fd = pfd[w].fd;
+        for (k = 0; k < 256; k++)
+          {
+            struct sockaddr_storage from;
+            socklen_t fl = sizeof from;
+            gq_path path;
+            int ecn;
+            ssize_t got = net_recv (&via, buf, sizeof buf, &from, &fl, &ecn);
+
+            if (got <= 0)
+              break;
+            path.local = w ? n->local2 : n->local;
+            sa_to_addr ((struct sockaddr *) &from, &path.remote);
+            if (ecn < 0)
+              gq_endpoint_recv (ep, now_us (), &path, buf, (size_t) got);
+            else
+              gq_endpoint_recv_ecn (ep, now_us (), &path, ecn, buf,
+                                    (size_t) got);
+          }
       }
   t = gq_endpoint_timeout (ep);
   if (t && t <= now_us ())
@@ -887,6 +977,7 @@ struct cs
   int updated;
   uint64_t started_us;
   int stats_logged;
+  struct net *net;		/* Client: its socket.  */
 };
 
 static struct stream *
@@ -1128,6 +1219,57 @@ ev_ticket (void *u, const gq_tls_ticket *t, uint32_t version)
   say ("TICKET saved\n");
 }
 
+/* Client: the server offers an address to move to (RFC 9000 section 9.6).
+   Take it, in the family the socket can reach, from the address the socket
+   is bound to: only the server's port or address differs.  */
+static void
+cli_preferred (void *u, const gq_preferred_address *pa)
+{
+  struct cs *cs = u;
+  struct net *n = cs->net;
+  struct sockaddr_storage ss;
+  gq_path np;
+  int r;
+
+  if (n == NULL || cs->c == NULL)
+    return;
+  memset (&ss, 0, sizeof ss);
+  if (n->family == AF_INET6)
+    {
+      struct sockaddr_in6 *s6 = (struct sockaddr_in6 *) &ss;
+
+      s6->sin6_family = AF_INET6;
+      if (pa->ipv6_port)
+        {
+          memcpy (&s6->sin6_addr, pa->ipv6, 16);
+          s6->sin6_port = htons (pa->ipv6_port);
+        }
+      else if (pa->ipv4_port)
+        {
+          /* An IPv4 server address, through a dual-stack socket.  */
+          s6->sin6_addr.s6_addr[10] = s6->sin6_addr.s6_addr[11] = 0xff;
+          memcpy (s6->sin6_addr.s6_addr + 12, pa->ipv4, 4);
+          s6->sin6_port = htons (pa->ipv4_port);
+        }
+      else
+        return;
+    }
+  else
+    {
+      struct sockaddr_in *s4 = (struct sockaddr_in *) &ss;
+
+      if (!pa->ipv4_port)
+        return;
+      s4->sin_family = AF_INET;
+      memcpy (&s4->sin_addr, pa->ipv4, 4);
+      s4->sin_port = htons (pa->ipv4_port);
+    }
+  np.local = n->local;
+  sa_to_addr ((struct sockaddr *) &ss, &np.remote);
+  r = gq_conn_migrate_preferred (cs->c, now_us (), &np);
+  say ("PREFERRED_ADDRESS %s\n", r == GQ_OK ? "migrating" : "not taken");
+}
+
 static void
 set_events (gq_conn_events *ev, struct cs *cs)
 {
@@ -1138,13 +1280,82 @@ set_events (gq_conn_events *ev, struct cs *cs)
   ev->stream_closed = stream_closed;
   ev->early_data_result = ev_early_result;
   ev->ticket = ev_ticket;
+  ev->preferred_address = cli_preferred;
 }
 
 struct server
 {
   struct run *r;
   struct cs *conns, *pending;
+  uint16_t port2;		/* The second port, for the preferred address.  */
 };
+
+/* The preferred address for a client (RFC 9000 section 9.6.1): the
+   address of this server that the client reaches, with the second port.
+   The address is the one the system would send from to get to the client,
+   found by connecting a datagram socket to it, which sends nothing.  */
+static int
+srv_preferred (void *u, const gq_path *client, gq_preferred_address *out)
+{
+  struct server *sv = u;
+  struct sockaddr_storage peer, mine;
+  socklen_t ml = sizeof mine, pl;
+  int fam, fd, ok = 0;
+
+  if (client->remote.len != 6 && client->remote.len != 18)
+    return 0;
+  fam = client->remote.len == 18 ? AF_INET6 : AF_INET;
+  pl = addr_to_sa (fam, &client->remote, &peer);
+  /* An IPv4 client of a dual-stack socket arrives as an IPv4-mapped IPv6
+     address; its server address is an IPv4 one.  */
+  if (fam == AF_INET6
+      && IN6_IS_ADDR_V4MAPPED (&((struct sockaddr_in6 *) &peer)->sin6_addr))
+    {
+      struct sockaddr_in s4;
+      struct sockaddr_in6 *s6 = (struct sockaddr_in6 *) &peer;
+
+      memset (&s4, 0, sizeof s4);
+      s4.sin_family = AF_INET;
+      memcpy (&s4.sin_addr, s6->sin6_addr.s6_addr + 12, 4);
+      s4.sin_port = s6->sin6_port;
+      memcpy (&peer, &s4, sizeof s4);
+      pl = sizeof s4;
+      fam = AF_INET;
+    }
+  fd = socket (fam, SOCK_DGRAM, 0);
+  if (fd < 0)
+    return 0;
+  if (connect (fd, (struct sockaddr *) &peer, pl) == 0
+      && getsockname (fd, (struct sockaddr *) &mine, &ml) == 0)
+    {
+      if (fam == AF_INET)
+        {
+          struct sockaddr_in *m = (struct sockaddr_in *) &mine;
+
+          if (m->sin_addr.s_addr != htonl (INADDR_ANY))
+            {
+              memcpy (out->ipv4, &m->sin_addr, 4);
+              out->ipv4_port = sv->port2;
+              ok = 1;
+            }
+        }
+      else
+        {
+          struct sockaddr_in6 *m = (struct sockaddr_in6 *) &mine;
+
+          if (!IN6_IS_ADDR_UNSPECIFIED (&m->sin6_addr))
+            {
+              memcpy (out->ipv6, &m->sin6_addr, 16);
+              out->ipv6_port = sv->port2;
+              ok = 1;
+            }
+        }
+    }
+  close (fd);
+  if (ok)
+    say ("PREFERRED_ADDRESS offered port=%u\n", (unsigned) sv->port2);
+  return ok;
+}
 
 static int
 srv_accept (void *u, const gq_path *from, gq_conn_events *ev)
@@ -1256,6 +1467,12 @@ run_server (struct run *r, const char *cert, const char *key)
     }
   memset (&sv, 0, sizeof sv);
   sv.r = r;
+  sv.port2 = (uint16_t) atoi (r->port2);
+  if (r->tc == TC_MIGRATION)
+    {
+      ec.conn.preferred_address = srv_preferred;
+      ec.conn.preferred_address_user = &sv;
+    }
   memset (&ee, 0, sizeof ee);
   ee.user = &sv;
   ee.accept = srv_accept;
@@ -1269,6 +1486,11 @@ run_server (struct run *r, const char *cert, const char *key)
   if (net_listen (&net, r->port) != 0)
     {
       fprintf (stderr, "cannot listen on port %s\n", r->port);
+      return 1;
+    }
+  if (r->tc == TC_MIGRATION && net_listen_second (&net, r->port2) != 0)
+    {
+      fprintf (stderr, "cannot listen on port %s\n", r->port2);
       return 1;
     }
   say ("LISTENING port=%s family=%s\n", r->port,
@@ -1285,6 +1507,8 @@ run_server (struct run *r, const char *cert, const char *key)
     }
   gq_endpoint_free (ep);
   close (net.fd);
+  if (net.have2)
+    close (net.fd2);
   return 0;
 }
 
@@ -1536,6 +1760,7 @@ client_session (struct run *r, const gq_trust *trust, size_t first,
       return 1;
     }
   cs->c = conn;
+  cs->net = &net;
 
   for (;;)
     {
@@ -1659,6 +1884,9 @@ main (void)
   r.downloads = env_or ("INTEROP_DOWNLOADS", "/downloads");
   r.certs = env_or ("INTEROP_CERTS", "/certs");
   r.port = env_or ("INTEROP_PORT", "443");
+  r.port2 = env_or ("INTEROP_PORT2", "4433");
+  if (strcmp (r.port, r.port2) == 0)
+    r.port2 = "4434";
   if (keylog && *keylog)
     {
       r.keylog = fopen (keylog, "a");

@@ -58,7 +58,7 @@ The runner knows nothing about quickstep; it only runs the image.
 | `ecn` | yes | yes | A transfer in which the sockets pass the ECN field of each datagram to and from the library (`IP_RECVTOS` / `IPV6_RECVTCLASS` on receipt, `IP_TOS` / `IPV6_TCLASS` as ancillary data on send), so it marks 1-RTT packets ECT(0), validates the peer's counts and reacts to CE |
 | `keyupdate` | yes | yes | The client updates its keys after the first 100 KiB; the server follows a peer's update in every case |
 | `http3` | 127 | 127 | No HTTP/3 in quickstep |
-| `connectionmigration` | 127 | - | The library does not use the server's `preferred_address` |
+| `connectionmigration` | yes | `transfer` | The server also listens on a second port (`INTEROP_PORT2`, default 4433) and offers it, with the address that reaches the client, as its preferred address (RFC 9000 section 9.6). The runner starts the client that is to migrate as a `transfer`, and any client of this endpoint takes up an offer |
 
 The endpoint assumes a 100 ms round trip until it measures one (the library
 default is 333 ms), and in the `multiconnect` case, which the runner uses for

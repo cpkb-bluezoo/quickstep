@@ -99,8 +99,7 @@ Pre-alpha.  What exists today:
            for an application that passes on the ECN field of datagrams;
            qlog events as lines of text; interoperating with quiche
 
-Not yet written: the server's
-preferred_address, and the HTTP/3 and DoQ examples.  See the manual
+Not yet written: the HTTP/3 and DoQ examples.  See the manual
 (doc/quickstep.texi) for the design, security policy and roadmap.
 
 Building
