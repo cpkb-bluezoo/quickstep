@@ -38,7 +38,7 @@ Pre-alpha.  What exists today:
   tickets  stateless session ticket key ring; PSK resumption in the
            handshake engines (RFC 8448 section 4 reproduced)
   sign     private key loading and CertificateVerify signatures
-           (GnuTLS backend; ML-DSA needs a backend that has it)
+           (GnuTLS backend for the classical keys; ML-DSA is libgcrypt's)
   trust    trust anchors and certificate chain validation (GnuTLS
            backend behind a replaceable interface)
   policy   the closed set of versions, suites, groups and signature

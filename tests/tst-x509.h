@@ -32,6 +32,35 @@
    it is another matter: gq_sigscheme_available.)  */
 #define TST_HAVE_MLDSA (HAVE_DECL_GNUTLS_PK_MLDSA65 && HAVE_DECL_GNUTLS_SIGN_MLDSA65)
 
+/* Can the GnuTLS in use make ML-DSA keys, that is, has it a backend for
+   them (leancrypto)?  That is a different matter from whether the library can
+   do ML-DSA, which libgcrypt gives it anyway.  The tests that need GnuTLS
+   itself to make or validate ML-DSA (its own keys, chains signed with
+   ML-DSA) ask this, and with GQ_EXPECT_MLDSA set they fail where it says
+   no.  */
+static inline int
+tst_gnutls_mldsa (void)
+{
+#if TST_HAVE_MLDSA
+  static int probed = -1;
+
+  if (probed < 0)
+    {
+      gnutls_x509_privkey_t k;
+
+      probed = 0;
+      if (gnutls_x509_privkey_init (&k) >= 0)
+        {
+          probed = gnutls_x509_privkey_generate (k, GNUTLS_PK_MLDSA65, 0, 0) >= 0;
+          gnutls_x509_privkey_deinit (k);
+        }
+    }
+  return probed;
+#else
+  return 0;
+#endif
+}
+
 enum tst_key
 {
   TST_ECDSA256, TST_ECDSA384, TST_ED25519, TST_RSA2048, TST_RSA1024,

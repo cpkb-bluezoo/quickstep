@@ -29,8 +29,19 @@
    RSA-PSS needs an RSA key of at least 2048 bits, Ed25519 needs an
    Ed25519 key, ML-DSA needs an ML-DSA key.
 
-   ML-DSA schemes are in the policy but only usable when the backend
-   library implements them; otherwise the functions return
+   ML-DSA (FIPS 204, RFC 9881, draft-ietf-tls-mldsa) is done by libgcrypt,
+   which has had it since 1.12.0 (the build floor), so it is there in every
+   build that has GnuTLS, whether or not that GnuTLS has an ML-DSA backend
+   of its own.  This module reads what GnuTLS cannot without one: the
+   private key forms of RFC 9881 (PKCS#8 with the seed, the expanded key or
+   both, in PEM; encrypted ones are for GnuTLS and it can read them only
+   with its backend), and the public key of a certificate with an ML-DSA
+   key.  A signature is the pure ML-DSA of FIPS 204 with the empty context.
+   Validating a certificate chain is GnuTLS's work (trust.h), so a chain
+   with an ML-DSA signature in it needs its backend; a classical CA over an
+   ML-DSA key does not, but needs a GnuTLS that knows the key algorithm
+   (3.8.9 and later; an older one refuses it as weak).  If libgcrypt cannot do ML-DSA at run time, GnuTLS's
+   own is used when it can, and otherwise the functions return
    GQ_ERR_UNAVAILABLE for those schemes.  */
 
 #ifndef QUICKSTEP_SIGN_H
@@ -50,8 +61,8 @@ typedef struct gq_privkey gq_privkey;
    makes 4627 octets, well above RSA-4096.  */
 #define GQ_SIGNATURE_MAX 4627
 
-/* 1 if the backend can actually use SCHEME (ML-DSA schemes need a backend
-   that implements them).  The result is computed once and cached.  */
+/* 1 if SCHEME can actually be used: always for the classical schemes, and for
+   the ML-DSA ones when libgcrypt or GnuTLS can do them.  */
 int gq_sigscheme_available (unsigned scheme);
 
 /* Extract the public key of a DER X.509 certificate.  RSA keys under

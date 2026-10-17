@@ -45,6 +45,8 @@ libquickstep_la_SOURCES = \
   policy.c \
   protect.c \
   listen.c \
+  mldsa.c \
+  mldsa.h \
   ranges.c \
   conn.c \
   conn_datagram.c \

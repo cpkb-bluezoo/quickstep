@@ -13,6 +13,17 @@ quickstep.pc.  The C API (gq_ / GQ_) is unchanged.
 * Noteworthy changes in development (unreleased)
 
 ** Initial development.
+** ML-DSA (FIPS 204) signatures work whatever GnuTLS the library is built
+with: they are libgcrypt's (1.12.0 and later, the build floor), where they
+had needed a GnuTLS with the leancrypto backend, which few have.  The
+engines now offer the ML-DSA-44, -65 and -87 signature schemes by default, and
+a server can use an ML-DSA key.  The library reads what GnuTLS cannot
+without the backend: the private key forms of RFC 9881 (seed, expanded key or
+both, as PKCS#8 in PEM) and the key in a certificate.  A certificate chain
+with an ML-DSA signature in it is still validated by GnuTLS and still needs
+its backend; a classical CA over an ML-DSA key does not, but needs a GnuTLS
+from 3.8.9 on, which knows the key algorithm (an older one, Ubuntu 24.04's
+3.8.3, refuses it as weak: validate the chain with the verify_peer callback).
 ** QUIC: a packet sent in the ordinary way could be taken for a path MTU
 probe, because one field of the storage it is assembled in was never cleared.
 The loss of such a packet is not treated as loss of its contents (RFC 9000

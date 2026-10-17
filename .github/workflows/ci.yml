@@ -7,11 +7,12 @@ name: CI
 # that quickstep needs and Ubuntu 24.04 does not have: one definition of the
 # build, used here and for the image the interop workflow runs.
 #
-# The distribution's GnuTLS has no ML-DSA, so the ML-DSA code (sign.c, the
-# certificate chains, the handshakes) would otherwise never run.  The
-# "ML-DSA" job builds a GnuTLS with the leancrypto backend (pinned in the
-# Dockerfile) and runs the unit tests against it with GQ_EXPECT_MLDSA set,
-# which makes the ML-DSA tests fail instead of skipping if the backend is
+# ML-DSA is libgcrypt's, so its tests run in every job.  The distribution's
+# GnuTLS has no ML-DSA of its own, though, so what needs that (its keys, its
+# agreement with libgcrypt, chains signed with ML-DSA) would otherwise never
+# run.  The "ML-DSA" job builds a GnuTLS with the leancrypto backend (pinned
+# in the Dockerfile) and runs the unit tests against it with GQ_EXPECT_MLDSA
+# set, which makes those tests fail instead of skipping if the backend is
 # missing.
 
 on:

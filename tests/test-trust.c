@@ -42,6 +42,7 @@ main (void)
 #else
 
 #include "tst-x509.h"
+#include "tst-mldsa-cert.h"
 
 static int
 make_cert (struct tst_cert *out, const char *cn, const char *san,
@@ -90,6 +91,97 @@ verify (gq_trust *t, const struct tst_cert *leaf, const char *host,
   return r;
 }
 
+
+/* A classical CA over an ML-DSA leaf is a chain a GnuTLS that knows the key
+   algorithm validates whatever backend it has (it checks the CA's signature,
+   and has no need of the leaf's key): the one an application is likely to
+   meet first.  An older GnuTLS (Ubuntu 24.04's) refuses it as a weak
+   algorithm, and the test skips there.  The leaves are made without GnuTLS's
+   help (tst-mldsa-cert.h).  */
+static void
+test_mldsa_hybrid_chains (void)
+{
+  static const unsigned schemes[] = { GQ_SIG_MLDSA44, GQ_SIG_MLDSA65,
+                                      GQ_SIG_MLDSA87 };
+  struct tst_cert ca, other_ca;
+  static struct tst_mlident leaf, expired, client;
+  gq_trust *t, *t_other, *empty;
+  enum gq_cert_error why;
+  size_t i;
+
+  if (!tst_mldsa_ready (tst_gnutls_validates_mldsa (),
+                        "the ML-DSA hybrid chain tests"))
+    return;
+  CHECK_EQ (make_cert (&ca, "Test CA", NULL, NULL, -3600, 86400,
+                       GNUTLS_DIG_SHA256), 0);
+  CHECK_EQ (make_cert (&other_ca, "Other CA", NULL, NULL, -3600, 86400,
+                       GNUTLS_DIG_SHA256), 0);
+  t = trust_for (&ca);
+  t_other = trust_for (&other_ca);
+  empty = trust_for (NULL);
+
+  for (i = 0; i < 3; i++)
+    {
+      gq_slice c[1];
+      uint8_t bad[8192];
+
+      CHECK_EQ (tst_make_mldsa_cert (&leaf, schemes[i], "example.test",
+                                     "example.test", 0, &ca, -3600, 86400), 0);
+      CHECK_EQ (tst_make_mldsa_cert (&expired, schemes[i], "example.test",
+                                     "example.test", 0, &ca, -7200, -3600), 0);
+      CHECK_EQ (tst_make_mldsa_cert (&client, schemes[i], "client.test",
+                                     "client.test", 1, &ca, -3600, 86400), 0);
+      c[0] = leaf.chain[0];
+
+      /* Accepted, with and without a host name, under the MEDIUM profile.  */
+      CHECK_EQ (gq_trust_verify_chain (t, c, 1, "example.test", &why), GQ_OK);
+      CHECK_EQ (why, GQ_CERT_OK);
+      CHECK_EQ (gq_trust_verify_chain (t, c, 1, NULL, &why), GQ_OK);
+
+      /* ...and refused as any chain is.  */
+      CHECK_EQ (gq_trust_verify_chain (t, c, 1, "other.test", &why),
+                GQ_ERR_CERT);
+      CHECK_EQ (why, GQ_CERT_HOSTNAME);
+      CHECK_EQ (gq_trust_verify_chain (t_other, c, 1, "example.test", &why),
+                GQ_ERR_CERT);
+      CHECK_EQ (why, GQ_CERT_UNTRUSTED);
+      CHECK_EQ (gq_trust_verify_chain (empty, c, 1, "example.test", &why),
+                GQ_ERR_CERT);
+      CHECK_EQ (why, GQ_CERT_UNTRUSTED);
+      c[0] = expired.chain[0];
+      CHECK_EQ (gq_trust_verify_chain (t, c, 1, "example.test", &why),
+                GQ_ERR_CERT);
+      CHECK_EQ (why, GQ_CERT_EXPIRED);
+
+      /* The certificate's own signature (the CA's), changed in one bit.  */
+      memcpy (bad, leaf.cert, leaf.cert_len);
+      bad[leaf.cert_len - 1] ^= 1;
+      c[0] = (gq_slice) { bad, leaf.cert_len };
+      CHECK_EQ (gq_trust_verify_chain (t, c, 1, "example.test", &why),
+                GQ_ERR_CERT);
+      CHECK (why != GQ_CERT_OK);
+
+      /* The purpose: a client certificate serves a client, and a server
+         certificate a server.  */
+      c[0] = client.chain[0];
+      CHECK_EQ (gq_trust_verify_chain_for (t, c, 1, NULL, GQ_PURPOSE_CLIENT,
+                                           &why), GQ_OK);
+      CHECK_EQ (gq_trust_verify_chain_for (t, c, 1, "client.test",
+                                           GQ_PURPOSE_SERVER, &why),
+                GQ_ERR_CERT);
+
+      tst_free_mldsa_cert (&leaf);
+      tst_free_mldsa_cert (&expired);
+      tst_free_mldsa_cert (&client);
+    }
+
+  gq_trust_free (t);
+  gq_trust_free (t_other);
+  gq_trust_free (empty);
+  tst_free_cert (&ca);
+  tst_free_cert (&other_ca);
+}
+
 #if TST_HAVE_MLDSA
 
 /* Verify the chain of CERTS (leaf first) against T for example.test.  */
@@ -110,13 +202,12 @@ verify_chain (gq_trust *t, const struct tst_cert *const *certs, size_t n,
   return r;
 }
 
-/* Chains made of ML-DSA keys (FIPS 204, certificates as in
-   draft-ietf-lamps-dilithium-certificates), checked under the same MEDIUM
-   profile as any other: a root, an intermediate and a leaf of three
+/* Chains made of ML-DSA keys (FIPS 204, certificates as in RFC 9881),
+   checked under the same MEDIUM profile as any other: a root, an intermediate and a leaf of three
    different parameter sets; a classical CA over an ML-DSA leaf and the
    other way round; and the ways such a chain must fail.  Needs a GnuTLS
-   with an ML-DSA backend to make the keys (GQ_EXPECT_MLDSA makes its
-   absence a failure).  */
+   with an ML-DSA backend, to make the keys and to check the signatures of
+   ML-DSA (GQ_EXPECT_MLDSA makes its absence a failure).  */
 static void
 test_mldsa_chains (void)
 {
@@ -127,8 +218,7 @@ test_mldsa_chains (void)
   gnutls_datum_t d;
   gq_slice s;
 
-  if (!tst_mldsa_ready (gq_sigscheme_available (GQ_SIG_MLDSA65),
-                        "the ML-DSA chain tests"))
+  if (!tst_mldsa_ready (tst_gnutls_mldsa (), "the ML-DSA chain tests"))
     return;
 
   CHECK_EQ (tst_make_cert (&root, TST_MLDSA65, "ML-DSA root", NULL, NULL,
@@ -293,6 +383,7 @@ main (void)
       fprintf (stderr, "note: cannot generate RSA-1024 here; skipped\n");
   }
 
+  test_mldsa_hybrid_chains ();
   test_mldsa_chains ();
 
   gq_trust_free (t);

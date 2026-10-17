@@ -50,6 +50,7 @@ main (void)
 #else
 
 #include "tst-fix12.h"
+#include "tst-mldsa-cert.h"
 
 #define MAXQ 8192
 #define MAXS 64
@@ -1251,57 +1252,59 @@ test_lost_handshake_datagram (void)
     }
 }
 
-#if TST_HAVE_MLDSA
-
 /* A QUIC handshake with an ML-DSA server certificate: its chain and the
    CertificateVerify signature (2420 to 4627 bytes) make the server's
    handshake flight several kilobytes, which has to be split over packets,
    held back by the amplification limit until the client's address is
-   validated, and recovered if some are lost.  */
+   validated, and recovered if some are lost.  The certificate is made
+   without GnuTLS's help (tst-mldsa-cert.h), so this runs wherever the
+   library does.  */
 static void
 test_mldsa_handshake (void)
 {
-  static const struct ident *ids[3];
+  static const unsigned schemes[] = { GQ_SIG_MLDSA44, GQ_SIG_MLDSA65,
+                                      GQ_SIG_MLDSA87 };
   static const uint32_t versions[] = { GQ_VERSION_1, GQ_VERSION_2 };
   size_t i, v;
   unsigned loss;
 
-  if (!tst_mldsa_ready (gq_sigscheme_available (GQ_SIG_MLDSA65),
+  /* The client validates the chain, which a GnuTLS that does not know the
+     key algorithm cannot (and a QUIC connection has no hook to replace it;
+     the TLS engines' own tests do that).  */
+  if (!tst_mldsa_ready (tst_gnutls_validates_mldsa (),
                         "the QUIC ML-DSA handshake tests"))
     return;
-  ids[0] = &fx_mldsa44;
-  ids[1] = &fx_mldsa65;
-  ids[2] = &fx_mldsa87;
   for (i = 0; i < 3; i++)
-    for (v = 0; v < 2; v++)
-      for (loss = 0; loss <= 10; loss += 10)
-        {
-          struct pair *p;
-          gq_conn_config cfg;
+    {
+      static struct tst_mlident ml;
+      static struct ident id;
 
-          memset (&cfg, 0, sizeof cfg);
-          cfg.version = versions[v];
-          g_server_ident = ids[i];
-          p = pair_new (&cfg, &cfg, loss, (uint32_t) (7 + i * 3 + v));
-          g_server_ident = NULL;
-          CHECK (run (&p->net, both_connected, 60000000));
-          CHECK (p->cli.connected && p->srv.connected);
-          CHECK (gq_conn_is_established (p->cli.c));
-          CHECK (gq_conn_is_established (p->srv.c));
-          CHECK_EQ (gq_conn_version (p->cli.c), versions[v]);
-          pair_free (p);
-        }
+      CHECK_EQ (tst_make_mldsa_cert (&ml, schemes[i], "mldsa", "example.test",
+                                     0, &fx_ca, -3600, 86400), 0);
+      memset (&id, 0, sizeof id);
+      id.key = ml.key;
+      id.chain[0] = ml.chain[0];
+      for (v = 0; v < 2; v++)
+        for (loss = 0; loss <= 10; loss += 10)
+          {
+            struct pair *p;
+            gq_conn_config cfg;
+
+            memset (&cfg, 0, sizeof cfg);
+            cfg.version = versions[v];
+            g_server_ident = &id;
+            p = pair_new (&cfg, &cfg, loss, (uint32_t) (7 + i * 3 + v));
+            g_server_ident = NULL;
+            CHECK (run (&p->net, both_connected, 60000000));
+            CHECK (p->cli.connected && p->srv.connected);
+            CHECK (gq_conn_is_established (p->cli.c));
+            CHECK (gq_conn_is_established (p->srv.c));
+            CHECK_EQ (gq_conn_version (p->cli.c), versions[v]);
+            pair_free (p);
+          }
+      tst_free_mldsa_cert (&ml);
+    }
 }
-
-#else
-
-static void
-test_mldsa_handshake (void)
-{
-  tst_mldsa_ready (0, "the QUIC ML-DSA handshake tests");
-}
-
-#endif
 
 /* NREQ requests of REQ bytes, each answered with RESP bytes.  */
 static void

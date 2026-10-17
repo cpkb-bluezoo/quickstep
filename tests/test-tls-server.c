@@ -39,6 +39,7 @@ main (void)
 #else
 
 #include "tst-x509.h"
+#include "tst-mldsa-cert.h"
 
 /* ------------------------------------------------------------------ */
 /* Fixtures                                                           */
@@ -1081,6 +1082,137 @@ test_client_auth (void)
   }
 }
 
+/* Accept any chain: the validation of a chain with an ML-DSA key in it is
+   GnuTLS's, and an older one cannot (tst_gnutls_validates_mldsa), but the
+   handshake's signatures are not its concern.  */
+static int
+accept_chain (void *u, const gq_slice *chain, size_t n, const char *name)
+{
+  (void) u; (void) chain; (void) n; (void) name;
+  return 0;
+}
+
+/* A handshake with an ML-DSA key (FIPS 204; scheme codes of
+   draft-ietf-tls-mldsa) signing the server's CertificateVerify, and a
+   client's.  The signature is 2420 to 4627 bytes, so the flight is far
+   larger than with any classical key; it is fed whole and a byte at a
+   time.  The certificates are made without GnuTLS's help (a classical CA
+   over an ML-DSA key, tst-mldsa-cert.h), so this runs wherever the library
+   does.  VALIDATE says whether the chains are validated (by GnuTLS, which
+   only some can do for an ML-DSA key) or accepted by a callback.  */
+static void
+mldsa_handshakes (int validate)
+{
+  static const uint16_t schemes[] = { GQ_SIG_MLDSA44, GQ_SIG_MLDSA65,
+                                      GQ_SIG_MLDSA87 };
+  static struct tst_mlident srv, cli;
+  size_t i, chunk;
+  struct pair *p;
+
+#define NEW_PAIR() \
+  do { \
+    p = pair_new (); \
+    if (!validate) \
+      p->csink.verify_peer = p->ssink.verify_peer = accept_chain; \
+  } while (0)
+
+  CHECK (gq_sigscheme_available (GQ_SIG_MLDSA65));
+  for (i = 0; i < 3; i++)
+    {
+      uint16_t only[1] = { schemes[i] };
+
+      CHECK_EQ (tst_make_mldsa_cert (&srv, schemes[i], "ML-DSA", "example.test",
+                                     0, &ca, -3600, 86400), 0);
+      for (chunk = 0; chunk < 2; chunk++)
+        {
+          /* Offering only that scheme: nothing else could have signed.  */
+          NEW_PAIR ();
+          p->sc.credentials = (gq_tls_credentials) { srv.chain, 1, srv.key };
+          p->cc.sigschemes = p->sc.sigschemes = only;
+          p->cc.n_sigschemes = p->sc.n_sigschemes = 1;
+          pair_create (p);
+          CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+          CHECK_EQ (pump (p, chunk), GQ_OK);
+          check_success (p);
+          pair_free (p);
+
+          /* With the default lists: the key decides.  */
+          NEW_PAIR ();
+          p->sc.credentials = (gq_tls_credentials) { srv.chain, 1, srv.key };
+          pair_create (p);
+          CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+          CHECK_EQ (pump (p, chunk), GQ_OK);
+          check_success (p);
+          pair_free (p);
+        }
+
+      /* A client that offers another parameter set only cannot be signed
+         for.  */
+      NEW_PAIR ();
+      {
+        uint16_t other[1] = { schemes[(i + 1) % 3] };
+
+        p->sc.credentials = (gq_tls_credentials) { srv.chain, 1, srv.key };
+        p->cc.sigschemes = other;
+        p->cc.n_sigschemes = 1;
+        pair_create (p);
+        CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+        CHECK (pump (p, 0) != GQ_OK);
+        CHECK_EQ (p->s.alert, GQ_ALERT_HANDSHAKE_FAILURE);
+        CHECK (!p->c.complete && !p->s.complete);
+        pair_free (p);
+      }
+
+      /* A client that offers no ML-DSA at all, with a server whose only key
+         is one.  */
+      NEW_PAIR ();
+      {
+        uint16_t classical[2] = { GQ_SIG_ED25519,
+                                  GQ_SIG_ECDSA_SECP256R1_SHA256 };
+
+        p->sc.credentials = (gq_tls_credentials) { srv.chain, 1, srv.key };
+        p->cc.sigschemes = classical;
+        p->cc.n_sigschemes = 2;
+        pair_create (p);
+        CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+        CHECK (pump (p, 0) != GQ_OK);
+        CHECK (!p->c.complete && !p->s.complete);
+        pair_free (p);
+      }
+      tst_free_mldsa_cert (&srv);
+    }
+
+  /* A client certificate with an ML-DSA key.  */
+  CHECK_EQ (tst_make_mldsa_cert (&cli, GQ_SIG_MLDSA65, "client", "client.test",
+                                 1, &ca, -3600, 86400), 0);
+  for (chunk = 0; chunk < 2; chunk++)
+    {
+      NEW_PAIR ();
+      p->sc.client_auth = GQ_CLIENT_AUTH_REQUIRED;
+      p->sc.client_trust = server_trust;
+      client_cert (p, cli.chain, cli.key);
+      pair_create (p);
+      CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+      CHECK_EQ (pump (p, chunk), GQ_OK);
+      check_success (p);
+      CHECK_EQ (p->s.info.client_auth_requested, 1);
+      CHECK_EQ (p->c.info.client_auth_sent, 1);
+      CHECK_EQ (p->s.info.client_auth_sent, 1);	/* Verified.  */
+      pair_free (p);
+    }
+  tst_free_mldsa_cert (&cli);
+#undef NEW_PAIR
+}
+
+static void
+test_mldsa_handshake (void)
+{
+  mldsa_handshakes (0);
+  if (tst_mldsa_ready (tst_gnutls_validates_mldsa (),
+                       "the ML-DSA handshakes with validated chains"))
+    mldsa_handshakes (1);
+}
+
 #if TST_HAVE_MLDSA
 
 struct mldsa_ident
@@ -1108,144 +1240,55 @@ mldsa_ident_free (struct mldsa_ident *id)
   tst_free_cert (&id->c);
 }
 
-/* A handshake with an ML-DSA key (FIPS 204; scheme codes of
-   draft-ietf-tls-mldsa) signing the server's CertificateVerify, and a
-   client's.  The signature is 2420 to 4627 bytes, so the flight is far
-   larger than with any classical key; it is fed whole and a byte at a
-   time.  Needs a GnuTLS with an ML-DSA backend.  */
-static void
-test_mldsa_handshake (void)
-{
-  static const struct
-  {
-    enum tst_key kind;
-    uint16_t scheme;
-  } kinds[] = {
-    { TST_MLDSA44, GQ_SIG_MLDSA44 },
-    { TST_MLDSA65, GQ_SIG_MLDSA65 },
-    { TST_MLDSA87, GQ_SIG_MLDSA87 }
-  };
-  static struct mldsa_ident srv, cli, pq_root_leaf;
-  static struct tst_cert pq_root;
-  size_t i, chunk;
-  struct pair *p;
-
-  if (!tst_mldsa_ready (gq_sigscheme_available (GQ_SIG_MLDSA65),
-                        "the ML-DSA handshake tests"))
-    return;
-
-  for (i = 0; i < sizeof kinds / sizeof kinds[0]; i++)
-    {
-      uint16_t only[1] = { kinds[i].scheme };
-
-      /* A classical CA over the ML-DSA leaf.  */
-      mldsa_ident (&srv, kinds[i].kind, &ca, "example.test",
-                   GNUTLS_KP_TLS_WWW_SERVER);
-      for (chunk = 0; chunk < 2; chunk++)
-        {
-          /* Offering only that scheme: nothing else could have signed.  */
-          p = pair_new ();
-          p->sc.credentials = (gq_tls_credentials) { srv.chain, 1, srv.key };
-          p->cc.sigschemes = p->sc.sigschemes = only;
-          p->cc.n_sigschemes = p->sc.n_sigschemes = 1;
-          pair_create (p);
-          CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
-          CHECK_EQ (pump (p, chunk), GQ_OK);
-          check_success (p);
-          pair_free (p);
-
-          /* With the default lists: the key decides.  */
-          p = pair_new ();
-          p->sc.credentials = (gq_tls_credentials) { srv.chain, 1, srv.key };
-          pair_create (p);
-          CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
-          CHECK_EQ (pump (p, chunk), GQ_OK);
-          check_success (p);
-          pair_free (p);
-        }
-
-      /* A client that offers another parameter set only cannot be signed
-         for.  */
-      p = pair_new ();
-      {
-        uint16_t other[1] = { kinds[(i + 1) % 3].scheme };
-
-        p->sc.credentials = (gq_tls_credentials) { srv.chain, 1, srv.key };
-        p->cc.sigschemes = other;
-        p->cc.n_sigschemes = 1;
-        pair_create (p);
-        CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
-        CHECK (pump (p, 0) != GQ_OK);
-        CHECK_EQ (p->s.alert, GQ_ALERT_HANDSHAKE_FAILURE);
-        CHECK (!p->c.complete && !p->s.complete);
-        pair_free (p);
-      }
-      mldsa_ident_free (&srv);
-    }
-
-  /* A client certificate with an ML-DSA key.  */
-  mldsa_ident (&cli, TST_MLDSA65, &ca, "client.test",
-               GNUTLS_KP_TLS_WWW_CLIENT);
-  for (chunk = 0; chunk < 2; chunk++)
-    {
-      p = pair_new ();
-      p->sc.client_auth = GQ_CLIENT_AUTH_REQUIRED;
-      p->sc.client_trust = server_trust;
-      client_cert (p, cli.chain, cli.key);
-      pair_create (p);
-      CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
-      CHECK_EQ (pump (p, chunk), GQ_OK);
-      check_success (p);
-      CHECK_EQ (p->s.info.client_auth_requested, 1);
-      CHECK_EQ (p->c.info.client_auth_sent, 1);
-      CHECK_EQ (p->s.info.client_auth_sent, 1);	/* Verified.  */
-      pair_free (p);
-    }
-  mldsa_ident_free (&cli);
-
-  /* Both ends' certificates under an ML-DSA root: every signature in the
-     chain and in the handshake is post-quantum.  */
-  CHECK_EQ (tst_make_cert (&pq_root, TST_MLDSA87, "ML-DSA root", NULL, NULL,
-                           -3600, 86400, GNUTLS_DIG_UNKNOWN), 0);
-  mldsa_ident (&pq_root_leaf, TST_MLDSA44, &pq_root, "example.test",
-               GNUTLS_KP_TLS_WWW_SERVER);
-  {
-    gq_trust *pq_trust = trust_of (&pq_root);
-
-    p = pair_new ();
-    p->cc.trust = pq_trust;
-    p->sc.credentials = (gq_tls_credentials) { pq_root_leaf.chain, 1,
-                                               pq_root_leaf.key };
-    pair_create (p);
-    CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
-    CHECK_EQ (pump (p, 0), GQ_OK);
-    check_success (p);
-    pair_free (p);
-
-    /* The classical trust anchor does not vouch for it.  */
-    p = pair_new ();
-    p->sc.credentials = (gq_tls_credentials) { pq_root_leaf.chain, 1,
-                                               pq_root_leaf.key };
-    pair_create (p);
-    CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
-    CHECK_EQ (pump (p, 0), GQ_ERR_CERT);
-    CHECK_EQ (p->c.alert, GQ_ALERT_UNKNOWN_CA);
-    pair_free (p);
-    gq_trust_free (pq_trust);
-  }
-  mldsa_ident_free (&pq_root_leaf);
-  tst_free_cert (&pq_root);
-}
-
-#else
-
-static void
-test_mldsa_handshake (void)
-{
-  tst_mldsa_ready (0, "the ML-DSA handshake tests");
-}
-
 #endif
+
+/* Both ends' certificates under an ML-DSA root: every signature in the chain
+   and in the handshake is post-quantum.  Validating the chain is GnuTLS's
+   work (trust.c), and checking an ML-DSA signature on a certificate needs the
+   ML-DSA backend of GnuTLS, so this runs only where it has one
+   (GQ_EXPECT_MLDSA makes its absence a failure).  */
+static void
+test_mldsa_handshake_pq_root (void)
+{
+#if !TST_HAVE_MLDSA
+  tst_mldsa_ready (0, "the ML-DSA root handshake test");
+#else
+  static struct mldsa_ident leaf;
+  static struct tst_cert root;
+  struct pair *p;
+  gq_trust *pq_trust;
+
+  if (!tst_mldsa_ready (tst_gnutls_mldsa (), "the ML-DSA root handshake test"))
+    return;
+  CHECK_EQ (tst_make_cert (&root, TST_MLDSA87, "ML-DSA root", NULL, NULL,
+                           -3600, 86400, GNUTLS_DIG_UNKNOWN), 0);
+  mldsa_ident (&leaf, TST_MLDSA44, &root, "example.test",
+               GNUTLS_KP_TLS_WWW_SERVER);
+  pq_trust = trust_of (&root);
+
+  p = pair_new ();
+  p->cc.trust = pq_trust;
+  p->sc.credentials = (gq_tls_credentials) { leaf.chain, 1, leaf.key };
+  pair_create (p);
+  CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+  CHECK_EQ (pump (p, 0), GQ_OK);
+  check_success (p);
+  pair_free (p);
+
+  /* The classical trust anchor does not vouch for it.  */
+  p = pair_new ();
+  p->sc.credentials = (gq_tls_credentials) { leaf.chain, 1, leaf.key };
+  pair_create (p);
+  CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+  CHECK_EQ (pump (p, 0), GQ_ERR_CERT);
+  CHECK_EQ (p->c.alert, GQ_ALERT_UNKNOWN_CA);
+  pair_free (p);
+
+  gq_trust_free (pq_trust);
+  mldsa_ident_free (&leaf);
+  tst_free_cert (&root);
+#endif
+}
 
 static void
 test_key_update (void)
@@ -2063,6 +2106,7 @@ main (void)
   test_alpn_and_quic ();
   test_client_auth ();
   test_mldsa_handshake ();
+  test_mldsa_handshake_pq_root ();
   test_key_update ();
   test_client_hello_failures ();
   test_hrr_client_hello_failures ();

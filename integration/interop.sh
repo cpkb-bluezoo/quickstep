@@ -80,6 +80,13 @@ mkcert ()
 } || gen_ok=0
 [ $gen_ok = 1 ] || { echo "cannot generate certificates" >&2; exit 77; }
 
+# ML-DSA certificates, if this OpenSSL has ML-DSA (3.5 and later).  Its keys
+# carry the seed and the expanded key (RFC 9881), and the CA is classical.
+have_mldsa=0
+if "$OPENSSL" list -signature-algorithms 2>/dev/null | grep -q 'ML-DSA-65'; then
+  { mkcert mldsa ML-DSA-65 && mkcert climl ML-DSA-65; } && have_mldsa=1
+fi
+
 head -c 200000 /dev/urandom | od -An -tx1 | head -c 200000 > big
 BIGSIZE=$(wc -c < big | tr -d ' ')
 mkdir www && cp big www/big
@@ -214,6 +221,15 @@ if "$OPENSSL" s_server -help >/dev/null 2>&1; then
     "--expect $HTTP200" ok "result=ok"
   scenario "openssl: Ed25519 certificate" openssl "-cert ed.pem -key ed.key -www" \
     "--expect $HTTP200" ok "result=ok"
+  if [ $have_mldsa = 1 ]; then
+    # The signature of the server's CertificateVerify is ML-DSA-65, made by
+    # OpenSSL with a key of its own making.
+    scenario "openssl: ML-DSA-65 certificate" openssl "-cert mldsa.pem -key mldsa.key -www" \
+      "--expect $HTTP200" ok "result=ok"
+    scenario "openssl: ML-DSA-65 client certificate" openssl \
+      "$OS -Verify 1 -CAfile ca.pem" \
+      "--cert climl.pem --key climl.key --expect $HTTP200" ok "client_auth_requested=1" "client_auth_sent=1"
+  fi
   scenario "openssl: TLS_AES_128_GCM_SHA256" openssl "$OS -ciphersuites TLS_AES_128_GCM_SHA256" \
     "--expect $HTTP200" ok "suite=0x1301"
   scenario "openssl: TLS_AES_256_GCM_SHA384 (SHA-384 schedule)" openssl "$OS -ciphersuites TLS_AES_256_GCM_SHA384" \
@@ -511,6 +527,12 @@ if "$OPENSSL" s_client -help >/dev/null 2>&1; then
     "-ciphersuites TLS_AES_256_GCM_SHA384" ok "suite=0x1302"
   server_scenario "server/openssl: RSA certificate" openssl "--cert rsa.pem --key rsa.key" "" ok "result=ok"
   server_scenario "server/openssl: Ed25519 certificate" openssl "--cert ed.pem --key ed.key" "" ok "result=ok"
+  if [ $have_mldsa = 1 ]; then
+    server_scenario "server/openssl: ML-DSA-65 certificate" openssl \
+      "--cert mldsa.pem --key mldsa.key" "" ok "result=ok"
+    server_scenario "server/openssl: ML-DSA-65 client certificate" openssl \
+      "$SC --client-auth required --ca ca.pem" "-cert climl.pem -key climl.key" ok "client_auth=1"
+  fi
   server_scenario "server/openssl: SNI selects the certificate" openssl \
     "$SC --sni example.test=ec.pem:ec.key --sni other.test=rsa.pem:rsa.key" \
     "-servername other.test -verify_hostname other.test" ok "sni=other.test"

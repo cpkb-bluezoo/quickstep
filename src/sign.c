@@ -28,6 +28,9 @@
 #include <quickstep/status.h>
 #include <quickstep/policy.h>
 #include <quickstep/sign.h>
+#include <quickstep/crypto.h>
+
+#include "mldsa.h"
 
 #ifdef HAVE_GNUTLS
 
@@ -37,11 +40,33 @@
 
 #define MIN_RSA_BITS 2048
 
+/* ML-DSA: two implementations, one preferred.
+
+   libgcrypt (mldsa.c) is, whenever it can do ML-DSA: it has since 1.12.0,
+   which the build requires, so every build behaves the same, whatever the
+   GnuTLS it was built with, and what runs is what the tests with the NIST
+   vectors check.  A key or certificate of ML-DSA is then read by mldsa.c
+   (GnuTLS can parse the certificate, but gives no access to the key, and
+   cannot import the private key without a backend), and held as ML below.
+
+   GnuTLS's own ML-DSA (leancrypto behind it) is the fallback, for the
+   case that libgcrypt cannot, and the tests exercise it by turning the
+   preferred one off.  Keys and certificates it is given are those it
+   reads.  Chains signed with ML-DSA are validated by GnuTLS (trust.c) and
+   so need its backend, whichever implementation signs in the handshake.  */
+struct ml_pub
+{
+  unsigned scheme;
+  size_t len;
+  uint8_t pk[GQI_MLDSA_PK_MAX];
+};
+
 struct gq_pubkey
 {
   gnutls_pubkey_t key;
   unsigned pk;
   unsigned bits;
+  struct ml_pub *ml;		/* libgcrypt's ML-DSA, instead of KEY.  */
 };
 
 struct gq_privkey
@@ -49,6 +74,7 @@ struct gq_privkey
   gnutls_privkey_t key;
   unsigned pk;
   unsigned bits;
+  struct gqi_mldsa_key *ml;	/* libgcrypt's ML-DSA, instead of KEY.  */
 };
 
 /* Policy scheme to GnuTLS signature algorithm.  */
@@ -141,9 +167,10 @@ datum_of (const void *p, size_t n)
 }
 
 #if GQ_GNUTLS_MLDSA
-/* Ask the backend for an ML-DSA-65 key, once; it fails if unimplemented.  */
+/* Ask GnuTLS's backend for an ML-DSA-65 key, once; it fails if there is
+   none.  */
 static int
-mldsa_usable (void)
+gnutls_mldsa_usable (void)
 {
   static int probed, ok;
   gnutls_x509_privkey_t k;
@@ -162,7 +189,7 @@ mldsa_usable (void)
 }
 #else
 static int
-mldsa_usable (void)
+gnutls_mldsa_usable (void)
 {
   return 0;
 }
@@ -173,7 +200,7 @@ gq_sigscheme_available (unsigned scheme)
 {
   if (!allowed_any (scheme))
     return 0;
-  return is_mldsa (scheme) ? mldsa_usable () : 1;
+  return is_mldsa (scheme) ? gqi_mldsa_usable () || gnutls_mldsa_usable () : 1;
 }
 
 int
@@ -183,9 +210,37 @@ gq_pubkey_from_cert (gq_pubkey **out, const uint8_t *der, size_t len)
   gnutls_datum_t d;
   gq_pubkey *k;
   int r = GQ_ERR_CERT;
+  unsigned ml_scheme;
+  uint8_t ml_pk[GQI_MLDSA_PK_MAX];
+  size_t ml_len;
 
   if (out == NULL || der == NULL || len == 0 || len > (unsigned) -1)
     return GQ_ERR_INVAL;
+
+  /* A key of ML-DSA in the certificate is read here, from its
+     SubjectPublicKeyInfo.  Anything else (including a certificate that cannot
+     be walked) is for GnuTLS.  */
+  r = gqi_mldsa_pk_from_cert (der, len, &ml_scheme, ml_pk, &ml_len);
+  if (r == GQ_ERR_CERT && gqi_mldsa_usable ())
+    return GQ_ERR_CERT;
+  if (r == GQ_OK && gqi_mldsa_usable ())
+    {
+      k = calloc (1, sizeof *k);
+      if (k == NULL)
+        return GQ_ERR_NOMEM;
+      k->ml = malloc (sizeof *k->ml);
+      if (k->ml == NULL)
+        {
+          free (k);
+          return GQ_ERR_NOMEM;
+        }
+      k->ml->scheme = ml_scheme;
+      k->ml->len = ml_len;
+      memcpy (k->ml->pk, ml_pk, ml_len);
+      *out = k;
+      return GQ_OK;
+    }
+  r = GQ_ERR_CERT;
   k = calloc (1, sizeof *k);
   if (k == NULL)
     return GQ_ERR_NOMEM;
@@ -227,7 +282,10 @@ gq_pubkey_free (gq_pubkey *k)
 {
   if (k == NULL)
     return;
-  gnutls_pubkey_deinit (k->key);
+  if (k->ml)
+    free (k->ml);
+  else
+    gnutls_pubkey_deinit (k->key);
   free (k);
 }
 
@@ -243,6 +301,15 @@ gq_pubkey_verify (const gq_pubkey *k, unsigned scheme, const void *data,
     return GQ_ERR_INVAL;
   if (!allowed_any (scheme))
     return GQ_ERR_UNSUPPORTED;
+  if (k->ml)
+    {
+      if (scheme != k->ml->scheme)
+        return GQ_ERR_CRYPTO;
+      r = gqi_mldsa_verify (scheme, k->ml->pk, k->ml->len, NULL, 0, data, len,
+                            sig, sig_len);
+      return r == GQ_OK ? GQ_OK
+        : r == GQ_ERR_UNSUPPORTED ? GQ_ERR_UNAVAILABLE : GQ_ERR_CRYPTO;
+    }
   if (!key_fits (k->pk, k->bits, scheme))
     return GQ_ERR_CRYPTO;
   d = datum_of (data, len);
@@ -261,12 +328,36 @@ gq_privkey_from_pem (gq_privkey **out, const void *pem, size_t len)
   gnutls_datum_t d;
   gq_privkey *k;
   int pk;
+  struct gqi_mldsa_key *ml;
+  int r;
 
   if (out == NULL || pem == NULL || len == 0 || len > (unsigned) -1)
     return GQ_ERR_INVAL;
   k = calloc (1, sizeof *k);
   if (k == NULL)
     return GQ_ERR_NOMEM;
+
+  /* A key of ML-DSA is read here (RFC 9881: the seed, the expanded key or
+     both); another algorithm, or any other kind of text, is for GnuTLS.  */
+  ml = malloc (sizeof *ml);
+  if (ml == NULL)
+    {
+      free (k);
+      return GQ_ERR_NOMEM;
+    }
+  r = gqi_mldsa_key_from_pem (pem, len, ml);
+  if (r == GQ_OK)
+    {
+      k->ml = ml;
+      *out = k;
+      return GQ_OK;
+    }
+  free (ml);
+  if (r != GQ_ERR_UNSUPPORTED)
+    {
+      free (k);
+      return r == GQ_ERR_NOMEM ? r : GQ_ERR_CERT;
+    }
   if (gnutls_privkey_init (&k->key) < 0)
     {
       free (k);
@@ -347,13 +438,21 @@ gq_privkey_free (gq_privkey *k)
 {
   if (k == NULL)
     return;
-  gnutls_privkey_deinit (k->key);
+  if (k->ml)
+    {
+      gq_wipe (k->ml, sizeof *k->ml);
+      free (k->ml);
+    }
+  else
+    gnutls_privkey_deinit (k->key);
   free (k);
 }
 
 int
 gq_privkey_supports (const gq_privkey *k, unsigned scheme)
 {
+  if (k != NULL && k->ml)
+    return allowed_any (scheme) && scheme == k->ml->scheme;
   return k != NULL && allowed_any (scheme)
     && key_fits (k->pk, k->bits, scheme);
 }
@@ -370,6 +469,15 @@ gq_privkey_sign (const gq_privkey *k, unsigned scheme, const void *data,
     return GQ_ERR_INVAL;
   if (!allowed_any (scheme))
     return GQ_ERR_UNSUPPORTED;
+  if (k->ml)
+    {
+      if (scheme != k->ml->scheme)
+        return GQ_ERR_CRYPTO;
+      r = gqi_mldsa_sign (scheme, k->ml->sk, NULL, 0, data, len, NULL, sig,
+                          cap, sig_len);
+      return r == GQ_OK || r == GQ_ERR_BUFSIZE ? r
+        : r == GQ_ERR_UNSUPPORTED ? GQ_ERR_UNAVAILABLE : GQ_ERR_CRYPTO;
+    }
   if (!key_fits (k->pk, k->bits, scheme))
     return GQ_ERR_CRYPTO;
   d = datum_of (data, len);

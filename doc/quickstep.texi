@@ -155,18 +155,36 @@ RFC specifies.
 
 @item
 libgcrypt 1.12 added an ML-DSA (Dilithium) implementation
-(@code{GCRY_PK_MLDSA}), which this library does not use: keys and
-certificate chains come through GnuTLS.  GnuTLS does ML-DSA (FIPS 204)
-only through leancrypto, so only a GnuTLS configured with
-@code{--with-leancrypto} (3.8.10 or later, which has the TLS handshake and
-all three private key encodings of RFC 9881) can do it; one built without
-declares ML-DSA-44, 65 and 87 but cannot generate or import a key (the
+(@code{GCRY_PK_MLDSA}, algorithm names @code{dilithium2}, @code{dilithium3}
+and @code{dilithium5}), and the library uses it for the signatures
+(@file{src/mldsa.c}).  It takes the seed and the encapsulation message as
+parameters, so the NIST vectors are checked byte for byte
+(@file{tests/test-mldsa.c}).  GnuTLS does ML-DSA (FIPS 204) only through
+leancrypto, so only a GnuTLS configured with @code{--with-leancrypto}
+(3.8.10 or later, which has the TLS handshake and all three private key
+encodings of RFC 9881) can: one built without declares ML-DSA-44, 65 and 87
+but can neither generate or import a key nor check a signature (the
 MacPorts 3.8.13 that was probed), and the distributions' older ones do not
-declare them at all.  Where there is no backend the policy still lists the
-ML-DSA schemes, the engines do not offer them, and the signature module
-reports @code{GQ_ERR_UNAVAILABLE} for them.  The ML-DSA tests run in a CI
-job that builds a GnuTLS with leancrypto (@ref{Testing}).  Post-quantum
-key exchange does not depend on any of this.
+declare them at all.  What GnuTLS can do without a backend is parse a
+certificate with an ML-DSA key and validate it under a classical CA, which
+is enough for a TLS handshake; but it gives no access to the key, so the
+library reads the raw key out of the SubjectPublicKeyInfo itself, and
+reads the private key forms of RFC 9881 (PKCS#8: the seed, the expanded key,
+or both, which must agree) which GnuTLS cannot import.  libgcrypt's ML-DSA
+is preferred even where GnuTLS has a backend, so that every build behaves
+alike and what runs is what the vectors test; GnuTLS's is used if
+libgcrypt's cannot be.  A certificate chain with an ML-DSA signature in it
+is validated by GnuTLS (@file{src/trust.c}) and so needs its backend, and
+a chain with an ML-DSA key in it, under a classical CA, needs a GnuTLS that
+knows the key algorithm (3.8.9 and later do, backend or not): an older one,
+Ubuntu 24.04's 3.8.3, refuses it as a weak algorithm, and an application on
+such a system sets the @code{verify_peer} callback of the sink (or
+@code{gq_dtls_events}) to validate the chain itself.  One
+check is out of reach: the RFC's inconsistent expanded-only private keys
+(appendix C.4, the second and third) are accepted, since telling them from
+good ones takes the public key, which an expanded key does not carry and
+libgcrypt cannot derive from it.  Post-quantum key exchange does not depend
+on any of this.
 
 @item
 ECDH for X25519, secp256r1 and secp384r1 is done through libgcrypt's KEM
@@ -308,10 +326,15 @@ run scenarios whose names contain a string, and @env{QUICHE_DIR} to name
 the directory holding @command{quiche-client} and @command{quiche-server}.
 The library is also run under AddressSanitizer and UndefinedBehaviorSanitizer.
 
-The ML-DSA code (the signatures in @file{src/sign.c}, certificate chains in
-@file{src/trust.c}, and handshakes over TLS 1.3 and QUIC) needs a GnuTLS
-that was built with the leancrypto backend, which most are not.  Where there
-is none, the tests that need it print a note and skip.  Set
+ML-DSA signatures, keys and certificates (@file{src/sign.c},
+@file{src/mldsa.c}), and handshakes over TLS 1.3 and QUIC with them, are
+tested everywhere, since libgcrypt does the signing; the certificates for
+the handshakes are put together by the tests (@file{tests/tst-mldsa-cert.h})
+under a classical CA, which GnuTLS validates whatever its backend.  What
+needs a GnuTLS built with the leancrypto backend, which most are not, is
+checking that its keys load and that it and the library agree on each
+other's signatures, and chains with an ML-DSA signature in them.  Where
+there is none, the tests that need it print a note and skip.  Set
 @env{GQ_EXPECT_MLDSA} to a non-empty value other than @samp{0} to say that
 the backend is expected, and the same tests fail instead, so that a build
 that quietly lost it does not look like a pass.  The CI workflow does this
@@ -697,8 +720,8 @@ share of any other length is refused with @code{illegal_parameter}.
 @section Signatures and certificates
 
 ECDSA (P-256 and P-384), Ed25519, RSA-PSS (RSAE), and ML-DSA-44, 65 and 87
-in TLS 1.3 when the GnuTLS in use has an ML-DSA backend (@ref{Testing}).  There are no RSA PKCS#1 v1.5
-signatures in the TLS 1.3 handshake, no SHA-1 and no MD5.
+in TLS 1.3 (@ref{Key exchange and signatures}).  There are no RSA PKCS#1
+v1.5 signatures in the TLS 1.3 handshake, no SHA-1 and no MD5.
 
 Certificate chains signed with SHA-1 or MD5, or containing RSA keys under
 2048 bits, are rejected by the trust layer (GnuTLS verification profile
@@ -1408,7 +1431,7 @@ negotiation}).
 @item
 @strong{Done.}  The key exchange facade (X25519, P-256, P-384 and the
 three hybrid groups) and the signature facade (ECDSA P-256 and P-384,
-Ed25519, RSA-PSS, and ML-DSA through a GnuTLS that has a backend).
+Ed25519, RSA-PSS and ML-DSA).
 
 @item
 TLS 1.3 handshake engines, QUIC first:

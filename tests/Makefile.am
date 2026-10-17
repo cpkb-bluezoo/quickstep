@@ -21,13 +21,26 @@ AM_CFLAGS = $(STD_CFLAGS) $(WARN_CFLAGS) $(GNUTLS_CFLAGS)
 LDADD = $(top_builddir)/src/libquickstep.la $(GNUTLS_LIBS)
 
 UNIT_TESTS = test-varint test-frame test-crypto test-policy test-trust \
-  test-packet test-protect test-tparams test-kx test-mlkem test-sign \
+  test-packet test-protect test-tparams test-kx test-mlkem test-mldsa test-sign \
   test-tlsmsg test-keysched test-tls-client test-record test-tlsconn test-tls-server \
   test-resume test-tickets test-early test-tls12ks test-record12 test-tls12 \
   test-tls12conn test-dtlsrec test-dtlshs test-dtls test-dtls12rec test-dtls12 test-ranges test-stream test-tlsauto test-dtlsauto test-quiclb test-conn test-conn-int test-cc test-qlog test-token test-endpoint
 
 TESTS = $(UNIT_TESTS)
 check_PROGRAMS = $(UNIT_TESTS)
+
+# It uses the library's own ML-DSA module, which a shared library does not
+# export.
+test_conn_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
+test_conn_LDFLAGS = -static
+test_tls_server_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
+test_tls_server_LDFLAGS = -static
+test_trust_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
+test_trust_LDFLAGS = -static
+test_sign_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
+test_sign_LDFLAGS = -static
+test_mldsa_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
+test_mldsa_LDFLAGS = -static
 
 # Calls libgcrypt's KEM interface directly to check it against the FIPS 203
 # vectors.
@@ -42,4 +55,4 @@ test_cc_LDFLAGS = -static
 test_qlog_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
 test_qlog_LDFLAGS = -static
 
-EXTRA_DIST = tst-qkv.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h vectors-mlkem.h
+EXTRA_DIST = tst-qkv.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h vectors-mlkem.h vectors-mldsa.h tst-mldsa-cert.h

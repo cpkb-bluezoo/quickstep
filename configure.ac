@@ -87,7 +87,8 @@ AS_IF([test "x$with_gnutls" != xno],
   [PKG_CHECK_MODULES([GNUTLS], [gnutls >= 3.8.0],
      [AC_DEFINE([HAVE_GNUTLS], [1], [Define to use the GnuTLS trust backend])
       dnl ML-DSA arrived in GnuTLS after 3.8.0 (Ubuntu 24.04 has 3.8.3).
-      dnl Without its enumerators the schemes are simply not available.
+      dnl Without its enumerators GnuTLS's own ML-DSA is not used; libgcrypt's
+      dnl (src/mldsa.c) does not depend on them.
       gq_save_CPPFLAGS=$CPPFLAGS
       CPPFLAGS="$CPPFLAGS $GNUTLS_CFLAGS"
       AC_CHECK_DECLS([GNUTLS_PK_MLDSA65, GNUTLS_SIGN_MLDSA65,
