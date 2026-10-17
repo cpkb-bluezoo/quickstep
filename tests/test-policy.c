@@ -50,6 +50,15 @@ main (void)
 
   CHECK (gq_policy_allows_group (GQ_GROUP_X25519_MLKEM768));
   CHECK (!gq_policy_allows_group (0x0100));		/* ffdhe2048.  */
+
+  /* The pure ML-KEM groups are permitted for the 1.3 protocols, not 1.2.  */
+  CHECK (gq_policy_allows_group (GQ_GROUP_MLKEM512));
+  CHECK (gq_policy_allows_group (GQ_GROUP_MLKEM768));
+  CHECK (gq_policy_allows_group (GQ_GROUP_MLKEM1024));
+  CHECK (gq_policy_allows_group_for (GQ_TLS_1_3, GQ_GROUP_MLKEM768));
+  CHECK (gq_policy_allows_group_for (GQ_DTLS_1_3, GQ_GROUP_MLKEM1024));
+  CHECK (!gq_policy_allows_group_for (GQ_TLS_1_2, GQ_GROUP_MLKEM768));
+  CHECK (!gq_policy_allows_group_for (GQ_DTLS_1_2, GQ_GROUP_MLKEM768));
   CHECK (!gq_policy_allows_group (0x0019));		/* secp521r1.  */
 
   CHECK (gq_policy_allows_sigscheme (GQ_TLS_1_3, GQ_SIG_MLDSA65));
@@ -85,6 +94,43 @@ main (void)
   CHECK (n > 0 && l[0] == GQ_GROUP_X25519_MLKEM768);
   for (i = 0; i < n; i++)
     CHECK (gq_policy_allows_group (l[i]));
+
+  /* The pure groups are opt-in: no default list offers them, so the
+     default stays hybrid first.  */
+  l = gq_policy_default_groups (&n);
+  for (i = 0; i < n; i++)
+    CHECK (l[i] != GQ_GROUP_MLKEM512 && l[i] != GQ_GROUP_MLKEM768
+           && l[i] != GQ_GROUP_MLKEM1024);
+  l = gq_policy_default_groups_for (GQ_DTLS_1_3, &n);
+  for (i = 0; i < n; i++)
+    CHECK (l[i] != GQ_GROUP_MLKEM512 && l[i] != GQ_GROUP_MLKEM768
+           && l[i] != GQ_GROUP_MLKEM1024);
+
+  /* The supported list is every permitted TLS 1.3 group in the policy's
+     own order: the hybrids, then the pure groups, then the classical
+     ones.  It contains the default list as a subsequence.  */
+  {
+    static const uint16_t want[] = {
+      GQ_GROUP_X25519_MLKEM768, GQ_GROUP_SECP256R1_MLKEM768,
+      GQ_GROUP_SECP384R1_MLKEM1024, GQ_GROUP_MLKEM768, GQ_GROUP_MLKEM1024,
+      GQ_GROUP_MLKEM512, GQ_GROUP_X25519, GQ_GROUP_SECP256R1,
+      GQ_GROUP_SECP384R1
+    };
+    size_t nd, j = 0;
+    const uint16_t *d = gq_policy_default_groups (&nd);
+
+    l = gq_policy_supported_groups (&n);
+    CHECK_EQ (n, sizeof want / sizeof want[0]);
+    for (i = 0; i < n && i < sizeof want / sizeof want[0]; i++)
+      CHECK_EQ (l[i], want[i]);
+    for (i = 0; i < n; i++)
+      CHECK (gq_policy_allows_group (l[i]));
+    for (i = 0; i < n && j < nd; i++)
+      if (l[i] == d[j])
+        j++;
+    CHECK_EQ (j, nd);
+  }
+
   l = gq_policy_default_suites (GQ_TLS_1_3, &n);
   for (i = 0; i < n; i++)
     CHECK (gq_policy_allows_suite (GQ_TLS_1_3, l[i]));

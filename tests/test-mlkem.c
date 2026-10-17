@@ -16,7 +16,7 @@
    License along with this program.  If not, see
    <https://www.gnu.org/licenses/>.  */
 
-/* Known-answer tests for ML-KEM-768 and ML-KEM-1024 as libgcrypt
+/* Known-answer tests for ML-KEM-512, ML-KEM-768 and ML-KEM-1024 as libgcrypt
    provides them, against the NIST ACVP vectors for FIPS 203 (see
    vectors-mlkem.h).  libgcrypt 1.11 implements the initial public draft
    of the standard, which gives different keys, ciphertexts and secrets
@@ -53,6 +53,9 @@ struct params
   size_t ek, dk, ct;
 };
 
+static const struct params p512 =
+  { "ML-KEM-512", GCRY_KEM_MLKEM512, GCRY_KEM_MLKEM512_PUBKEY_LEN,
+    GCRY_KEM_MLKEM512_SECKEY_LEN, GCRY_KEM_MLKEM512_CIPHER_LEN };
 static const struct params p768 =
   { "ML-KEM-768", GCRY_KEM_MLKEM768, GCRY_KEM_MLKEM768_PUBKEY_LEN,
     GCRY_KEM_MLKEM768_SECKEY_LEN, GCRY_KEM_MLKEM768_CIPHER_LEN };
@@ -146,6 +149,17 @@ check_decap (const struct params *p, const char *const *dk,
                (const char *const[]) { MLKEM##tag##_DECAP##n##_K })
 
 static void
+test_mlkem512 (void)
+{
+  KEYGEN (p512, 512, 1);
+  KEYGEN (p512, 512, 2);
+  ENCAP (p512, 512, 1);
+  ENCAP (p512, 512, 2);
+  DECAP (p512, 512, 1);
+  DECAP (p512, 512, 2);		/* Modified ciphertext.  */
+}
+
+static void
 test_mlkem768 (void)
 {
   KEYGEN (p768, 768, 1);
@@ -171,6 +185,7 @@ int
 main (void)
 {
   CHECK_EQ (gq_crypto_init (), GQ_OK);
+  test_mlkem512 ();
   test_mlkem768 ();
   test_mlkem1024 ();
   TST_DONE ();

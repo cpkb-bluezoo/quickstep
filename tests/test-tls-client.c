@@ -722,6 +722,9 @@ test_signature_failures (void)
   env_free (e);
 }
 
+/* Room for a ServerHello with the biggest key share (ML-KEM-1024's).  */
+#define SH_CAP 4096
+
 /* Build a ServerHello with the given extension block bytes.  */
 static size_t
 craft_sh (uint8_t *out, const struct env *e, unsigned suite, int echo_sid,
@@ -730,7 +733,7 @@ craft_sh (uint8_t *out, const struct env *e, unsigned suite, int echo_sid,
   gq_wbuf w;
   static const uint8_t rnd[32] = { 7 };
 
-  gq_wbuf_init (&w, out, 1024);
+  gq_wbuf_init (&w, out, SH_CAP);
   gq_wbuf_hs_open (&w, GQ_HS_SERVER_HELLO);
   gq_wbuf_u16 (&w, 0x0303);
   gq_wbuf_bytes (&w, rnd, 32);
@@ -752,7 +755,7 @@ static void
 test_server_hello_failures (void)
 {
   struct env *e;
-  uint8_t sh[1024], exts[256];
+  uint8_t sh[SH_CAP], exts[256];
   static const uint8_t sv13[] = { 0, 43, 0, 2, 3, 4 };
   static const uint8_t sv12[] = { 0, 43, 0, 2, 3, 3 };
   static const uint8_t unknown[] = { 0x0f, 0xff, 0, 0 };
@@ -854,6 +857,101 @@ test_server_hello_failures (void)
   r = feed (e, GQ_LEVEL_INITIAL, sh, 14, 0);
   expect_fail (e, GQ_ERR_ENCODING, r, GQ_ALERT_DECODE_ERROR);
   env_free (e);
+}
+
+/* ---- Pure ML-KEM groups (draft-ietf-tls-mlkem) ---- */
+
+static const unsigned pure_groups[] = {
+  GQ_GROUP_MLKEM512, GQ_GROUP_MLKEM768, GQ_GROUP_MLKEM1024
+};
+
+static void
+test_pure_groups (void)
+{
+  size_t i, chunk;
+
+  for (i = 0; i < sizeof pure_groups / sizeof pure_groups[0]; i++)
+    for (chunk = 0; chunk < 2; chunk++)
+      {
+        unsigned g = pure_groups[i];
+        uint16_t only[1] = { (uint16_t) g };
+        uint16_t after_x[2] = { GQ_GROUP_X25519, (uint16_t) g };
+        struct env *e = env_new ();
+
+        /* The group alone: its encapsulation key is the one key share.  */
+        e->cfg.groups = only;
+        e->cfg.n_groups = 1;
+        env_create (e);
+        run_handshake (e, chunk);
+        check_keys_agree (e);
+        CHECK_EQ (e->lg.info.group, g);
+        CHECK_EQ (e->lg.info.hello_retry, 0);
+        CHECK_EQ (e->peer.chosen_group, g);
+        env_free (e);
+
+        /* The client's only share is X25519; the server asks for the pure
+           group and the client sends a fresh key for it.  */
+        e = env_new ();
+        e->cfg.groups = after_x;
+        e->cfg.n_groups = 2;
+        e->peer.force_hrr = 1;
+        e->peer.hrr_group = g;
+        env_create (e);
+        run_handshake (e, chunk);
+        check_keys_agree (e);
+        CHECK_EQ (e->lg.info.hello_retry, 1);
+        CHECK_EQ (e->lg.info.group, g);
+        env_free (e);
+      }
+}
+
+/* The client refuses a server ciphertext whose length is not the group's:
+   one byte short or one too long with illegal_parameter, and an empty one,
+   which is not even a well-formed key_share, with decode_error.  */
+static void
+test_pure_groups_wrong_ciphertext (void)
+{
+  static const uint8_t sv13[] = { 0, 43, 0, 2, 3, 4 };
+  static const long deltas[] = { -1, 1, 0 };
+  size_t i, d;
+
+  for (i = 0; i < sizeof pure_groups / sizeof pure_groups[0]; i++)
+    for (d = 0; d < 3; d++)
+      {
+        unsigned g = pure_groups[i];
+        uint16_t only[1] = { (uint16_t) g };
+        size_t good = gq_kx_server_share_len (g);
+        size_t len = d == 2 ? 0 : (size_t) ((long) good + deltas[d]);
+        uint8_t sh[SH_CAP], exts[sizeof sv13 + 8 + 2048];
+        struct env *e = env_new ();
+        size_t n, el = 0;
+        int r;
+
+        CHECK (good > 0);
+        e->cfg.groups = only;
+        e->cfg.n_groups = 1;
+        env_create (e);
+        env_start (e);
+        env_server (e);
+        memcpy (exts, sv13, sizeof sv13);
+        el = sizeof sv13;
+        exts[el++] = 0; exts[el++] = 51;		/* key_share.  */
+        exts[el++] = (uint8_t) ((len + 4) >> 8);
+        exts[el++] = (uint8_t) (len + 4);
+        exts[el++] = (uint8_t) (g >> 8);
+        exts[el++] = (uint8_t) g;
+        exts[el++] = (uint8_t) (len >> 8);
+        exts[el++] = (uint8_t) len;
+        memset (exts + el, 0x42, len);
+        el += len;
+        n = craft_sh (sh, e, 0x1301, 1, exts, el);
+        r = feed (e, GQ_LEVEL_INITIAL, sh, n, 0);
+        if (len == 0)
+          expect_fail (e, GQ_ERR_ENCODING, r, GQ_ALERT_DECODE_ERROR);
+        else
+          expect_fail (e, GQ_ERR_PROTOCOL, r, GQ_ALERT_ILLEGAL_PARAMETER);
+        env_free (e);
+      }
 }
 
 static void
@@ -1219,6 +1317,8 @@ main (void)
   test_basic (0, GQ_TLS_CHACHA20_POLY1305_SHA256, GQ_GROUP_X25519);
   test_hrr (0, GQ_GROUP_SECP256R1);
   test_hrr (1, GQ_GROUP_SECP384R1);
+  test_pure_groups ();
+  test_pure_groups_wrong_ciphertext ();
   test_quic ();
   test_mtls (1);
   test_mtls (0);

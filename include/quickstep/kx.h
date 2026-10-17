@@ -18,11 +18,12 @@
 
 /* Key exchange for TLS 1.3 / DTLS 1.3 key_share extensions.
 
-   Supported groups (see policy.h): X25519, secp256r1, secp384r1 and the
+   Supported groups (see policy.h): X25519, secp256r1, secp384r1, the
    three hybrid post-quantum groups of RFC 10024, which combine one of
-   those curves with ML-KEM.  All arithmetic is done by libgcrypt through
-   its KEM interface; this module adds the TLS wire encodings and the
-   hybrid concatenation.
+   those curves with ML-KEM, and the three pure ML-KEM groups of
+   draft-ietf-tls-mlkem (MLKEM512, MLKEM768, MLKEM1024).  All arithmetic is
+   done by libgcrypt through its KEM interface; this module adds the TLS
+   wire encodings and the hybrid concatenation.
 
    The client calls gq_kx_generate and sends the key's client share.  The
    server calls gq_kx_respond with that share and sends back its own
@@ -38,7 +39,12 @@
      SecP384r1MLKEM1024 classical first: share = secp384r1 || mlkem
 
    and the shared secret is concatenated in the same order.  Curve points
-   use the uncompressed SEC1 form; the ECDH secret is the x coordinate.  */
+   use the uncompressed SEC1 form; the ECDH secret is the x coordinate.
+
+   A pure ML-KEM group has no classical half: the client share is the
+   encapsulation key (800, 1184 or 1568 bytes), the server share the
+   ciphertext (768, 1088 or 1568 bytes), and the shared secret the 32
+   bytes ML-KEM produces.  A share of any other length is GQ_ERR_ENCODING.  */
 
 #ifndef QUICKSTEP_KX_H
 #define QUICKSTEP_KX_H

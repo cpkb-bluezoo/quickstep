@@ -592,6 +592,224 @@ test_preferences (void)
   pair_free (p);
 }
 
+/* ---- Pure ML-KEM groups (draft-ietf-tls-mlkem) ---- */
+
+static const unsigned pure_groups[] = {
+  GQ_GROUP_MLKEM512, GQ_GROUP_MLKEM768, GQ_GROUP_MLKEM1024
+};
+
+/* A key generation hook that adds DELTA bytes to the client share of GROUP,
+   so that its length is wrong while its content is a real key's.  The
+   hooks share one user pointer, so the clock (read by clock_of) comes
+   first.  */
+struct bad_share
+{
+  uint64_t now;
+  unsigned group;
+  long delta;
+};
+
+static int
+bad_share_gen (void *u, unsigned group, gq_kx_key *key)
+{
+  const struct bad_share *b = u;
+
+  if (gq_kx_generate (group, key) != GQ_OK)
+    return 1;
+  if (group == b->group)
+    key->share_len = (size_t) ((long) key->share_len + b->delta);
+  return 0;
+}
+
+static void
+test_pure_groups (void)
+{
+  size_t i, chunk;
+
+  for (i = 0; i < sizeof pure_groups / sizeof pure_groups[0]; i++)
+    for (chunk = 0; chunk < 2; chunk++)
+      {
+        unsigned g = pure_groups[i];
+        uint16_t only[1], retry[2];
+        struct pair *p = pair_new ();
+
+        /* The group alone on both ends: its own share, no retry.  */
+        only[0] = (uint16_t) g;
+        p->cc.groups = p->sc.groups = only;
+        p->cc.n_groups = p->sc.n_groups = 1;
+        pair_create (p);
+        CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+        CHECK_EQ (pump (p, chunk), GQ_OK);
+        check_success (p);
+        CHECK_EQ (p->s.info.group, g);
+        CHECK_EQ (p->s.info.hello_retry, 0);
+        pair_free (p);
+
+        /* The client's first share is for X25519, which the server does
+           not offer: the server retries for the pure group.  */
+        p = pair_new ();
+        retry[0] = GQ_GROUP_X25519;
+        retry[1] = (uint16_t) g;
+        p->cc.groups = retry;
+        p->cc.n_groups = 2;
+        p->sc.groups = only;
+        p->sc.n_groups = 1;
+        pair_create (p);
+        CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+        CHECK_EQ (pump (p, chunk), GQ_OK);
+        check_success (p);
+        CHECK_EQ (p->s.info.group, g);
+        CHECK_EQ (p->s.info.hello_retry, 1);
+        CHECK_EQ (p->c.info.hello_retry, 1);
+        pair_free (p);
+      }
+}
+
+/* A pure group is only used when the application lists it: the defaults
+   on either end do not include it.  */
+static void
+test_pure_groups_opt_in (void)
+{
+  size_t i;
+
+  for (i = 0; i < sizeof pure_groups / sizeof pure_groups[0]; i++)
+    {
+      uint16_t only[1] = { (uint16_t) pure_groups[i] };
+      struct pair *p = pair_new ();
+
+      /* A client that lists it, a server on the default groups.  */
+      p->cc.groups = only;
+      p->cc.n_groups = 1;
+      pair_create (p);
+      CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+      CHECK_EQ (pump (p, 0), GQ_ERR_UNSUPPORTED);
+      CHECK_EQ (p->s.alert, GQ_ALERT_HANDSHAKE_FAILURE);
+      pair_free (p);
+
+      /* A server that lists it, a client on the default groups.  */
+      p = pair_new ();
+      p->sc.groups = only;
+      p->sc.n_groups = 1;
+      pair_create (p);
+      CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+      CHECK_EQ (pump (p, 0), GQ_ERR_UNSUPPORTED);
+      CHECK_EQ (p->s.alert, GQ_ALERT_HANDSHAKE_FAILURE);
+      pair_free (p);
+    }
+}
+
+/* A server given a hybrid and a pure group takes the order it is given.  */
+static void
+test_pure_groups_order (void)
+{
+  static const uint16_t c_pure_first[] = { GQ_GROUP_MLKEM768,
+                                           GQ_GROUP_X25519_MLKEM768 };
+  static const uint16_t c_pure_x25519[] = { GQ_GROUP_MLKEM768,
+                                            GQ_GROUP_X25519 };
+  static const uint16_t s_x25519[] = { GQ_GROUP_X25519 };
+  static const uint16_t c_x25519_first[] = { GQ_GROUP_X25519,
+                                             GQ_GROUP_MLKEM768,
+                                             GQ_GROUP_X25519_MLKEM768 };
+  static const uint16_t s_hybrid_first[] = { GQ_GROUP_X25519_MLKEM768,
+                                             GQ_GROUP_MLKEM768 };
+  static const uint16_t s_pure_first[] = { GQ_GROUP_MLKEM768,
+                                           GQ_GROUP_X25519_MLKEM768 };
+  struct pair *p;
+
+  /* A client that lists a plain-curve group after the pure one also sends
+     a share for it, so a server without the pure group needs no retry.  */
+  p = pair_new ();
+  p->cc.groups = c_pure_x25519;
+  p->cc.n_groups = 2;
+  p->sc.groups = s_x25519;
+  p->sc.n_groups = 1;
+  pair_create (p);
+  CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+  CHECK_EQ (pump (p, 0), GQ_OK);
+  check_success (p);
+  CHECK_EQ (p->s.info.group, GQ_GROUP_X25519);
+  CHECK_EQ (p->s.info.hello_retry, 0);
+  pair_free (p);
+
+  /* The client sent a share for the pure group only; the server prefers
+     the hybrid but has no share for it, so a retry is avoided.  */
+  p = pair_new ();
+  p->cc.groups = c_pure_first;
+  p->cc.n_groups = 2;
+  p->sc.groups = s_hybrid_first;
+  p->sc.n_groups = 2;
+  pair_create (p);
+  CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+  CHECK_EQ (pump (p, 0), GQ_OK);
+  check_success (p);
+  CHECK_EQ (p->s.info.group, GQ_GROUP_MLKEM768);
+  CHECK_EQ (p->s.info.hello_retry, 0);
+  pair_free (p);
+
+  /* Only an X25519 share was sent: the server's first choice decides the
+     retry, whichever kind it is.  */
+  p = pair_new ();
+  p->cc.groups = c_x25519_first;
+  p->cc.n_groups = 3;
+  p->sc.groups = s_hybrid_first;
+  p->sc.n_groups = 2;
+  pair_create (p);
+  CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+  CHECK_EQ (pump (p, 0), GQ_OK);
+  check_success (p);
+  CHECK_EQ (p->s.info.group, GQ_GROUP_X25519_MLKEM768);
+  CHECK_EQ (p->s.info.hello_retry, 1);
+  pair_free (p);
+
+  p = pair_new ();
+  p->cc.groups = c_x25519_first;
+  p->cc.n_groups = 3;
+  p->sc.groups = s_pure_first;
+  p->sc.n_groups = 2;
+  pair_create (p);
+  CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+  CHECK_EQ (pump (p, 0), GQ_OK);
+  check_success (p);
+  CHECK_EQ (p->s.info.group, GQ_GROUP_MLKEM768);
+  CHECK_EQ (p->s.info.hello_retry, 1);
+  pair_free (p);
+}
+
+/* A server refuses a client share of the wrong length for a pure group
+   with illegal_parameter (a missing byte, an extra one), in a first
+   ClientHello and in the one that answers a retry.  */
+static void
+test_pure_groups_wrong_length (void)
+{
+  static const long deltas[] = { -1, 1 };
+  size_t i, d, retry;
+
+  for (i = 0; i < sizeof pure_groups / sizeof pure_groups[0]; i++)
+    for (d = 0; d < 2; d++)
+      for (retry = 0; retry < 2; retry++)
+        {
+          unsigned g = pure_groups[i];
+          uint16_t only[1] = { (uint16_t) g };
+          uint16_t after_x[2] = { GQ_GROUP_X25519, (uint16_t) g };
+          struct bad_share b = { UINT64_C (1700000000000), g, deltas[d] };
+          struct pair *p = pair_new ();
+
+          p->cc.groups = retry ? after_x : only;
+          p->cc.n_groups = retry ? 2 : 1;
+          p->sc.groups = only;
+          p->sc.n_groups = 1;
+          p->cc.hooks.kx_generate = bad_share_gen;
+          p->cc.hooks.user = &b;
+          pair_create (p);
+          CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+          CHECK_EQ (pump (p, 0), GQ_ERR_PROTOCOL);
+          CHECK_EQ (p->s.alert, GQ_ALERT_ILLEGAL_PARAMETER);
+          CHECK (gq_tls_is_failed (p->s.tls));
+          CHECK (!p->s.complete);
+          pair_free (p);
+        }
+}
+
 static const gq_tls_credentials *
 by_name (void *u, const char *name)
 {
@@ -1669,6 +1887,10 @@ main (void)
   test_keylog (0);
   test_keylog (1);
   test_preferences ();
+  test_pure_groups ();
+  test_pure_groups_opt_in ();
+  test_pure_groups_order ();
+  test_pure_groups_wrong_length ();
   test_sni_credentials ();
   test_alpn_and_quic ();
   test_client_auth ();

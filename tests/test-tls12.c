@@ -1189,6 +1189,7 @@ static const uint16_t g_p256[] = { GQ_GROUP_SECP256R1 };
 static const uint16_t g_both[] = { GQ_GROUP_SECP256R1, GQ_GROUP_X25519 };
 static const uint16_t g_both_x[] = { GQ_GROUP_X25519, GQ_GROUP_SECP256R1 };
 static const uint16_t g_hybrid[] = { GQ_GROUP_X25519_MLKEM768 };
+static const uint16_t g_pure[] = { GQ_GROUP_MLKEM768, GQ_GROUP_MLKEM1024 };
 
 /* The group named in the ServerKeyExchange in IT.  */
 static unsigned
@@ -1324,6 +1325,16 @@ test_groups (void)
   o.n_cgroups = 1;
   o.sgroups = g_hybrid;
   o.n_sgroups = 1;
+  p = pair_new (&o);
+  CHECK_EQ (run (p, 0), GQ_OK);
+  expect_done_group (p, 0, GQ_GROUP_SECP256R1);
+  pair_free (p);
+
+  /* So are the pure ML-KEM groups, which are for the 1.3 protocols only.  */
+  o.cgroups = g_pure;
+  o.n_cgroups = 2;
+  o.sgroups = g_pure;
+  o.n_sgroups = 2;
   p = pair_new (&o);
   CHECK_EQ (run (p, 0), GQ_OK);
   expect_done_group (p, 0, GQ_GROUP_SECP256R1);

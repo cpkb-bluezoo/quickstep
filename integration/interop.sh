@@ -199,6 +199,17 @@ if "$OPENSSL" s_server -help >/dev/null 2>&1; then
     "--expect $HTTP200" ok "group=0x11eb" "hrr=1"
   scenario "openssl: HelloRetryRequest to SecP384r1MLKEM1024" openssl "$OS -groups SecP384r1MLKEM1024" \
     "--expect $HTTP200" ok "group=0x11ed" "hrr=1"
+  # The pure ML-KEM groups (draft-ietf-tls-mlkem) are used only when asked
+  # for, so the client lists them.  Alone, the client's one share is for the
+  # group; after X25519 the server asks for it.
+  for pure in MLKEM512:mlkem512:0x0200 MLKEM768:mlkem768:0x0201 \
+              MLKEM1024:mlkem1024:0x0202; do
+    pure_os=${pure%%:*}; rest=${pure#*:}; pure_gq=${rest%%:*}; pure_id=${rest#*:}
+    scenario "openssl: pure $pure_os" openssl "$OS -groups $pure_os" \
+      "--groups $pure_gq --expect $HTTP200" ok "group=$pure_id" "hrr=0" "result=ok"
+    scenario "openssl: HelloRetryRequest to pure $pure_os" openssl "$OS -groups $pure_os" \
+      "--groups x25519,$pure_gq --expect $HTTP200" ok "group=$pure_id" "hrr=1" "result=ok"
+  done
   scenario "openssl: RSA certificate (rsa_pss_rsae)" openssl "-cert rsa.pem -key rsa.key -www" \
     "--expect $HTTP200" ok "result=ok"
   scenario "openssl: Ed25519 certificate" openssl "-cert ed.pem -key ed.key -www" \
@@ -486,6 +497,14 @@ if "$OPENSSL" s_client -help >/dev/null 2>&1; then
     "$SC --groups p384 --hrr-cookie" "-groups X25519:secp384r1" ok "group=0x0018" "hrr=1"
   server_scenario "server/openssl: HelloRetryRequest to SecP384r1MLKEM1024" openssl \
     "$SC --groups p384mlkem1024" "-groups X25519:SecP384r1MLKEM1024" ok "group=0x11ed" "hrr=1"
+  for pure in MLKEM512:mlkem512:0x0200 MLKEM768:mlkem768:0x0201 \
+              MLKEM1024:mlkem1024:0x0202; do
+    pure_os=${pure%%:*}; rest=${pure#*:}; pure_gq=${rest%%:*}; pure_id=${rest#*:}
+    server_scenario "server/openssl: pure $pure_os" openssl \
+      "$SC --groups $pure_gq" "-groups $pure_os" ok "group=$pure_id" "hrr=0" "result=ok"
+    server_scenario "server/openssl: HelloRetryRequest to pure $pure_os" openssl \
+      "$SC --groups $pure_gq" "-groups X25519:$pure_os" ok "group=$pure_id" "hrr=1" "result=ok"
+  done
   server_scenario "server/openssl: server prefers ChaCha20" openssl "$SC --suites chacha" "" ok "suite=0x1303"
   server_scenario "server/openssl: AES-128-GCM only" openssl "$SC --suites aes128" "" ok "suite=0x1301"
   server_scenario "server/openssl: client restricts to AES-256" openssl "$SC" \

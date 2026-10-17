@@ -177,6 +177,8 @@ struct opts
   size_t n_csuites;
   const uint16_t *cgroups;
   size_t n_cgroups;
+  const uint16_t *sgroups;	/* The server's, and the listener's.  */
+  size_t n_sgroups;
   const gq_tls_session *resume;
   gq_ticket_keys *keys;
   enum gq_client_auth auth;
@@ -237,6 +239,8 @@ net_new (const struct opts *o)
       creds.n_chain = 1;
       creds.key = sid->key;
       sc.credentials = creds;
+      sc.groups = o->sgroups;
+      sc.n_groups = o->n_sgroups;
       sc.ticket_keys = o->keys;
       sc.client_auth = o->auth;
       sc.client_trust = fx_trust;
@@ -927,6 +931,53 @@ test_cookie_handshake (void)
     }
 }
 
+/* A pure ML-KEM group over DTLS 1.3: as a hybrid's, its share is too big for
+   a first hello a stateless server must judge, so the client sends none
+   and the retry asks for the group.  With the cookie listener in front the
+   client lists X25519 as well, whose small share is the first hello's
+   (a hello with no share at all is shorter than the retry that answers it,
+   and the listener never answers with more than it was sent); without the
+   listener a client with the pure group alone works.  */
+static void
+test_pure_groups (void)
+{
+  static const uint16_t pure[] = { GQ_GROUP_MLKEM512, GQ_GROUP_MLKEM768,
+                                   GQ_GROUP_MLKEM1024 };
+  size_t i;
+  int cookie;
+
+  for (i = 0; i < 3; i++)
+    for (cookie = 0; cookie < 2; cookie++)
+      {
+        struct opts o;
+        struct net *n;
+        uint16_t both[2] = { GQ_GROUP_X25519, pure[i] };
+
+        memset (&o, 0, sizeof o);
+        o.cookie = cookie;
+        o.cgroups = cookie ? both : pure + i;
+        o.n_cgroups = cookie ? 2 : 1;
+        o.sgroups = pure + i;
+        o.n_sgroups = 1;
+        o.server_id = &fx_rsa;
+        n = net_new (&o);
+        CHECK_EQ (gq_dtls_start (n->s[0].d, n->now), GQ_OK);
+        run (n, 20000);
+        if (cookie)
+          {
+            CHECK_EQ (n->replies, 1);
+            CHECK_EQ (n->accepts, 1);
+          }
+        CHECK (n->s[0].connected && n->s[1].connected);
+        expect_ok (n);
+        CHECK_EQ (n->s[0].info.hello_retry, 1);
+        CHECK_EQ (n->s[0].info.group, pure[i]);
+        CHECK_EQ (n->s[1].info.group, pure[i]);
+        exchange (n, 5, 1);
+        net_free (n);
+      }
+}
+
 static void
 test_cookie_loss (void)
 {
@@ -1402,6 +1453,7 @@ main (void)
   gq_crypto_init ();
   fx_setup ();
   test_cookie_handshake ();
+  test_pure_groups ();
   test_cookie_loss ();
   test_listener ();
   test_handshakes ();

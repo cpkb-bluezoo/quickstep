@@ -458,8 +458,8 @@ gq_dtls_listen (gq_dtls_cookies *ck, const gq_tls_server_config *config,
     /* The retry asks for our most preferred group the client supports,
        unless the client already sent a share for exactly that one; then
        it carries only the cookie.  (The retry round trip is needed for the
-       cookie anyway, so this is how a hybrid post-quantum group is
-       reached although the first hello is kept small.)  */
+       cookie anyway, so this is how a post-quantum group, hybrid or pure,
+       is reached although the first hello is kept small.)  */
     gq_slice gl, sh;
     unsigned want = 0;
     size_t o = 0;

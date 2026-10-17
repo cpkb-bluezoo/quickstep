@@ -161,11 +161,13 @@ struct choice
   const uint8_t *binders_start;
 };
 
+/* A group with an ML-KEM part, hybrid or pure.  */
 static int
-is_hybrid_group (unsigned g)
+is_pq_group (unsigned g)
 {
   return g == GQ_GROUP_SECP256R1_MLKEM768 || g == GQ_GROUP_X25519_MLKEM768
-    || g == GQ_GROUP_SECP384R1_MLKEM1024;
+    || g == GQ_GROUP_SECP384R1_MLKEM1024 || g == GQ_GROUP_MLKEM512
+    || g == GQ_GROUP_MLKEM768 || g == GQ_GROUP_MLKEM1024;
 }
 
 /* Check each key_share entry: group must be one the client says it
@@ -932,7 +934,7 @@ on_client_hello (gq_tls *t, gq_slice msg, gq_slice body)
           if (t->dtls)
             for (i = 0; i < t->n_groups; i++)
               if (gq_u16_contains (c.groups, t->groups[i])
-                  && !is_hybrid_group (t->groups[i]))
+                  && !is_pq_group (t->groups[i]))
                 return send_hrr (t, t->groups[i]);
           for (i = 0; i < t->n_groups; i++)
             if (gq_u16_contains (c.groups, t->groups[i]))

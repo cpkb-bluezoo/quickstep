@@ -75,7 +75,11 @@ enum gq_tls12_suite
 /* Key exchange groups.  TLS 1.2 / DTLS 1.2 use secp256r1 and x25519
    only, P-256 first.  Hybrid post-quantum groups (RFC 10024 /
    draft-ietf-tls-ecdhe-mlkem) come first in the default TLS 1.3
-   preference.  */
+   preference.  The pure ML-KEM groups (draft-ietf-tls-mlkem, FIPS 203)
+   are permitted for TLS 1.3 and DTLS 1.3 only and are not in the default
+   list: a connection uses one only when the application puts it in its
+   list of groups.  They are for deployments that must not depend on a
+   classical component.  */
 enum gq_group
 {
   GQ_GROUP_SECP256R1            = 0x0017,
@@ -83,7 +87,10 @@ enum gq_group
   GQ_GROUP_X25519               = 0x001d,
   GQ_GROUP_SECP256R1_MLKEM768   = 0x11eb,
   GQ_GROUP_X25519_MLKEM768      = 0x11ec,
-  GQ_GROUP_SECP384R1_MLKEM1024  = 0x11ed
+  GQ_GROUP_SECP384R1_MLKEM1024  = 0x11ed,
+  GQ_GROUP_MLKEM512             = 0x0200,
+  GQ_GROUP_MLKEM768             = 0x0201,
+  GQ_GROUP_MLKEM1024            = 0x0202
 };
 
 /* Signature schemes.  ML-DSA code points follow the IANA assignments.  */
@@ -108,7 +115,9 @@ enum gq_sigscheme
 /* Membership tests: 1 if the value is permitted for VERSION, else 0.
    gq_policy_allows_group and gq_policy_default_groups and _sigschemes
    describe TLS 1.3 / DTLS 1.3; the _for variants take a version.
-   Unknown code points are never permitted.  */
+   Unknown code points are never permitted.  A group is permitted if the
+   engines can do it, which includes the pure ML-KEM groups that no default
+   list offers.  */
 int gq_policy_allows_version (unsigned version);
 int gq_policy_allows_suite (unsigned version, unsigned suite);
 int gq_policy_allows_group (unsigned group);
@@ -116,10 +125,18 @@ int gq_policy_allows_group_for (unsigned version, unsigned group);
 int gq_policy_allows_sigscheme (unsigned version, unsigned scheme);
 
 /* Default preference-ordered lists.  Each returns a static array and
-   stores its length in *N.  */
+   stores its length in *N.
+
+   gq_policy_supported_groups is the whole of what TLS 1.3 / DTLS 1.3 can
+   do, in the policy's own order: the hybrid groups, then the pure ML-KEM
+   groups (768, 1024, 512), then the classical ones.  The default list is
+   this one without the pure groups.  An application that wants them
+   passes a list of its own; a server prefers the groups in the order of
+   that list.  */
 const uint16_t *gq_policy_default_suites (unsigned version, size_t *n);
 const uint16_t *gq_policy_default_groups (size_t *n);
 const uint16_t *gq_policy_default_groups_for (unsigned version, size_t *n);
+const uint16_t *gq_policy_supported_groups (size_t *n);
 const uint16_t *gq_policy_default_sigschemes (size_t *n);
 const uint16_t *gq_policy_default_sigschemes_for (unsigned version, size_t *n);
 

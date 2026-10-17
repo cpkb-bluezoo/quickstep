@@ -356,11 +356,14 @@ gq_tls_free (gq_tls *t)
 /* ClientHello                                                        */
 /* ------------------------------------------------------------------ */
 
+/* A group with an ML-KEM part, hybrid or pure: its key share is a
+   kilobyte or more, and a plain-curve share may stand in for it.  */
 static int
-is_hybrid (unsigned g)
+is_pq (unsigned g)
 {
   return g == GQ_GROUP_X25519_MLKEM768 || g == GQ_GROUP_SECP256R1_MLKEM768
-    || g == GQ_GROUP_SECP384R1_MLKEM1024;
+    || g == GQ_GROUP_SECP384R1_MLKEM1024 || g == GQ_GROUP_MLKEM512
+    || g == GQ_GROUP_MLKEM768 || g == GQ_GROUP_MLKEM1024;
 }
 
 static int
@@ -666,33 +669,36 @@ gq_tls_start (gq_tls *t)
       TRY (gqi_rnd (t, t->sid, 32));
     }
 
-  /* One key share for the preferred group; if that is a hybrid, add a
-     plain-curve share too so a server without post-quantum support does
-     not force a HelloRetryRequest.  */
+  /* One key share for the preferred group; if that is a post-quantum one
+     (hybrid or pure ML-KEM) and the application also listed a plain-curve
+     group, add a share for that too so a server without post-quantum
+     support does not force a HelloRetryRequest.  A list of pure groups
+     alone gets no plain-curve share: the client does not fall back to a
+     classical exchange it was not told it may use.  */
   first = t->groups[0];
-  if (t->dtls && is_hybrid (first))
+  if (t->dtls && is_pq (first))
     {
       /* A big first hello would need several datagrams, which a server
          answering statelessly (dtlscookie.h) cannot judge.  Offer one
-         small share; a server that wants the hybrid group asks for it in
-         its HelloRetryRequest, which the cookie exchange needs anyway.  */
+         small share; a server that wants the post-quantum group asks for it
+         in its HelloRetryRequest, which the cookie exchange needs anyway.  */
       for (i = 0; i < t->n_groups; i++)
-        if (!is_hybrid (t->groups[i])
+        if (!is_pq (t->groups[i])
             && (first == t->groups[0] || t->groups[i] == GQ_GROUP_X25519))
           first = t->groups[i];
     }
-  if (t->dtls && is_hybrid (first))
-    t->n_kx = 0;	/* Only hybrids: no share yet, let the server ask.  */
+  if (t->dtls && is_pq (first))
+    t->n_kx = 0;	/* Only post-quantum groups: no share yet, let the server ask.  */
   else
     {
       TRY (gen_kx (t, first, &t->kx[0]));
       t->n_kx = 1;
     }
-  if (is_hybrid (first) && !t->dtls)
+  if (is_pq (first) && !t->dtls)
     {
       want = 0;
       for (i = 0; i < t->n_groups; i++)
-        if (!is_hybrid (t->groups[i])
+        if (!is_pq (t->groups[i])
             && (want == 0 || t->groups[i] == GQ_GROUP_X25519))
           want = t->groups[i];
       if (want)

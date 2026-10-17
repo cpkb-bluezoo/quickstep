@@ -30,14 +30,17 @@
 static const unsigned all_groups[] = {
   GQ_GROUP_X25519, GQ_GROUP_SECP256R1, GQ_GROUP_SECP384R1,
   GQ_GROUP_X25519_MLKEM768, GQ_GROUP_SECP256R1_MLKEM768,
-  GQ_GROUP_SECP384R1_MLKEM1024
+  GQ_GROUP_SECP384R1_MLKEM1024,
+  GQ_GROUP_MLKEM512, GQ_GROUP_MLKEM768, GQ_GROUP_MLKEM1024
 };
 
-/* Expected: client share, server share, shared secret sizes.  */
+/* Expected: client share, server share, shared secret sizes.  The pure
+   groups carry the ML-KEM encapsulation key and ciphertext alone.  */
 static const size_t sizes[][3] = {
   { 32, 32, 32 }, { 65, 65, 32 }, { 97, 97, 48 },
   { 1184 + 32, 1088 + 32, 64 }, { 65 + 1184, 65 + 1088, 64 },
-  { 97 + 1568, 97 + 1568, 48 + 32 }
+  { 97 + 1568, 97 + 1568, 48 + 32 },
+  { 800, 768, 32 }, { 1184, 1088, 32 }, { 1568, 1568, 32 }
 };
 
 static void
@@ -210,6 +213,120 @@ test_hybrid_kat (void)
               MLKEM1024_DECAP1_DK, SECP384R1_MLKEM1024);
 }
 
+/* Known-answer test of a pure ML-KEM group on the client side (see
+   check_hybrid_kat for why only that side): the key is the decapsulation
+   key from the vectors, the server share the vector's ciphertext, and the
+   shared secret is the vector's, with nothing added or reordered.  For a
+   modified ciphertext it is the implicit-rejection secret, which
+   gq_kx_complete must return as a success: the failure shows up at the
+   Finished check.  */
+static void
+check_pure_kat (unsigned group, const char *const *dk, const char *const *c,
+                const char *const *k)
+{
+  static gq_kx_key key;
+  uint8_t share[GQ_KX_SHARE_MAX], want[GQ_KX_SHARED_MAX];
+  uint8_t out[GQ_KX_SHARED_MAX];
+  size_t dk_len, share_len, want_len, n;
+
+  memset (&key, 0, sizeof key);
+  key.group = (uint16_t) group;
+  dk_len = tst_unhex_parts (dk, key.secret, sizeof key.secret);
+  CHECK (dk_len > 0 && dk_len < sizeof key.secret);
+  share_len = tst_unhex_parts (c, share, sizeof share);
+  want_len = tst_unhex_parts (k, want, sizeof want);
+
+  CHECK_EQ (share_len, gq_kx_server_share_len (group));
+  CHECK_EQ (want_len, 32);
+  CHECK_EQ (gq_kx_complete (&key, share, share_len, out, sizeof out, &n),
+            GQ_OK);
+  CHECK_EQ (n, want_len);
+  CHECK (n == want_len && memcmp (out, want, n) == 0);
+}
+
+#define PURE_KAT(group, tag, n) \
+  check_pure_kat (group, \
+                  (const char *const[]) { MLKEM##tag##_DECAP##n##_DK }, \
+                  (const char *const[]) { MLKEM##tag##_DECAP##n##_C }, \
+                  (const char *const[]) { MLKEM##tag##_DECAP##n##_K })
+
+static void
+test_pure_kat (void)
+{
+  PURE_KAT (GQ_GROUP_MLKEM512, 512, 1);
+  PURE_KAT (GQ_GROUP_MLKEM512, 512, 2);		/* Modified ciphertext.  */
+  PURE_KAT (GQ_GROUP_MLKEM768, 768, 1);
+  PURE_KAT (GQ_GROUP_MLKEM768, 768, 2);
+  PURE_KAT (GQ_GROUP_MLKEM1024, 1024, 1);
+  PURE_KAT (GQ_GROUP_MLKEM1024, 1024, 2);
+}
+
+/* A pure group's share is exactly the key (client) or the ciphertext
+   (server): one byte more or fewer is refused on both ends, as is a
+   share that is empty or that belongs to a larger parameter set.  */
+static void
+test_pure_lengths (void)
+{
+  static const unsigned pure[] = {
+    GQ_GROUP_MLKEM512, GQ_GROUP_MLKEM768, GQ_GROUP_MLKEM1024
+  };
+  size_t i;
+
+  for (i = 0; i < sizeof pure / sizeof pure[0]; i++)
+    {
+      unsigned g = pure[i];
+      static gq_kx_key key;
+      static uint8_t share[GQ_KX_SHARE_MAX + 1], server[GQ_KX_SHARE_MAX];
+      uint8_t ss[GQ_KX_SHARED_MAX];
+      size_t cl = gq_kx_client_share_len (g), sl = gq_kx_server_share_len (g);
+      size_t n, m, other;
+
+      CHECK_EQ (gq_kx_generate (g, &key), GQ_OK);
+      CHECK_EQ (key.share_len, cl);
+      memset (share, 0, sizeof share);
+      memcpy (share, key.share, cl);
+
+      CHECK_EQ (gq_kx_respond (g, share, cl, server, sizeof server, &n, ss,
+                               sizeof ss, &m), GQ_OK);
+      CHECK_EQ (n, sl);
+      CHECK_EQ (gq_kx_respond (g, share, cl - 1, server, sizeof server, &n,
+                               ss, sizeof ss, &m), GQ_ERR_ENCODING);
+      CHECK_EQ (gq_kx_respond (g, share, cl + 1, server, sizeof server, &n,
+                               ss, sizeof ss, &m), GQ_ERR_ENCODING);
+      CHECK_EQ (gq_kx_respond (g, share, 0, server, sizeof server, &n, ss,
+                               sizeof ss, &m), GQ_ERR_ENCODING);
+      /* The key of another parameter set (the three sizes all differ).  */
+      for (other = 0; other < sizeof pure / sizeof pure[0]; other++)
+        if (pure[other] != g)
+          CHECK_EQ (gq_kx_respond (g, share,
+                                   gq_kx_client_share_len (pure[other]),
+                                   server, sizeof server, &n, ss, sizeof ss,
+                                   &m), GQ_ERR_ENCODING);
+      /* A hybrid-sized share is not a pure one either.  */
+      CHECK_EQ (gq_kx_respond (g, share, cl + 32, server, sizeof server, &n,
+                               ss, sizeof ss, &m), GQ_ERR_ENCODING);
+
+      /* The client checks the ciphertext it is given in the same way.  */
+      CHECK_EQ (gq_kx_respond (g, share, cl, server, sizeof server, &n, ss,
+                               sizeof ss, &m), GQ_OK);
+      CHECK_EQ (gq_kx_complete (&key, server, sl, ss, sizeof ss, &m), GQ_OK);
+      CHECK_EQ (gq_kx_complete (&key, server, sl - 1, ss, sizeof ss, &m),
+                GQ_ERR_ENCODING);
+      CHECK_EQ (gq_kx_complete (&key, server, sl + 1, ss, sizeof ss, &m),
+                GQ_ERR_ENCODING);
+      CHECK_EQ (gq_kx_complete (&key, server, 0, ss, sizeof ss, &m),
+                GQ_ERR_ENCODING);
+
+      /* A wrong-sized output buffer is reported, not overrun.  */
+      CHECK_EQ (gq_kx_respond (g, share, cl, server, sl - 1, &n, ss,
+                               sizeof ss, &m), GQ_ERR_BUFSIZE);
+      CHECK_EQ (gq_kx_respond (g, share, cl, server, sizeof server, &n, ss,
+                               31, &m), GQ_ERR_BUFSIZE);
+      CHECK_EQ (gq_kx_complete (&key, server, sl, ss, 31, &m),
+                GQ_ERR_BUFSIZE);
+    }
+}
+
 static void
 test_errors (void)
 {
@@ -268,6 +385,8 @@ main (void)
   test_x25519_kat ();
   test_hybrid_order ();
   test_hybrid_kat ();
+  test_pure_kat ();
+  test_pure_lengths ();
   test_errors ();
   TST_DONE ();
 }

@@ -241,7 +241,8 @@ typedef struct gq_tls_config
   const gq_slice *alpn;
   size_t n_alpn;
   /* Preferences; NULL selects the policy defaults.  Anything outside the
-     policy is silently dropped.  */
+     policy is silently dropped.  The defaults leave out the pure ML-KEM
+     groups: list them here to use them (see policy.h).  */
   const uint16_t *suites;
   size_t n_suites;
   const uint16_t *groups;
@@ -331,7 +332,8 @@ typedef struct gq_tls_server_config
      selected (except in QUIC, where that is an error).  */
   const gq_slice *alpn;
   size_t n_alpn;
-  /* Preferences in server order; NULL selects the policy defaults.  */
+  /* Preferences in server order; NULL selects the policy defaults, which
+     leave out the pure ML-KEM groups: list them to serve them.  */
   const uint16_t *suites;
   size_t n_suites;
   const uint16_t *groups;

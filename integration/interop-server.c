@@ -158,6 +158,9 @@ group_code (const char *n)
   if (!strcmp (n, "x25519mlkem768")) return GQ_GROUP_X25519_MLKEM768;
   if (!strcmp (n, "p256mlkem768")) return GQ_GROUP_SECP256R1_MLKEM768;
   if (!strcmp (n, "p384mlkem1024")) return GQ_GROUP_SECP384R1_MLKEM1024;
+  if (!strcmp (n, "mlkem512")) return GQ_GROUP_MLKEM512;
+  if (!strcmp (n, "mlkem768")) return GQ_GROUP_MLKEM768;
+  if (!strcmp (n, "mlkem1024")) return GQ_GROUP_MLKEM1024;
   return 0;
 }
 

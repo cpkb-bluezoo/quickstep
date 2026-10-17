@@ -41,11 +41,38 @@ static const uint16_t suites12[] = {
   GQ_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
 };
 
-/* Hybrid post-quantum first, then classical.  */
+/* What a TLS 1.3 / DTLS 1.3 endpoint offers and accepts when the
+   application does not choose: hybrid post-quantum first, then classical.
+   The pure ML-KEM groups are left out on purpose, see supported_groups.  */
 static const uint16_t groups[] = {
   GQ_GROUP_X25519_MLKEM768,
   GQ_GROUP_SECP256R1_MLKEM768,
   GQ_GROUP_SECP384R1_MLKEM1024,
+  GQ_GROUP_X25519,
+  GQ_GROUP_SECP256R1,
+  GQ_GROUP_SECP384R1
+};
+
+/* Every group the TLS 1.3 / DTLS 1.3 engines can do, in the policy's own
+   order of preference: the hybrids, then the pure ML-KEM groups, then the
+   classical ones.  The pure groups stand behind the hybrids because a
+   hybrid also holds if ML-KEM were broken, and ahead of the classical
+   ones because they resist a quantum computer.  Among the pure groups the
+   middle parameter set comes first, as in the hybrids, then the largest,
+   then the smallest.
+
+   An application that must not rely on a classical component puts the
+   pure groups it wants, and no classical one, in gq_tls_config.groups; a
+   server serves its list in the order it is given.  The defaults above
+   are this list without the pure groups, which a connection therefore
+   uses only when asked to.  */
+static const uint16_t supported_groups[] = {
+  GQ_GROUP_X25519_MLKEM768,
+  GQ_GROUP_SECP256R1_MLKEM768,
+  GQ_GROUP_SECP384R1_MLKEM1024,
+  GQ_GROUP_MLKEM768,
+  GQ_GROUP_MLKEM1024,
+  GQ_GROUP_MLKEM512,
   GQ_GROUP_X25519,
   GQ_GROUP_SECP256R1,
   GQ_GROUP_SECP384R1
@@ -152,10 +179,11 @@ gq_policy_default_groups_for (unsigned version, size_t *n)
 int
 gq_policy_allows_group_for (unsigned version, unsigned group)
 {
-  size_t n;
-  const uint16_t *l = gq_policy_default_groups_for (version, &n);
-
-  return l != NULL && in_list (l, n, group);
+  if (!gq_policy_allows_version (version))
+    return 0;
+  if (is_13 (version))
+    return gq_policy_allows_group (group);
+  return in_list (groups12, ARRAY_LEN (groups12), group);
 }
 
 const uint16_t *
@@ -165,10 +193,17 @@ gq_policy_default_groups (size_t *n)
   return groups;
 }
 
+const uint16_t *
+gq_policy_supported_groups (size_t *n)
+{
+  *n = ARRAY_LEN (supported_groups);
+  return supported_groups;
+}
+
 int
 gq_policy_allows_group (unsigned group)
 {
-  return in_list (groups, ARRAY_LEN (groups), group);
+  return in_list (supported_groups, ARRAY_LEN (supported_groups), group);
 }
 
 const uint16_t *

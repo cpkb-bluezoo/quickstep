@@ -201,8 +201,9 @@ be usable for the stated purpose (TLS server or client authentication).
 
 @file{kx.h} is the key exchange facade: @code{gq_kx_generate} (client),
 @code{gq_kx_respond} (server) and @code{gq_kx_complete} (client) for all
-six groups in the policy, with the hybrid concatenation orders of
-RFC 10024.  It uses libgcrypt only.
+nine groups in the policy (the classical ones, the hybrids with the
+concatenation orders of RFC 10024, and the pure ML-KEM groups).  It uses
+libgcrypt only.
 
 @file{sign.h} is the signature facade for CertificateVerify: load a PEM
 private key, take the public key from a peer's certificate, and sign and
@@ -512,7 +513,8 @@ standalone 1.2 client refuses a ServerHello that carries the extension.
 
 DTLS 1.3 (RFC 9147) is the TLS 1.3 handshake engine in DTLS mode, so the
 suites, groups, signature schemes, resumption and client authentication
-are exactly those of TLS 1.3, including the hybrid post-quantum groups.
+are exactly those of TLS 1.3, including the hybrid and pure post-quantum
+groups.
 What is DTLS's own is in @file{dtlsrec.h}, @file{dtlshs.h},
 @file{dtls.h} and @file{dtlscookie.h}, and follows RFC 9147:
 
@@ -557,9 +559,12 @@ rotating secrets) also carries what the transcript needs, so a source
 that cannot receive at its address never gets an association, and the
 reply is always smaller than the request.  The client therefore sends a
 small first ClientHello (one classical key share, or none when only
-hybrid groups are configured) and puts the cookie first in the second;
-the server's retry then asks for its preferred group, so hybrid
-post-quantum groups are still used.
+post-quantum groups are configured) and puts the cookie first in the second;
+the server's retry then asks for its preferred group, so post-quantum
+groups are still used.  A hello with no key share at all is shorter than
+the retry that would answer it, which the listener never sends, so a
+client behind the listener lists a plain-curve group as well as the
+post-quantum ones.
 
 @item
 Not implemented: 0-RTT (early data), connection IDs and post-handshake
@@ -649,6 +654,25 @@ Hybrid post-quantum groups are preferred (@code{X25519MLKEM768},
 secp256r1 and secp384r1.  There is no secp521r1, no finite-field group
 and no legacy curve.  TLS 1.2 and DTLS 1.2 use secp256r1 and x25519 only
 (@ref{TLS 1.2 hardening}).
+
+The pure ML-KEM groups of draft-ietf-tls-mlkem (@code{MLKEM512},
+@code{MLKEM768}, @code{MLKEM1024}) are also supported, in TLS 1.3, DTLS 1.3
+and QUIC, for deployments that must not depend on a classical component
+(CNSA 2.0, for instance).  They are not in the default list, so the default
+stays hybrid first: a connection uses one only when the application puts it
+in the @code{groups} of its configuration, and the other end must offer it
+too.  A client that lists only pure groups sends one key share, the
+ML-KEM encapsulation key, and no classical share; if it lists a plain-curve
+group as well, it sends a share for that too, as it does for a hybrid
+group, so that a peer without post-quantum support does not force a
+HelloRetryRequest.  A server takes the groups in the order it is given, so
+an application that lists both hybrid and pure groups decides which it
+prefers; @code{gq_policy_supported_groups} returns every group the policy
+permits in its own order, which puts the hybrids first, then the pure
+groups (768, 1024, 512), then the classical ones.  A key share is the
+encapsulation key (800, 1184 or 1568 bytes) from the client and the
+ciphertext (768, 1088 or 1568 bytes) from the server, nothing else; a
+share of any other length is refused with @code{illegal_parameter}.
 
 @node Signatures and certificates
 @section Signatures and certificates

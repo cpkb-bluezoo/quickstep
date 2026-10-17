@@ -30,7 +30,9 @@
 
 #define TRY(expr) do { int r_ = (expr); if (r_ != GQ_OK) return r_; } while (0)
 
-/* Description of a group as its classical and post-quantum halves.  */
+/* Description of a group as its classical and post-quantum halves.  The
+   pure ML-KEM groups have no classical half: ec_algo is 0 and its sizes
+   are 0, which makes join and split below copy it as an empty part.  */
 struct group
 {
   uint16_t id;
@@ -59,6 +61,15 @@ static const struct group groups[] = {
     GCRY_KEM_MLKEM768, GCRY_KEM_MLKEM768_PUBKEY_LEN,
     GCRY_KEM_MLKEM768_SECKEY_LEN, GCRY_KEM_MLKEM768_CIPHER_LEN, 0 },
   { GQ_GROUP_SECP384R1_MLKEM1024, GCRY_KEM_RAW_P384R1, 97, 48, 97, 48, 0,
+    GCRY_KEM_MLKEM1024, GCRY_KEM_MLKEM1024_PUBKEY_LEN,
+    GCRY_KEM_MLKEM1024_SECKEY_LEN, GCRY_KEM_MLKEM1024_CIPHER_LEN, 0 },
+  { GQ_GROUP_MLKEM512, 0, 0, 0, 0, 0, 0,
+    GCRY_KEM_MLKEM512, GCRY_KEM_MLKEM512_PUBKEY_LEN,
+    GCRY_KEM_MLKEM512_SECKEY_LEN, GCRY_KEM_MLKEM512_CIPHER_LEN, 0 },
+  { GQ_GROUP_MLKEM768, 0, 0, 0, 0, 0, 0,
+    GCRY_KEM_MLKEM768, GCRY_KEM_MLKEM768_PUBKEY_LEN,
+    GCRY_KEM_MLKEM768_SECKEY_LEN, GCRY_KEM_MLKEM768_CIPHER_LEN, 0 },
+  { GQ_GROUP_MLKEM1024, 0, 0, 0, 0, 0, 0,
     GCRY_KEM_MLKEM1024, GCRY_KEM_MLKEM1024_PUBKEY_LEN,
     GCRY_KEM_MLKEM1024_SECKEY_LEN, GCRY_KEM_MLKEM1024_CIPHER_LEN, 0 }
 };
@@ -188,8 +199,9 @@ gq_kx_generate (unsigned group, gq_kx_key *key)
 
     memset (key, 0, sizeof *key);
     key->group = g->id;
-    if (gcry_kem_keypair (g->ec_algo, ec_pub, g->ec_pub, key->secret,
-                          g->ec_sec))
+    if (g->ec_algo
+        && gcry_kem_keypair (g->ec_algo, ec_pub, g->ec_pub, key->secret,
+                             g->ec_sec))
       return GQ_ERR_CRYPTO;
     if (g->kem_algo)
       {
@@ -233,10 +245,13 @@ gq_kx_respond (unsigned group, const uint8_t *client_share,
   TRY (gq_crypto_init ());
 
   split (g, client_share, g->ec_pub, g->kem_pub, &ec_peer, &pq_peer);
-  if (gcry_kem_encap (g->ec_algo, ec_peer, g->ec_pub, ec_ct, g->ec_pub,
-                      ec_raw, g->ec_raw, NULL, 0))
-    return GQ_ERR_CRYPTO;		/* Not a valid point.  */
-  TRY (ec_extract (g, ec_raw, ec_ss));
+  if (g->ec_algo)
+    {
+      if (gcry_kem_encap (g->ec_algo, ec_peer, g->ec_pub, ec_ct, g->ec_pub,
+                          ec_raw, g->ec_raw, NULL, 0))
+        return GQ_ERR_CRYPTO;		/* Not a valid point.  */
+      TRY (ec_extract (g, ec_raw, ec_ss));
+    }
 
   if (g->kem_algo)
     {
@@ -288,10 +303,13 @@ gq_kx_complete (const gq_kx_key *key, const uint8_t *server_share,
   TRY (gq_crypto_init ());
 
   split (g, server_share, g->ec_pub, g->kem_ct, &ec_peer, &pq_peer);
-  if (gcry_kem_decap (g->ec_algo, key->secret, g->ec_sec, ec_peer,
-                      g->ec_pub, ec_raw, g->ec_raw, NULL, 0))
-    return GQ_ERR_CRYPTO;
-  TRY (ec_extract (g, ec_raw, ec_ss));
+  if (g->ec_algo)
+    {
+      if (gcry_kem_decap (g->ec_algo, key->secret, g->ec_sec, ec_peer,
+                          g->ec_pub, ec_raw, g->ec_raw, NULL, 0))
+        return GQ_ERR_CRYPTO;
+      TRY (ec_extract (g, ec_raw, ec_ss));
+    }
 
   if (g->kem_algo)
     {
