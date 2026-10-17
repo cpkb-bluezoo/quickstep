@@ -2647,6 +2647,184 @@ test_buffer_freed_with_the_keys (void)
   pair_free (p);
 }
 
+/* ---- The server's preferred address (RFC 9000 section 9.6) ---- */
+
+struct pref_hook
+{
+  unsigned calls;
+  gq_path client;
+  int answer;		/* What to return.  */
+  int zero_ports;	/* Offer addresses that cannot be used.  */
+};
+
+static int
+pref_cb (void *user, const gq_path *client, gq_preferred_address *out)
+{
+  struct pref_hook *h = user;
+
+  h->calls++;
+  h->client = *client;
+  memset (out, 0, sizeof *out);
+  if (!h->zero_ports)
+    {
+      memset (out->ipv4, 0x0a, 4);
+      out->ipv4[3] = 7;
+      out->ipv4_port = 4433;
+      out->ipv6[15] = 1;
+      out->ipv6_port = 4434;
+    }
+  return h->answer;
+}
+
+static struct pair *
+pref_pair (struct pref_hook *h, gq_conn_config *scfg, uint32_t seed)
+{
+  gq_conn_config cc;
+  struct pair *p;
+
+  memset (&cc, 0, sizeof cc);
+  scfg->preferred_address = pref_cb;
+  scfg->preferred_address_user = h;
+  p = pair_new_paths (&cc, scfg, seed);
+  p->qlog_sink[0].keep = p->qlog_sink[1].keep = 1;
+  settle (p);
+  return p;
+}
+
+/* The server names an address for the client as the connection starts and
+   puts it in its transport parameters with a connection ID of sequence 1,
+   the stateless reset token that goes with it, and no NEW_CONNECTION_ID
+   frame to say it again; the client keeps the ID as the peer's second.  */
+static void
+test_preferred_address_offered (void)
+{
+  struct pref_hook h;
+  gq_conn_config sc;
+  struct pair *p;
+  gq_conn *cli, *srv;
+  const gq_preferred_address *pa;
+  size_t i, frames = 0, found = 0;
+  qline q;
+
+  memset (&h, 0, sizeof h);
+  h.answer = 1;
+  memset (&sc, 0, sizeof sc);
+  p = pref_pair (&h, &sc, 90);
+  cli = p->cli.c;
+  srv = p->srv.c;
+  CHECK_EQ (h.calls, 1);
+  CHECK (h.client.remote.len > 0);		/* Where the client is.  */
+  CHECK (addr_same (&h.client.remote, &p->net.m[0].ext));
+  /* What the client was told.  */
+  CHECK (gq_tp_has (&cli->peer_tp, GQ_TP_PREFERRED_ADDRESS));
+  pa = &cli->peer_tp.preferred_address;
+  CHECK_EQ (pa->ipv4_port, 4433);
+  CHECK_EQ (pa->ipv4[3], 7);
+  CHECK_EQ (pa->ipv6_port, 4434);
+  CHECK_EQ (pa->ipv6[15], 1);
+  CHECK_EQ (pa->cid.len, srv->cfg.cid_len);
+  /* It is the server's second connection ID, announced already.  */
+  CHECK (srv->l[1].used && srv->l[1].seq == 1 && srv->l[1].announced
+         && !srv->l[1].need_send);
+  CHECK (srv->l[1].cid.len == pa->cid.len
+         && !memcmp (srv->l[1].cid.data, pa->cid.data, pa->cid.len));
+  CHECK (!memcmp (srv->l[1].token, pa->reset_token, GQ_RESET_TOKEN_LEN));
+  CHECK (memcmp (srv->l[1].cid.data, srv->l[0].cid.data, srv->l[1].cid.len));
+  /* The client has it as sequence 1 with the token.  */
+  for (i = 0; i < MAX_PCID; i++)
+    if (cli->p[i].used && cli->p[i].seq == 1)
+      {
+        found++;
+        CHECK (cli->p[i].has_token);
+        CHECK (!memcmp (cli->p[i].token, pa->reset_token, GQ_RESET_TOKEN_LEN));
+        CHECK (cli->p[i].cid.len == pa->cid.len
+               && !memcmp (cli->p[i].cid.data, pa->cid.data, pa->cid.len));
+      }
+  CHECK_EQ (found, 1);
+  /* Further IDs come in frames from sequence 2, never 1.  */
+  for (i = 0; i < qsink_count (&p->qlog_sink[1], "quic:packet_sent"); i++)
+    {
+      size_t f;
+
+      CHECK (qsink_nth (&p->qlog_sink[1], "quic:packet_sent", i, &q));
+      for (f = 0; f < 8; f++)
+        {
+          char key[48];
+
+          snprintf (key, sizeof key, "frames.%zu.frame_type", f);
+          if (qline_is (&q, key, "new_connection_id"))
+            {
+              snprintf (key, sizeof key, "frames.%zu.sequence_number", f);
+              frames++;
+              CHECK (!qline_is (&q, key, "1"));
+              CHECK (!qline_is (&q, key, "0"));
+            }
+        }
+      qline_free (&q);
+    }
+  CHECK (frames >= 1);
+  CHECK_EQ (p->cli.bad + p->srv.bad, 0);
+  CHECK_EQ (p->srv.closed + p->cli.closed, 0);
+  pair_free (p);
+}
+
+/* The largest parameters the server sends still fit: 20-byte connection IDs
+   everywhere, the preferred address, and all the options.  */
+static void
+test_preferred_address_large_params (void)
+{
+  struct pref_hook h;
+  gq_conn_config sc;
+  struct pair *p;
+
+  memset (&h, 0, sizeof h);
+  h.answer = 1;
+  memset (&sc, 0, sizeof sc);
+  sc.cid_len = 20;
+  sc.max_datagram_frame_size = 1200;
+  sc.disable_active_migration = 1;
+  p = pref_pair (&h, &sc, 95);
+  CHECK (gq_tp_has (&p->cli.c->peer_tp, GQ_TP_PREFERRED_ADDRESS));
+  CHECK_EQ (p->cli.c->peer_tp.preferred_address.cid.len, 20);
+  CHECK (gq_tp_has (&p->cli.c->peer_tp, GQ_TP_DISABLE_ACTIVE_MIGRATION));
+  CHECK_EQ (p->srv.closed + p->cli.closed, 0);
+  pair_free (p);
+}
+
+/* Not offered: no hook, a hook that declines, and one that offers what
+   cannot be used.  */
+static void
+test_preferred_address_not_offered (void)
+{
+  struct pref_hook h;
+  gq_conn_config sc;
+  struct pair *p;
+  gq_conn_config cc;
+  int k;
+
+  /* No hook at all.  */
+  memset (&sc, 0, sizeof sc);
+  memset (&cc, 0, sizeof cc);
+  p = pair_new_paths (&cc, &sc, 91);
+  settle (p);
+  CHECK (!gq_tp_has (&p->cli.c->peer_tp, GQ_TP_PREFERRED_ADDRESS));
+  pair_free (p);
+  for (k = 0; k < 2; k++)
+    {
+      memset (&h, 0, sizeof h);
+      h.answer = k == 0 ? 0 : 1;	/* Declined; or nothing usable.  */
+      h.zero_ports = k == 1;
+      memset (&sc, 0, sizeof sc);
+      p = pref_pair (&h, &sc, 92 + (uint32_t) k);
+      CHECK_EQ (h.calls, 1);
+      CHECK (!gq_tp_has (&p->cli.c->peer_tp, GQ_TP_PREFERRED_ADDRESS));
+      CHECK_EQ (p->srv.closed + p->cli.closed, 0);
+      /* The second ID is an ordinary one, announced in a frame.  */
+      CHECK (p->srv.c->l[1].used && p->srv.c->l[1].seq == 1);
+      pair_free (p);
+    }
+}
+
 int
 main (void)
 {
@@ -2702,6 +2880,9 @@ main (void)
   test_buffer_one_rtt_before_finished ();
   test_buffer_is_bounded ();
   test_buffer_freed_with_the_keys ();
+  test_preferred_address_offered ();
+  test_preferred_address_not_offered ();
+  test_preferred_address_large_params ();
   TST_DONE ();
 }
 

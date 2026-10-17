@@ -235,7 +235,7 @@ struct gq_conn
   gq_tls_server_config stls;
   gq_ticket_keys *ticket_base;	/* Server: the caller's ring (v1 tickets).  */
   gq_ticket_keys *ticket_v2;	/* ...and the ring derived for v2.  */	/* the engine keeps pointers into them.  */
-  uint8_t tp_buf[256];
+  uint8_t tp_buf[512];
   size_t tp_len;
   gq_transport_params peer_tp;
   int have_peer_tp;
@@ -291,6 +291,9 @@ struct gq_conn
   uint32_t pmtu_cur, pmtu_lo, pmtu_hi, pmtu_probe_size;
   uint32_t pmtu_gen;		/* Counts the searches; a probe carries it.  */
   uint64_t packets_buffered;	/* Held for want of keys, in all.  */
+  gq_preferred_address offer;	/* Server: what it told the client, with the
+				   connection ID (sequence 1) and token.  */
+  uint8_t have_offer;
   held_pkt *held;		/* Packets held for want of keys,  */
   unsigned n_held, cap_held;	/* in arrival order.  */
   uint8_t replaying;

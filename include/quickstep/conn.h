@@ -272,6 +272,19 @@ typedef struct gq_conn_config
      being dropped for the peer to send again.  0: 16.  Negative: none are
      held.  Each takes up to a datagram's worth of memory.  */
   int max_buffered_packets;
+  /* Server (RFC 9000 section 9.6): an address clients may move to, named
+     for each connection as it starts.  Called once, with CLIENT the path of
+     the first Initial (its fields empty if the caller gave no path), to
+     fill in OUT: in ipv4/ipv4_port and ipv6/ipv6_port the addresses and
+     ports of the server, for either family or both; a family with no port
+     or an address of zeros is not offered.  Return nonzero to offer them,
+     0 to offer none; the connection chooses the connection ID and
+     stateless reset token that go with them (sequence number 1).  NULL:
+     none are offered.  The server must receive on, and send from, the
+     addresses it names.  */
+  int (*preferred_address) (void *user, const gq_path *client,
+                            gq_preferred_address *out);
+  void *preferred_address_user;
   /* Unreliable DATAGRAM frames (RFC 9221).  MAX_DATAGRAM_FRAME_SIZE is the
      largest frame we accept, advertised to the peer; 0 (the default)
      switches DATAGRAM off.  DATAGRAM_QUEUE bounds the bytes waiting to be

@@ -457,6 +457,59 @@ conn_version_listed (const gq_conn *c, uint32_t v)
   return 0;
 }
 
+/* A family of PA is offered if it has a port and an address that is not all
+   zeros (RFC 9000 section 18.2); clear what is not.  1 if either is.  */
+static int
+preferred_usable (gq_preferred_address *pa)
+{
+  static const uint8_t zero[16];
+
+  if (pa->ipv4_port == 0 || memcmp (pa->ipv4, zero, 4) == 0)
+    {
+      memset (pa->ipv4, 0, sizeof pa->ipv4);
+      pa->ipv4_port = 0;
+    }
+  if (pa->ipv6_port == 0 || memcmp (pa->ipv6, zero, 16) == 0)
+    {
+      memset (pa->ipv6, 0, sizeof pa->ipv6);
+      pa->ipv6_port = 0;
+    }
+  return pa->ipv4_port != 0 || pa->ipv6_port != 0;
+}
+
+/* Server: ask the application for an address to offer this client
+   (RFC 9000 section 9.6.1).  The connection ID that goes with it has
+   sequence number 1, is not announced in a frame, and comes with its
+   stateless reset token.  */
+static void
+make_offer (gq_conn *c)
+{
+  gq_preferred_address pa;
+  gq_path none;
+  const gq_path *from = &none;
+  size_t i;
+
+  if (c->cfg.preferred_address == NULL || c->have_offer)
+    return;
+  memset (&none, 0, sizeof none);
+  if (c->rx_known)
+    from = &c->rx;
+  memset (&pa, 0, sizeof pa);
+  if (!c->cfg.preferred_address (c->cfg.preferred_address_user, from, &pa)
+      || !preferred_usable (&pa))
+    return;
+  if (new_lcid (c, 1, NULL) != GQ_OK)
+    return;
+  for (i = 0; i < MAX_LCID; i++)
+    if (c->l[i].used && c->l[i].seq == c->next_lseq - 1)
+      {
+        pa.cid = c->l[i].cid;
+        memcpy (pa.reset_token, c->l[i].token, GQ_RESET_TOKEN_LEN);
+      }
+  c->offer = pa;
+  c->have_offer = 1;
+}
+
 static void
 local_params (gq_conn *c, gq_transport_params *tp)
 {
@@ -512,6 +565,11 @@ local_params (gq_conn *c, gq_transport_params *tp)
       gq_tp_set_present (tp, GQ_TP_ORIGINAL_DESTINATION_CONNECTION_ID);
       memcpy (tp->stateless_reset_token, c->l[0].token, GQ_RESET_TOKEN_LEN);
       gq_tp_set_present (tp, GQ_TP_STATELESS_RESET_TOKEN);
+      if (c->have_offer)
+        {
+          tp->preferred_address = c->offer;
+          gq_tp_set_present (tp, GQ_TP_PREFERRED_ADDRESS);
+        }
       if (c->retried)
         {
           tp->retry_source_connection_id = c->retry_scid;
@@ -524,6 +582,41 @@ static int
 cid_equal (const gq_cid *a, const gq_cid *b)
 {
   return a->len == b->len && memcmp (a->data, b->data, a->len) == 0;
+}
+
+/* Client: the server's preferred address (RFC 9000 section 9.6.1) comes with
+   a connection ID of sequence number 1 and its stateless reset token, as if
+   in a NEW_CONNECTION_ID frame; keep them with the others.  The address is
+   used when the application takes it up (gq_conn_migrate_preferred).  */
+static void
+store_preferred_address (gq_conn *c)
+{
+  gq_preferred_address pa;
+  size_t i;
+  pcid *slot = NULL;
+
+  if (c->role != GQ_ROLE_CLIENT
+      || !gq_tp_has (&c->peer_tp, GQ_TP_PREFERRED_ADDRESS))
+    return;
+  pa = c->peer_tp.preferred_address;
+  if (!preferred_usable (&pa))
+    return;
+  for (i = 0; i < MAX_PCID; i++)
+    {
+      if (c->p[i].used && c->p[i].seq == 1)
+        return;
+      if (!c->p[i].used && slot == NULL)
+        slot = &c->p[i];
+    }
+  if (slot == NULL)
+    return;
+  memset (slot, 0, sizeof *slot);
+  slot->used = 1;
+  slot->seq = 1;
+  slot->cid = pa.cid;
+  memcpy (slot->token, pa.reset_token, GQ_RESET_TOKEN_LEN);
+  slot->has_token = 1;
+  conn_peer_token (c, slot->token);
 }
 
 int
@@ -562,6 +655,7 @@ conn_apply_peer_params (gq_conn *c)
   if (idle && (c->idle_timeout_us == 0 || idle < c->idle_timeout_us))
     c->idle_timeout_us = idle;
   streams_apply_peer_params (c);
+  store_preferred_address (c);
   /* Offer the peer spare connection IDs, up to what it will keep.  */
   while (1)
     {
@@ -1194,6 +1288,7 @@ conn_server_start (gq_conn *c, const uint8_t *odcid, size_t odcid_len,
   c->sp[SP_INITIAL].have_rk = c->sp[SP_INITIAL].have_wk = 1;
   ql_key_updated (c, GQ_LEVEL_INITIAL, GQ_DIR_READ, "tls");
   ql_key_updated (c, GQ_LEVEL_INITIAL, GQ_DIR_WRITE, "tls");
+  make_offer (c);
   encode_params (c);
   c->stls.quic = 1;
   c->stls.transport_params = c->tp_buf;
