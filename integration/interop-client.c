@@ -307,11 +307,13 @@ run_once (struct opts *o_, const gq_tls_config *cfg, const gq_tls_session *resum
         {
           sent_request = 1;
           printf ("connected suite=0x%04x group=0x%04x hrr=%d alpn=%.*s "
-                  "client_auth_requested=%d client_auth_sent=%d resumed=%d\n",
+                  "client_auth_requested=%d client_auth_sent=%d resumed=%d "
+                  "sig=0x%04x client_sig=0x%04x\n",
                   st.info.cipher_suite, st.info.group, st.info.hello_retry,
                   (int) st.info.alpn_len, (const char *) st.info.alpn,
                   st.info.client_auth_requested, st.info.client_auth_sent,
-                  st.info.resumed);
+                  st.info.resumed, st.info.sig_scheme,
+                  st.info.client_sig_scheme);
           if (o.key_update && gq_tlsauto_key_update (c.u, 1) != GQ_OK)
             break;
           if (o.lines > 0)

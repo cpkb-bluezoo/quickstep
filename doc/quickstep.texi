@@ -326,6 +326,17 @@ run scenarios whose names contain a string, and @env{QUICHE_DIR} to name
 the directory holding @command{quiche-client} and @command{quiche-server}.
 The library is also run under AddressSanitizer and UndefinedBehaviorSanitizer.
 
+The interop scripts also test ML-DSA against OpenSSL 3.5 and later (TLS 1.3,
+both directions) and wolfSSL built with ML-DSA (DTLS 1.3): the three
+parameter sets, certificates under a classical CA and under an ML-DSA CA,
+client certificates, and private keys in each form of RFC 9881 (the seed,
+the expanded key, or both), with the signature algorithm forced on the OpenSSL
+side so that nothing can fall back to a classical one, and the scheme that
+signed the handshake checked on ours (@code{gq_tls_info.sig_scheme}).  The
+code points, the key encodings and the empty context of the signature agree
+with those peers.  A scenario that cannot run says so, and with
+@env{GQ_EXPECT_MLDSA} set that is a failure, as for the unit tests below.
+
 ML-DSA signatures, keys and certificates (@file{src/sign.c},
 @file{src/mldsa.c}), and handshakes over TLS 1.3 and QUIC with them, are
 tested everywhere, since libgcrypt does the signing; the certificates for

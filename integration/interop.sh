@@ -22,6 +22,8 @@ SERVER=${INTEROP_SERVER:-./interop-server}
 # The script changes directory; make the program paths absolute.
 case $CLIENT in /*) ;; *) CLIENT=$(pwd)/$CLIENT ;; esac
 case $SERVER in /*) ;; *) SERVER=$(pwd)/$SERVER ;; esac
+PROBE=${INTEROP_PROBE:-./interop-probe}
+case $PROBE in /*) ;; *) PROBE=$(pwd)/$PROBE ;; esac
 OPENSSL=${OPENSSL:-$(command -v openssl)}
 GNUTLS_SERV=${GNUTLS_SERV:-$(command -v gnutls-serv)}
 [ -n "$OPENSSL" ] || exit 77		# Certificates are made with openssl.
@@ -62,7 +64,11 @@ printf 'subjectAltName=DNS:client.test\nextendedKeyUsage=clientAuth\n' > cli.ext
 mkcert ()
 {
   name=$1; shift
-  case $name in bad*) issuer=ca2 ;; *) issuer=ca ;; esac
+  case $name in
+    bad*) issuer=ca2 ;;
+    pqleaf*) issuer=mlca${name#pqleaf} ;;	# Under the ML-DSA CA of its set.
+    *) issuer=ca ;;
+  esac
   case $name in *cli*) ext=cli.ext ;; *) ext=srv.ext ;; esac
   "$OPENSSL" req -new -newkey "$@" -nodes -keyout "$name.key" -out "$name.csr" \
     -subj "/CN=$name" >/dev/null 2>&1 &&
@@ -80,11 +86,92 @@ mkcert ()
 } || gen_ok=0
 [ $gen_ok = 1 ] || { echo "cannot generate certificates" >&2; exit 77; }
 
-# ML-DSA certificates, if this OpenSSL has ML-DSA (3.5 and later).  Its keys
-# carry the seed and the expanded key (RFC 9881), and the CA is classical.
-have_mldsa=0
-if "$OPENSSL" list -signature-algorithms 2>/dev/null | grep -q 'ML-DSA-65'; then
-  { mkcert mldsa ML-DSA-65 && mkcert climl ML-DSA-65; } && have_mldsa=1
+# ---------------------------------------------------------------- ML-DSA
+# Certificates for ML-DSA-44, 65 and 87, if this OpenSSL has them (3.5 and
+# later): for each set N a server certificate (mldsaN) and a client
+# certificate (climlN) under the classical CA, and, to test chains under an
+# ML-DSA CA, a CA (mlcaN) and a server certificate (pqleafN) under it.  For
+# ML-DSA-65 the private key is also written in each of the three forms of
+# RFC 9881 (seed only, expanded key only, both), which is what the keys of
+# the others are, by default, in the last.  The signature scheme that signed
+# the handshake is reported by our side (sig=, client_sig=) and checked in
+# every scenario, with the algorithm forced on the OpenSSL side where it
+# signs.  What cannot be tested is said, and with GQ_EXPECT_MLDSA set it
+# is a failure: a scenario that did not run must not look like one that
+# passed, where ML-DSA is meant to be there.
+mldsa_expected ()
+{
+  [ -n "$GQ_EXPECT_MLDSA" ] && [ "$GQ_EXPECT_MLDSA" != 0 ]
+}
+
+mldsa_skip ()
+{
+  echo "SKIP ML-DSA: $1"
+  if mldsa_expected; then
+    echo "FAIL ML-DSA: expected (GQ_EXPECT_MLDSA) but $1"
+    fails=$((fails + 1))
+  fi
+}
+
+# The SignatureScheme of ML-DSA-N, as our side prints it.
+mldsa_id ()
+{
+  case $1 in 44) echo 0x0904 ;; 65) echo 0x0905 ;; 87) echo 0x0906 ;; esac
+}
+
+mldsa_sets=
+mldsa_pq_sets=
+mldsa_forms=
+for N in 44 65 87; do
+  if "$OPENSSL" list -signature-algorithms 2>/dev/null | grep -q "ML-DSA-$N"; then
+    if mkcert mldsa$N ML-DSA-$N && mkcert climl$N ML-DSA-$N; then
+      mldsa_sets="$mldsa_sets $N"
+      if "$OPENSSL" req -x509 -newkey ML-DSA-$N -nodes -keyout mlca$N.key \
+           -out mlca$N.pem -subj "/CN=ML-DSA CA $N" -days 2 \
+           -addext basicConstraints=critical,CA:TRUE \
+           -addext keyUsage=critical,keyCertSign >/dev/null 2>&1 \
+         && mkcert pqleaf$N ML-DSA-$N; then
+        mldsa_pq_sets="$mldsa_pq_sets $N"
+      fi
+    else
+      mldsa_skip "cannot make ML-DSA-$N certificates"
+    fi
+  else
+    mldsa_skip "this OpenSSL has no ML-DSA-$N"
+  fi
+done
+
+# mkcert_form NAME FORM: a certificate for an ML-DSA-65 key written in FORM
+# (seed-only, priv-only or seed-priv).
+mkcert_form ()
+{
+  name=$1; form=$2
+  case $name in *cli*) ext=cli.ext ;; *) ext=srv.ext ;; esac
+  "$OPENSSL" genpkey -algorithm ML-DSA-65 \
+    -provparam "ml-dsa.output_formats=$form" -out "$name.key" >/dev/null 2>&1 &&
+  "$OPENSSL" req -new -key "$name.key" -out "$name.csr" -subj "/CN=$name" \
+    >/dev/null 2>&1 &&
+  "$OPENSSL" x509 -req -in "$name.csr" -CA ca.pem -CAkey ca.key \
+    -CAcreateserial -out "$name.pem" -days 2 -extfile "$ext" >/dev/null 2>&1
+}
+case " $mldsa_sets " in
+  *" 65 "*)
+    for form in seed-only priv-only seed-priv; do
+      if mkcert_form "mldsa65-$form" $form && mkcert_form "climl65-$form" $form
+      then
+        mldsa_forms="$mldsa_forms $form"
+      else
+        mldsa_skip "this OpenSSL cannot write ML-DSA-65 keys as $form"
+      fi
+    done ;;
+esac
+
+# Chains under an ML-DSA CA are validated by GnuTLS, and need its ML-DSA.
+mldsa_chains=0
+if [ -x "$PROBE" ] && "$PROBE" mldsa-chain; then
+  mldsa_chains=1
+elif [ -n "$mldsa_pq_sets" ]; then
+  mldsa_skip "the GnuTLS of this build cannot check an ML-DSA signature, so the client cannot validate a chain under an ML-DSA CA"
 fi
 
 head -c 200000 /dev/urandom | od -An -tx1 | head -c 200000 > big
@@ -191,6 +278,77 @@ scenario ()
 
 HTTP200=200
 
+# Our client against an OpenSSL server, for each set that was made.  The
+# server's certificate has only an ML-DSA key, and the algorithm is forced
+# there too (-sigalgs), so that it cannot sign with anything else; our side
+# says which scheme it saw.
+mldsa_client_scenarios ()
+{
+  for N in $mldsa_sets; do
+    id=$(mldsa_id $N)
+    scenario "openssl: ML-DSA-$N certificate" openssl \
+      "-cert mldsa$N.pem -key mldsa$N.key -www -sigalgs mldsa$N" \
+      "--expect $HTTP200" ok "sig=$id" "client_sig=0x0000" "result=ok"
+    # Our client certificate, signing with ML-DSA-N: OpenSSL asks for
+    # nothing else.
+    scenario "openssl: ML-DSA-$N client certificate" openssl \
+      "$OS -Verify 1 -CAfile ca.pem -client_sigalgs mldsa$N" \
+      "--cert climl$N.pem --key climl$N.key --expect $HTTP200" ok \
+      "client_auth_sent=1" "client_sig=$id" "result=ok"
+  done
+  for N in $mldsa_pq_sets; do
+    [ $mldsa_chains = 1 ] || continue
+    id=$(mldsa_id $N)
+    scenario "openssl: ML-DSA-$N certificate under an ML-DSA CA" openssl \
+      "-cert pqleaf$N.pem -key pqleaf$N.key -www -sigalgs mldsa$N" \
+      "--ca mlca$N.pem --expect $HTTP200" ok "sig=$id" "result=ok"
+  done
+  # A client certificate whose key was written in each form of RFC 9881.
+  for form in $mldsa_forms; do
+    scenario "openssl: ML-DSA-65 client certificate, key as $form" openssl \
+      "$OS -Verify 1 -CAfile ca.pem -client_sigalgs mldsa65" \
+      "--cert climl65-$form.pem --key climl65-$form.key --expect $HTTP200" ok \
+      "client_auth_sent=1" "client_sig=0x0905" "result=ok"
+  done
+}
+
+# Our server against an OpenSSL client.  The client is made to ask for the
+# scheme (-sigalgs), together with the one the classical CA signed the
+# certificate with, which it also checks against that list.
+mldsa_server_scenarios ()
+{
+  for N in $mldsa_sets; do
+    id=$(mldsa_id $N)
+    server_scenario "server/openssl: ML-DSA-$N certificate" openssl \
+      "--cert mldsa$N.pem --key mldsa$N.key" \
+      "-sigalgs mldsa$N:ecdsa_secp256r1_sha256" ok "sig=$id" "result=ok"
+    server_scenario "server/openssl: ML-DSA-$N client certificate" openssl \
+      "$SC --client-auth required --ca ca.pem" \
+      "-cert climl$N.pem -key climl$N.key -client_sigalgs mldsa$N" ok \
+      "client_auth=1" "client_sig=$id"
+  done
+  for N in $mldsa_pq_sets; do
+    id=$(mldsa_id $N)
+    server_scenario "server/openssl: ML-DSA-$N certificate under an ML-DSA CA" \
+      openssl "--cert pqleaf$N.pem --key pqleaf$N.key" \
+      "-CAfile mlca$N.pem -sigalgs mldsa$N:mldsa$N" ok "sig=$id" "result=ok"
+  done
+  # A server key written in each form of RFC 9881.
+  for form in $mldsa_forms; do
+    server_scenario "server/openssl: ML-DSA-65 certificate, key as $form" \
+      openssl "--cert mldsa65-$form.pem --key mldsa65-$form.key" \
+      "-sigalgs mldsa65:ecdsa_secp256r1_sha256" ok "sig=0x0905" "result=ok"
+  done
+  # A client that wants another parameter set cannot be served by this key.
+  case " $mldsa_sets " in *" 44 "*) have44=1 ;; *) have44=0 ;; esac
+  case " $mldsa_sets " in *" 65 "*) have65=1 ;; *) have65=0 ;; esac
+  if [ $have44 = 1 ] && [ $have65 = 1 ]; then
+    server_scenario "server/openssl: ML-DSA-65 certificate, client wants only ML-DSA-44" \
+      openssl "--cert mldsa65.pem --key mldsa65.key" \
+      "-sigalgs mldsa44:ecdsa_secp256r1_sha256" fail "alert=40"
+  fi
+}
+
 # ---------------------------------------------------------------- OpenSSL
 if "$OPENSSL" s_server -help >/dev/null 2>&1; then
   OS="-cert ec.pem -key ec.key -www"
@@ -221,15 +379,7 @@ if "$OPENSSL" s_server -help >/dev/null 2>&1; then
     "--expect $HTTP200" ok "result=ok"
   scenario "openssl: Ed25519 certificate" openssl "-cert ed.pem -key ed.key -www" \
     "--expect $HTTP200" ok "result=ok"
-  if [ $have_mldsa = 1 ]; then
-    # The signature of the server's CertificateVerify is ML-DSA-65, made by
-    # OpenSSL with a key of its own making.
-    scenario "openssl: ML-DSA-65 certificate" openssl "-cert mldsa.pem -key mldsa.key -www" \
-      "--expect $HTTP200" ok "result=ok"
-    scenario "openssl: ML-DSA-65 client certificate" openssl \
-      "$OS -Verify 1 -CAfile ca.pem" \
-      "--cert climl.pem --key climl.key --expect $HTTP200" ok "client_auth_requested=1" "client_auth_sent=1"
-  fi
+  mldsa_client_scenarios
   scenario "openssl: TLS_AES_128_GCM_SHA256" openssl "$OS -ciphersuites TLS_AES_128_GCM_SHA256" \
     "--expect $HTTP200" ok "suite=0x1301"
   scenario "openssl: TLS_AES_256_GCM_SHA384 (SHA-384 schedule)" openssl "$OS -ciphersuites TLS_AES_256_GCM_SHA384" \
@@ -527,12 +677,7 @@ if "$OPENSSL" s_client -help >/dev/null 2>&1; then
     "-ciphersuites TLS_AES_256_GCM_SHA384" ok "suite=0x1302"
   server_scenario "server/openssl: RSA certificate" openssl "--cert rsa.pem --key rsa.key" "" ok "result=ok"
   server_scenario "server/openssl: Ed25519 certificate" openssl "--cert ed.pem --key ed.key" "" ok "result=ok"
-  if [ $have_mldsa = 1 ]; then
-    server_scenario "server/openssl: ML-DSA-65 certificate" openssl \
-      "--cert mldsa.pem --key mldsa.key" "" ok "result=ok"
-    server_scenario "server/openssl: ML-DSA-65 client certificate" openssl \
-      "$SC --client-auth required --ca ca.pem" "-cert climl.pem -key climl.key" ok "client_auth=1"
-  fi
+  mldsa_server_scenarios
   server_scenario "server/openssl: SNI selects the certificate" openssl \
     "$SC --sni example.test=ec.pem:ec.key --sni other.test=rsa.pem:rsa.key" \
     "-servername other.test -verify_hostname other.test" ok "sni=other.test"

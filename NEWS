@@ -13,6 +13,18 @@ quickstep.pc.  The C API (gq_ / GQ_) is unchanged.
 * Noteworthy changes in development (unreleased)
 
 ** Initial development.
+** gq_tls_info gains sig_scheme and client_sig_scheme: the SignatureScheme
+that signed the server's CertificateVerify, and the client's, as each end
+saw it (0 where there was none).  The interop programs print them, and the
+interop scripts check that the scheme a scenario is about is the one that
+was used.
+** ML-DSA is tested against OpenSSL 3.5 and later in both directions
+(integration/interop.sh) and, for DTLS 1.3, against wolfSSL built with
+ML-DSA (interop-dtls.sh): ML-DSA-44, 65 and 87 certificates under a classical
+CA and under an ML-DSA CA, client certificates, and private keys in each of
+the forms of RFC 9881, with the signature algorithm forced on the OpenSSL
+side.  Nothing needed changing in the library: the code points, the key
+encodings and the empty signature context agree.
 ** QUIC: a handshake could stall when the packet holding the start of the
 server's ServerHello was lost and the server's flight was big enough to fill
 its congestion window with packets the client cannot read without it.  The

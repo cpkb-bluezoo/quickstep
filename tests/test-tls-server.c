@@ -430,6 +430,11 @@ test_basic (size_t chunk)
   /* Server preference is the policy order; the hybrid group leads.  */
   CHECK_EQ (p->s.info.group, GQ_GROUP_X25519_MLKEM768);
   CHECK_EQ (p->s.info.cipher_suite, GQ_TLS_AES_256_GCM_SHA384);
+  /* What signed the handshake is reported by both ends; no client did.  */
+  CHECK_EQ (p->s.info.sig_scheme, GQ_SIG_ECDSA_SECP256R1_SHA256);
+  CHECK_EQ (p->c.info.sig_scheme, GQ_SIG_ECDSA_SECP256R1_SHA256);
+  CHECK_EQ (p->s.info.client_sig_scheme, 0);
+  CHECK_EQ (p->c.info.client_sig_scheme, 0);
   CHECK (p->s.info.server_name_len == 12
          && strcmp (p->s.info.server_name, "example.test") == 0);
   CHECK_EQ (p->c.info.client_auth_requested, 0);
@@ -1018,6 +1023,8 @@ test_client_auth (void)
   CHECK_EQ (p->c.info.client_auth_sent, 1);
   CHECK_EQ (p->s.info.client_auth_requested, 1);
   CHECK_EQ (p->s.info.client_auth_sent, 1);	/* Verified.  */
+  CHECK_EQ (p->s.info.client_sig_scheme, GQ_SIG_ED25519);
+  CHECK_EQ (p->c.info.client_sig_scheme, GQ_SIG_ED25519);
   pair_free (p);
 
   /* Optional and absent: the handshake completes unauthenticated.  */
@@ -1134,6 +1141,8 @@ mldsa_handshakes (int validate)
           CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
           CHECK_EQ (pump (p, chunk), GQ_OK);
           check_success (p);
+          CHECK_EQ (p->s.info.sig_scheme, schemes[i]);
+          CHECK_EQ (p->c.info.sig_scheme, schemes[i]);
           pair_free (p);
 
           /* With the default lists: the key decides.  */
@@ -1143,6 +1152,8 @@ mldsa_handshakes (int validate)
           CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
           CHECK_EQ (pump (p, chunk), GQ_OK);
           check_success (p);
+          CHECK_EQ (p->s.info.sig_scheme, schemes[i]);
+          CHECK_EQ (p->c.info.sig_scheme, schemes[i]);
           pair_free (p);
         }
 
@@ -1198,6 +1209,8 @@ mldsa_handshakes (int validate)
       CHECK_EQ (p->s.info.client_auth_requested, 1);
       CHECK_EQ (p->c.info.client_auth_sent, 1);
       CHECK_EQ (p->s.info.client_auth_sent, 1);	/* Verified.  */
+      CHECK_EQ (p->s.info.client_sig_scheme, GQ_SIG_MLDSA65);
+      CHECK_EQ (p->c.info.client_sig_scheme, GQ_SIG_MLDSA65);
       pair_free (p);
     }
   tst_free_mldsa_cert (&cli);

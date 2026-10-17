@@ -84,9 +84,11 @@ static void
 alarm_handler (int sig)
 {
   static const char m[] = "result=fail reason=timeout\n";
+  ssize_t w;
 
   (void) sig;
-  (void) write (1, m, sizeof m - 1);
+  w = write (1, m, sizeof m - 1);
+  (void) w;
   _exit (1);
 }
 
@@ -314,6 +316,15 @@ main (int argc, char **argv)
 {
   struct opts o;
   int ia;
+
+  /* "mldsa": is this wolfSSL built with ML-DSA?  (The interop script asks,
+     and runs the scenarios that need it only if so.)  */
+  if (argc == 2 && !strcmp (argv[1], "mldsa"))
+#if defined HAVE_DILITHIUM || defined WOLFSSL_HAVE_MLDSA
+    return 0;
+#else
+    return 1;
+#endif
 
   memset (&o, 0, sizeof o);
   o.messages = 3;

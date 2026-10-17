@@ -117,10 +117,12 @@ xconnected (void *u, const gq_tls_info *i)
 
   s->connected = 1;
   printf ("connected suite=0x%04x group=0x%04x hrr=%d alpn=%.*s sni=%s "
-          "client_auth_requested=%d client_auth=%d resumed=%d\n",
+          "client_auth_requested=%d client_auth=%d resumed=%d "
+          "sig=0x%04x client_sig=0x%04x\n",
           i->cipher_suite, i->group, i->hello_retry, (int) i->alpn_len,
           (const char *) i->alpn, i->server_name, i->client_auth_requested,
-          i->client_auth_sent, i->resumed);
+          i->client_auth_sent, i->resumed, i->sig_scheme,
+          i->client_sig_scheme);
   fflush (stdout);
   return 0;
 }

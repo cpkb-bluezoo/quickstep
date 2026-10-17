@@ -151,25 +151,90 @@ RUN curl -fsSL -o gnutls.tar.xz \
     && make install \
     && cd .. && rm -rf gnutls.tar.xz gnutls-${GNUTLS_VERSION}
 
+# ---- OpenSSL with ML-DSA, for the interop scenarios of check-mldsa ---------
+# OpenSSL has ML-DSA (keys, certificates and the TLS 1.3 signature schemes)
+# from 3.5; Ubuntu 24.04 has 3.0.  It goes to its own prefix with its own
+# run path, so that nothing else in the image is affected.
+FROM ubuntu:24.04 AS openssl-mldsa
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+         build-essential ca-certificates curl perl \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG OPENSSL_VERSION=3.6.4
+ARG OPENSSL_SHA256=9bffaa1ad1e07b354c21bd3324ec02fa15579f45a7d0494b3e74bc449b7333ef
+RUN curl -fsSL -o openssl.tar.gz \
+         https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz \
+    && echo "${OPENSSL_SHA256}  openssl.tar.gz" | sha256sum -c - \
+    && tar xzf openssl.tar.gz \
+    && cd openssl-${OPENSSL_VERSION} \
+    && ./Configure --prefix=/opt/openssl-mldsa --openssldir=/opt/openssl-mldsa/ssl \
+         --libdir=lib no-docs no-tests -Wl,-rpath,/opt/openssl-mldsa/lib \
+    && make -j"$(nproc)" \
+    && make install_sw install_ssldirs \
+    && cd .. && rm -rf openssl.tar.gz openssl-${OPENSSL_VERSION}
+
+# ---- wolfSSL with ML-DSA and DTLS 1.3, for the DTLS scenarios of check-mldsa -
+# The DTLS 1.3 peer of interop-dtls.sh.  Nothing else in the image uses it.
+# The commit is the one tag v5.9.2-stable points at.
+FROM ubuntu:24.04 AS wolfssl-mldsa
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+         build-essential ca-certificates git autoconf automake libtool \
+         pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG WOLFSSL_COMMIT=ac01707f552c611fbd135cc723b2682b3e7f80f2
+RUN git init -q wolfssl \
+    && cd wolfssl \
+    && git fetch -q --depth 1 https://github.com/wolfSSL/wolfssl.git \
+         ${WOLFSSL_COMMIT} \
+    && git checkout -q FETCH_HEAD \
+    && ./autogen.sh \
+    && ./configure --prefix=/opt/wolfssl-mldsa --enable-all --enable-dilithium \
+         --disable-examples --disable-crypttests \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd .. && rm -rf wolfssl
+
 # ---- Check with ML-DSA: the unit tests against that GnuTLS -----------------
 # "docker build --target check-mldsa".  GQ_EXPECT_MLDSA makes the ML-DSA
 # tests fail instead of skipping when the GnuTLS in use has no backend, so
-# that a build which quietly lost it does not look like a pass.
+# that a build which quietly lost it does not look like a pass.  The ML-DSA
+# interop scenarios (integration/interop.sh) then run against the OpenSSL
+# above, for the same reason with the same variable: all of them, none
+# skipped, the ones under an ML-DSA CA included.  So do the DTLS 1.3
+# scenarios (interop-dtls.sh), against the wolfSSL above.  The scripts are
+# run directly, since a test that exits 77 would count as skipped, and be
+# passed over.
 FROM build AS check-mldsa
 # What that GnuTLS is linked against besides Nettle, for the linker: the
 # development files, which the distribution's GnuTLS does not need here.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
          libgmp-dev libidn2-dev libp11-kit-dev libtasn1-6-dev \
-         libunistring-dev \
+         libunistring-dev netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=gnutls-mldsa /opt/gnutls-mldsa /opt/gnutls-mldsa
+COPY --from=openssl-mldsa /opt/openssl-mldsa /opt/openssl-mldsa
+COPY --from=wolfssl-mldsa /opt/wolfssl-mldsa /opt/wolfssl-mldsa
 ENV GQ_EXPECT_MLDSA=1 \
-    PKG_CONFIG_PATH=/opt/gnutls-mldsa/lib/pkgconfig:/usr/local/lib/pkgconfig \
+    PKG_CONFIG_PATH=/opt/gnutls-mldsa/lib/pkgconfig:/opt/wolfssl-mldsa/lib/pkgconfig:/usr/local/lib/pkgconfig \
     LD_LIBRARY_PATH=/opt/gnutls-mldsa/lib:/usr/local/lib
 RUN make distclean \
-    && ./configure --disable-shared --without-wolfssl \
-    && make -j"$(nproc)" check CFLAGS="-g -O2 -Werror"
+    && ./configure --disable-shared \
+    && make -j"$(nproc)" check CFLAGS="-g -O2 -Werror" \
+    && make -C integration interop-client interop-server interop-dtls \
+         interop-probe wolf-dtls CFLAGS="-g -O2 -Werror" \
+    && cd integration \
+    && OPENSSL=/opt/openssl-mldsa/bin/openssl GQ_INTEROP_FILTER=ML-DSA \
+       INTEROP_CLIENT=./interop-client INTEROP_SERVER=./interop-server \
+       INTEROP_PROBE=./interop-probe sh ./interop.sh \
+    && LD_LIBRARY_PATH=/opt/wolfssl-mldsa/lib:$LD_LIBRARY_PATH \
+       OPENSSL=/opt/openssl-mldsa/bin/openssl GQ_INTEROP_FILTER=ML-DSA \
+       INTEROP_DTLS=./interop-dtls WOLF_DTLS=./wolf-dtls sh ./interop-dtls.sh
 
 # ---- Runtime: the simulator's endpoint base plus quickstep's libraries ----
 FROM martenseemann/quic-network-simulator-endpoint:latest

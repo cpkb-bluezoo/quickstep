@@ -79,6 +79,16 @@ Each skips itself (exit 77) when what it needs is missing.  Set
 GQ_NO_INTEROP=1 to skip the interop scripts, or OPENSSL / GNUTLS_SERV to
 choose the binaries.
 
+The ML-DSA scenarios of interop.sh need an OpenSSL with ML-DSA (3.5 and
+later), and those of interop-dtls.sh a wolfSSL built with it too
+(./configure --enable-dilithium); those under an ML-DSA CA also need the
+GnuTLS of the build to have an ML-DSA backend (interop-probe asks).  What
+cannot run is reported on a SKIP line.  With GQ_EXPECT_MLDSA=1 each such
+line is also a FAIL, so that a scenario that did not run does not look like
+one that passed; the check-mldsa target of the Dockerfile does this, with an
+OpenSSL and a wolfSSL it builds, for the "ML-DSA" job of the CI workflow.
+GQ_INTEROP_FILTER=ML-DSA runs just those scenarios.
+
 ML-DSA is libgcrypt's (src/mldsa.c), so its tests run everywhere
 (test-mldsa, and the ML-DSA parts of test-sign, test-trust, test-tls-server
 and test-conn).  The parts that need a GnuTLS built with leancrypto

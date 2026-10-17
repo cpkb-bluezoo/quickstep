@@ -143,6 +143,13 @@ typedef struct gq_tls_info
   /* Server side: the host name the client asked for, if any.  */
   char server_name[256];
   size_t server_name_len;
+  /* The SignatureScheme (policy.h) of the server's CertificateVerify, and of
+     the client's: what signed the handshake on each side, which a test or a
+     log wants to know when a peer offers several.  0 where there was no such
+     message (a resumed session, a client that sent no certificate, TLS
+     1.2).  */
+  uint16_t sig_scheme;
+  uint16_t client_sig_scheme;
 } gq_tls_info;
 
 /* A session ticket received from the server, with the PSK derived for

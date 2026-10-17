@@ -60,6 +60,7 @@ Makefile
 /integration/interop-server
 /integration/interop-dtls
 /integration/interop-quic
+/integration/interop-probe
 /integration/quic-interop-endpoint
 /integration/qlog-lint
 /integration/wolf-dtls

@@ -410,6 +410,8 @@ send_flight (gq_tls *t, unsigned group, gq_slice kx)
               gq_build_certificate_verify (&w, t->sign_scheme,
                                            (gq_slice) { sig, siglen });
               r = send_at (t, GQ_LEVEL_HANDSHAKE, &w);
+              if (r == GQ_OK)
+                t->info.sig_scheme = t->sign_scheme;
             }
         }
     }
@@ -1045,6 +1047,7 @@ on_client_certificate_verify (gq_tls *t, gq_slice msg, gq_slice body)
   if (gqi_tr_update (t, msg) != GQ_OK)
     return gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_CRYPTO);
   t->client_verified = 1;
+  t->info.client_sig_scheme = scheme;
   t->st = ST_S_WAIT_FIN;
   return GQ_OK;
 }

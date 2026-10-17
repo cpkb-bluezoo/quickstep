@@ -70,6 +70,49 @@ mkcert ()
 } || gen_ok=0
 [ $gen_ok = 1 ] || { echo "cannot generate certificates" >&2; exit 77; }
 
+# ML-DSA, if this wolfSSL is built with it and this OpenSSL, which makes the
+# keys and certificates, has it: for each set N a server certificate (mldsaN)
+# and a client certificate (climlN) under the classical CA.  The signature
+# scheme that signed the handshake is reported by our side (sig=, client_sig=)
+# and checked.  What cannot be tested is said, and with GQ_EXPECT_MLDSA set
+# it is a failure: a scenario that did not run must not look like one that
+# passed, where ML-DSA is meant to be there.
+mldsa_expected ()
+{
+  [ -n "$GQ_EXPECT_MLDSA" ] && [ "$GQ_EXPECT_MLDSA" != 0 ]
+}
+
+mldsa_skip ()
+{
+  echo "SKIP ML-DSA: $1"
+  if mldsa_expected; then
+    echo "FAIL ML-DSA: expected (GQ_EXPECT_MLDSA) but $1"
+    fails=$((fails + 1))
+  fi
+}
+
+mldsa_id ()
+{
+  case $1 in 44) echo 0x0904 ;; 65) echo 0x0905 ;; 87) echo 0x0906 ;; esac
+}
+
+mldsa_sets=
+if "$WOLF" mldsa; then
+  for N in 44 65 87; do
+    if "$OPENSSL" list -signature-algorithms 2>/dev/null | grep -q "ML-DSA-$N"; then
+      if mkcert mldsa$N ML-DSA-$N && mkcert climl$N ML-DSA-$N; then
+        mldsa_sets="$mldsa_sets $N"
+      else
+        mldsa_skip "cannot make ML-DSA-$N certificates"
+      fi
+    else
+      mldsa_skip "this OpenSSL has no ML-DSA-$N"
+    fi
+  done
+else
+  mldsa_skip "this wolfSSL is built without ML-DSA"
+fi
+
 free_port ()
 {
   python3 -c 'import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(("127.0.0.1",0));print(s.getsockname()[1])' 2>/dev/null \
@@ -249,6 +292,22 @@ wolf_client "dtls/our-server: 25% loss during the handshake" \
   "--loss 25 --seed 5 --loss-handshake" "--messages 4" ok "echoed=4"
 wolf_client "dtls/our-server: 30% loss during the handshake, cookie" \
   "--cookie --loss 30 --seed 9 --loss-handshake" "--messages 4" ok "echoed=4"
+
+# ---- ML-DSA, both ways ----
+for N in $mldsa_sets; do
+  id=$(mldsa_id $N)
+  ours_client_srv "dtls/wolf-server: ML-DSA-$N certificate" "$WOLF" \
+    "--cert mldsa$N.pem --key mldsa$N.key" "" ok "sig=$id" "client_sig=0x0000" \
+    "result=ok"
+  ours_client "dtls/wolf-server: ML-DSA-$N client certificate" \
+    "--client-auth ca.pem" "--cert climl$N.pem --key climl$N.key" ok \
+    "client_auth=1" "client_sig=$id"
+  wolf_client "dtls/our-server: ML-DSA-$N certificate" \
+    "--cert mldsa$N.pem --key mldsa$N.key" "" ok "sig=$id" "echoed=3"
+  wolf_client "dtls/our-server: ML-DSA-$N client certificate" \
+    "--client-auth required --ca ca.pem" \
+    "--cert climl$N.pem --key climl$N.key" ok "client_auth=1" "client_sig=$id"
+done
 
 echo "$runs scenarios, $fails failed"
 if [ $runs -eq 0 ]; then exit 77; fi

@@ -1201,6 +1201,7 @@ on_certificate_verify (gq_tls *t, gq_slice msg, gq_slice body)
     return gqi_fail (t, GQ_ALERT_DECRYPT_ERROR, GQ_ERR_CRYPTO);
   if (gqi_tr_update (t, msg) != GQ_OK)
     return gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_CRYPTO);
+  t->info.sig_scheme = scheme;
   t->st = ST_WAIT_FIN;
   return GQ_OK;
 }
@@ -1274,6 +1275,8 @@ send_client_auth (gq_tls *t)
               gq_wbuf_init (&w, heap, cap);
               gq_build_certificate_verify (&w, (uint16_t) scheme, s);
               r = gqi_send_hs (t, &w);
+              if (r == GQ_OK)
+                t->info.client_sig_scheme = (uint16_t) scheme;
             }
         }
     }
