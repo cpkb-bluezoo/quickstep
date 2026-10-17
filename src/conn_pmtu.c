@@ -27,6 +27,12 @@
    the search halves what is left, and it ends when the sizes still in
    question are PMTU_GRANULARITY apart.
 
+   The search is made again when the path changes (the size is the
+   path's own; a path we come back to has the size it had), when packets
+   of the size in use stop getting through (three timeouts in a row take
+   the size back to 1200 and the search runs below the old size), and
+   every PMTU_RAISE_US after it ended below the ceiling.
+
    A probe is a packet like any other for the window and for the round trip
    time, but its loss says nothing about congestion (RFC 9000 section 14.4):
    it is not counted as lost, does not shrink the window, and does not go
@@ -40,6 +46,8 @@
 
 #define PMTU_PROBES 3		/* Lost probes of a size before it is given up.  */
 #define PMTU_GRANULARITY 16
+#define PMTU_BLACK_HOLE_PTOS 3	/* Timeouts in a row that say the size is too big.  */
+#define PMTU_RAISE_US 600000000ull
 
 void
 conn_pmtu_init (gq_conn *c)
@@ -49,7 +57,10 @@ conn_pmtu_init (gq_conn *c)
   c->pmtu_lo = PMTU_BASE;
   c->pmtu_hi = 0;
   c->pmtu_probe_out = 0;
+  c->pmtu_probe_size = 0;
   c->pmtu_fails = 0;
+  c->pmtu_raise_at = 0;
+  c->pmtu_gen++;		/* Probes still out are of the time before.  */
 }
 
 /* The largest size to try: what was configured, within what the peer takes.  */
@@ -90,6 +101,8 @@ plan (gq_conn *c)
       || (c->pmtu_hi <= ceiling && c->pmtu_hi - c->pmtu_lo <= PMTU_GRANULARITY))
     {
       c->pmtu_state = PMTU_DONE;
+      /* A size short of the ceiling is tried again later.  */
+      c->pmtu_raise_at = c->pmtu_cur < ceiling ? c->now + PMTU_RAISE_US : 0;
       return;
     }
   c->pmtu_probe_size = c->pmtu_hi > ceiling ? (uint32_t) ceiling
@@ -125,10 +138,13 @@ conn_pmtu_probe_sent (gq_conn *c)
   c->pmtu_probe_out = 1;
 }
 
-/* The probe of SIZE bytes was acknowledged: that size works.  */
+/* The probe of SIZE bytes, sent in generation GEN of the search, was
+   acknowledged: that size works.  */
 void
-conn_pmtu_acked (gq_conn *c, size_t size)
+conn_pmtu_acked (gq_conn *c, size_t size, uint32_t gen)
 {
+  if (gen != c->pmtu_gen)
+    return;			/* From before the path changed.  */
   c->pmtu_probe_out = 0;
   if (size > c->pmtu_lo)
     c->pmtu_lo = (uint32_t) size;
@@ -140,8 +156,10 @@ conn_pmtu_acked (gq_conn *c, size_t size)
 
 /* The probe was declared lost.  */
 void
-conn_pmtu_lost (gq_conn *c, size_t size)
+conn_pmtu_lost (gq_conn *c, size_t size, uint32_t gen)
 {
+  if (gen != c->pmtu_gen)
+    return;
   c->pmtu_probe_out = 0;
   if (size != c->pmtu_probe_size)
     return;
@@ -156,4 +174,74 @@ int
 conn_pmtu_done (const gq_conn *c)
 {
   return c->pmtu_state == PMTU_DONE;
+}
+
+/* The generation to give a probe being sent.  */
+uint32_t
+conn_pmtu_gen (const gq_conn *c)
+{
+  return c->pmtu_gen;
+}
+
+/* A timeout has fired.  If it is the third in a row and datagrams are
+   larger than 1200 bytes, they are probably the trouble: a path that stops
+   taking the size it did drops everything of it, acknowledgements included.
+   Go back to 1200 and search below the size that failed.  */
+void
+conn_pmtu_on_pto (gq_conn *c)
+{
+  if (c->pto_count < PMTU_BLACK_HOLE_PTOS || c->pmtu_cur <= PMTU_BASE)
+    return;
+  c->pmtu_gen++;
+  c->pmtu_probe_out = 0;
+  c->pmtu_probe_size = 0;
+  c->pmtu_raise_at = 0;
+  c->pmtu_state = PMTU_SEARCH;
+  c->pmtu_lo = PMTU_BASE;
+  c->pmtu_hi = c->pmtu_cur;
+  set_size (c, PMTU_BASE);
+  plan (c);
+}
+
+/* The connection goes from path slot OLD (or -1) to path slot IDX.  The old
+   path keeps the size it had, a path we have been on before has the size it
+   kept, and any other starts from 1200 and searches.  */
+void
+conn_pmtu_switch (gq_conn *c, int old, int idx)
+{
+  size_t want = c->paths[idx].pmtu;
+
+  if (old >= 0 && c->paths[old].used)
+    c->paths[old].pmtu = c->pmtu_state == PMTU_DONE ? c->pmtu_cur : 0;
+  conn_pmtu_init (c);
+  set_size (c, PMTU_BASE);
+  if (want > PMTU_BASE)
+    {
+      /* Known, and not searched for again until the raise timer.  */
+      c->pmtu_state = PMTU_DONE;
+      c->pmtu_lo = (uint32_t) want;
+      set_size (c, want);
+      c->pmtu_raise_at = want < ceiling_of (c) ? c->now + PMTU_RAISE_US : 0;
+    }
+}
+
+/* The raise timer.  */
+uint64_t
+conn_pmtu_deadline (const gq_conn *c)
+{
+  return c->pmtu_state == PMTU_DONE ? c->pmtu_raise_at : 0;
+}
+
+void
+conn_pmtu_on_timeout (gq_conn *c, uint64_t now)
+{
+  if (c->pmtu_state != PMTU_DONE || c->pmtu_raise_at == 0
+      || now < c->pmtu_raise_at)
+    return;
+  c->pmtu_raise_at = 0;
+  c->pmtu_state = PMTU_SEARCH;
+  c->pmtu_lo = c->pmtu_cur;
+  c->pmtu_hi = (uint32_t) (ceiling_of (c) + 1);
+  c->pmtu_probe_size = 0;
+  plan (c);
 }

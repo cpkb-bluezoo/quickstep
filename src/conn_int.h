@@ -84,7 +84,8 @@ typedef struct sent_pkt
   uint32_t size;
   uint8_t ack_eliciting, in_flight, requeued;
   uint8_t early;		/* Sent as a 0-RTT packet.  */
-  uint8_t pmtu_probe;		/* A path MTU probe: its loss is not congestion.  */
+  uint32_t pmtu_probe;		/* Not 0: a path MTU probe of that search, whose
+				   loss is not congestion.  */
   uint32_t ecn_gen;		/* Sent marked ECT(0), in this test: else 0.  */
   uint32_t nframes;
   sent_frame *frames;
@@ -173,6 +174,7 @@ typedef struct pathinfo
   uint8_t need_challenge;
   unsigned chal_sent;
   uint64_t chal_next, chal_deadline;
+  uint32_t pmtu;		/* The datagram size found for it, or 0.  */
   uint8_t resp[2][8];		/* Responses owed to the peer on this path.  */
   unsigned n_resp;
 } pathinfo;
@@ -272,6 +274,8 @@ struct gq_conn
      the first probe), and the probe being sent.  */
   uint8_t pmtu_state, pmtu_probe_out, pmtu_fails;
   uint32_t pmtu_cur, pmtu_lo, pmtu_hi, pmtu_probe_size;
+  uint32_t pmtu_gen;		/* Counts the searches; a probe carries it.  */
+  uint64_t pmtu_raise_at;	/* When a finished search is made again.  */
   uint32_t ecn_gen;		/* Counts the tests; packets sent in one carry
 				   it, and none is 0.  */
   uint64_t ecn_test_sent, ecn_test_ae, ecn_test_acked, ecn_test_lost;
@@ -378,9 +382,14 @@ enum { PMTU_START = 0, PMTU_SEARCH, PMTU_DONE };
 void conn_pmtu_init (gq_conn *c);
 size_t conn_pmtu_next_probe (gq_conn *c, size_t cap);
 void conn_pmtu_probe_sent (gq_conn *c);
-void conn_pmtu_acked (gq_conn *c, size_t size);
-void conn_pmtu_lost (gq_conn *c, size_t size);
+void conn_pmtu_acked (gq_conn *c, size_t size, uint32_t gen);
+void conn_pmtu_lost (gq_conn *c, size_t size, uint32_t gen);
 int conn_pmtu_done (const gq_conn *c);
+uint32_t conn_pmtu_gen (const gq_conn *c);
+void conn_pmtu_on_pto (gq_conn *c);
+void conn_pmtu_switch (gq_conn *c, int old, int idx);
+uint64_t conn_pmtu_deadline (const gq_conn *c);
+void conn_pmtu_on_timeout (gq_conn *c, uint64_t now);
 
 /* ECN (conn_ecn.c).  */
 void conn_ecn_restart (gq_conn *c);

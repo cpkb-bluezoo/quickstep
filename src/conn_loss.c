@@ -458,7 +458,7 @@ process_ack (gq_conn *c, int sp, const gq_frame *f, uint64_t now)
       sent_pkt *p = &x.got[i];
 
       if (p->pmtu_probe)
-        conn_pmtu_acked (c, p->size);
+        conn_pmtu_acked (c, p->size, p->pmtu_probe);
       if (p->in_flight)
         cong_on_ack (&c->cc, p->time_us, p->size, c->send_blocked, now,
                      c->srtt);
@@ -524,7 +524,7 @@ loss_detect (gq_conn *c, int sp, uint64_t now)
                 c->bytes_in_flight -= p->size;
               if (p->ack_eliciting && s->ae_in_flight)
                 s->ae_in_flight--;
-              conn_pmtu_lost (c, p->size);
+              conn_pmtu_lost (c, p->size, p->pmtu_probe);
               ql_packet_lost (c, sp, p,
                               p->pn + K_PACKET_THRESHOLD <= s->largest_acked);
               free_sent_frames (p);
@@ -693,6 +693,7 @@ on_loss_timeout (gq_conn *c, uint64_t now)
   if (sp < 0 || now < when)
     return;
   c->pto_count++;
+  conn_pmtu_on_pto (c);
   s = &c->sp[sp];
   s->probes = 2;
   /* Retransmit what the oldest outstanding packet carried: it is the one

@@ -991,9 +991,11 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
           sp.ack_eliciting = 1;
           sp.in_flight = 1;
           sp.early = (uint8_t) p->early;
-          sp.pmtu_probe = (uint8_t) p->pmtu_probe;
           if (p->pmtu_probe)
-            conn_pmtu_probe_sent (c);
+            {
+              sp.pmtu_probe = conn_pmtu_gen (c);
+              conn_pmtu_probe_sent (c);
+            }
           if (marked)
             sp.ecn_gen = conn_ecn_sent (c, 1, pns[i]);
           if (p->nsf)

@@ -1429,6 +1429,7 @@ gq_conn_timeout (const gq_conn *c)
       EARLIER (c->sp[i].ack_deadline);
   EARLIER (conn_loss_deadline (c));
   EARLIER (conn_path_deadline (c));
+  EARLIER (conn_pmtu_deadline (c));
   EARLIER (c->pace_deadline);
 #undef EARLIER
   return t;
@@ -1481,5 +1482,6 @@ gq_conn_on_timeout (gq_conn *c, uint64_t now_us)
     c->pace_deadline = 0;
   on_loss_timeout (c, now_us);
   conn_path_on_timeout (c, now_us);
+  conn_pmtu_on_timeout (c, now_us);
   ql_after (c);
 }

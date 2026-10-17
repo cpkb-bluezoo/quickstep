@@ -1906,18 +1906,14 @@ pmtu_snoop (struct net *n, int from, const uint8_t *dg, size_t len, int ecn,
 /* A transfer of RESP bytes to the client over a path with MTU, both ends
    with CEILING; the observer is left in OBS.  */
 static struct pair *
-pmtu_transfer (size_t ceiling, size_t mtu, size_t resp, struct pmtu_obs *obs)
+pmtu_run (const gq_conn_config *cfg, size_t mtu, size_t mtu_then,
+          uint64_t change_after_us, size_t resp, struct pmtu_obs *obs)
 {
-  gq_conn_config cfg;
   struct pair *p;
   struct sbuf *s;
   uint64_t id;
 
-  memset (&cfg, 0, sizeof cfg);
-  cfg.initial_max_data = 100u << 20;
-  cfg.initial_max_stream_data = 100u << 20;
-  cfg.max_udp_payload = ceiling;
-  p = pair_new (&cfg, &cfg, 0, 70);
+  p = pair_new (cfg, cfg, 0, 70);
   p->qlog_sink[0].keep = p->qlog_sink[1].keep = 1;
   p->net.latency = 20000;
   p->net.mtu = mtu;
@@ -1927,15 +1923,32 @@ pmtu_transfer (size_t ceiling, size_t mtu, size_t resp, struct pmtu_obs *obs)
   p->net.snoop_user = obs;
   p->srv.respond = resp;
   CHECK (run (&p->net, both_connected, 30000000));
+  if (change_after_us)
+    {
+      p->net.mtu_then = mtu_then;
+      p->net.mtu_change_at = p->net.now + change_after_us;
+    }
   CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
   s = sb_get (&p->cli, id);
   s->out_total = 10;
   s->out_fin = 1;
-  CHECK (wait_for_stream (p, s, resp, 60000000));
+  CHECK (wait_for_stream (p, s, resp, 120000000));
   run (&p->net, NULL, 2000000);
   CHECK_EQ (p->cli.bad + p->srv.bad, 0);
   CHECK_EQ (p->cli.closed + p->srv.closed, 0);
   return p;
+}
+
+static struct pair *
+pmtu_transfer (size_t ceiling, size_t mtu, size_t resp, struct pmtu_obs *obs)
+{
+  gq_conn_config cfg;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.initial_max_data = 100u << 20;
+  cfg.initial_max_stream_data = 100u << 20;
+  cfg.max_udp_payload = ceiling;
+  return pmtu_run (&cfg, mtu, 0, 0, resp, obs);
 }
 
 /* A path that takes 1400 bytes: the search, with a ceiling of 1452, finds a
@@ -2065,6 +2078,141 @@ test_pmtu_default_ceiling (void)
   pair_free (p);
 }
 
+/* The path stops taking what it did (a route change, a tunnel): packets of
+   the size in use vanish, the timeouts that follow take the size back to
+   1200 so the data gets through, and the search starts again below the old
+   size (RFC 8899 section 5.3.3).  */
+static void
+test_pmtu_black_hole (void)
+{
+  struct pmtu_obs obs;
+  gq_conn_config cfg;
+  struct pair *p;
+  gq_conn_stats st;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.initial_max_data = 100u << 20;
+  cfg.initial_max_stream_data = 100u << 20;
+  cfg.max_udp_payload = 1452;
+  p = pmtu_run (&cfg, 0, 1300, 400000, 6000000, &obs);
+  CHECK (p->net.mtu_drops > 0);
+  /* The server sent the data in large packets and noticed; the client sent
+     acknowledgements, which are small and got through, and has had no
+     reason to look.  */
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK (st.max_datagram_size <= 1300);
+  CHECK (st.max_datagram_size >= 1300 - 16);
+  pair_free (p);
+}
+
+/* A search that ended below the ceiling is made again after a long time
+   (RFC 8899's raise timer is 600 seconds), as the path may have changed
+   for the better.  */
+static void
+test_pmtu_raise_timer (void)
+{
+  struct pmtu_obs obs;
+  gq_conn_config cfg;
+  struct pair *p;
+  gq_conn_stats st;
+  int e;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.initial_max_data = 100u << 20;
+  cfg.initial_max_stream_data = 100u << 20;
+  cfg.max_udp_payload = 1452;
+  cfg.idle_timeout_ms = 3600000;
+  p = pmtu_run (&cfg, 1400, 0, 0, 200000, &obs);
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK (st.max_datagram_size <= 1400 && st.pmtu_done);
+  /* The path now takes more, and nothing is sent for a while.  */
+  p->net.mtu = 0;
+  obs.limit = 0;
+  run (&p->net, NULL, 300000000);
+  for (e = 0; e < 2; e++)
+    {
+      gq_conn_get_stats (e ? p->srv.c : p->cli.c, &st);
+      CHECK (st.max_datagram_size <= 1400);
+    }
+  run (&p->net, NULL, 400000000);
+  for (e = 0; e < 2; e++)
+    {
+      gq_conn_get_stats (e ? p->srv.c : p->cli.c, &st);
+      CHECK_EQ (st.max_datagram_size, 1452);
+      CHECK (st.pmtu_done);
+    }
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  pair_free (p);
+}
+
+/* The peer's address changes to one behind a path of 1300 bytes: the size is
+   the new path's to find, not the old one's.  */
+static void
+test_pmtu_new_path_is_smaller (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  struct sbuf *s;
+  gq_conn_stats st;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.max_udp_payload = 1452;
+  p = pair_new_paths (&cfg, &cfg, 72);
+  p->net.m[3].mtu = 1300;
+  settle (p);
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK_EQ (st.max_datagram_size, 1452);
+  s = start_transfer (p, 3000000);
+  run (&p->net, NULL, 100000);
+  p->net.out_map[0] = 3;
+  p->net.m[3].alive_in = 1;
+  p->net.m[0].alive_in = 0;
+  CHECK (run (&p->net, transfer_done, 120000000));
+  CHECK_EQ (s->n, 3000000);
+  run (&p->net, NULL, 5000000);
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  /* The server, which followed the client to the new address, searched
+     afresh.  The client, whose own network did not change and which sends
+     only small packets, has no reason to.  */
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK (st.max_datagram_size <= 1300);
+  CHECK (st.max_datagram_size >= 1300 - 16);
+  pair_free (p);
+}
+
+/* A path that is left and failed to validate is gone back from: the size it
+   had is its own and comes back with it.  */
+static int
+two_moves (struct net *n)
+{
+  return n->app[1]->mig >= 2;
+}
+
+static void
+test_pmtu_size_is_kept_per_path (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  struct sbuf *s;
+  gq_conn_stats st;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.max_udp_payload = 1452;
+  p = pair_new_paths (&cfg, &cfg, 73);
+  settle (p);
+  s = start_transfer (p, 600000);
+  run (&p->net, NULL, 30000);
+  p->net.out_map[0] = 3;			/* The new address cannot be  */
+  p->net.m[3].alive_in = 0;			/* answered, so it fails.  */
+  CHECK (run (&p->net, two_moves, 60000000));
+  /* Back on the first, with what it had, before anything was sent on it.  */
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK_EQ (st.max_datagram_size, 1452);
+  CHECK (run (&p->net, transfer_done, 60000000));
+  CHECK_EQ (s->n, 600000);
+  pair_free (p);
+}
+
 int
 main (void)
 {
@@ -2110,6 +2258,10 @@ main (void)
   test_pmtu_probe_loss_is_not_congestion ();
   test_pmtu_controller_follows ();
   test_pmtu_default_ceiling ();
+  test_pmtu_black_hole ();
+  test_pmtu_raise_timer ();
+  test_pmtu_new_path_is_smaller ();
+  test_pmtu_size_is_kept_per_path ();
   TST_DONE ();
 }
 

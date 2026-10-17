@@ -506,14 +506,6 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len,
     n->tap (n, from, n->paths ? to : NULL, n->tap_user);
   if (n->snoop)
     n->snoop (n, from, d, len, ecn, n->snoop_user);
-  if (n->mtu_change_at && n->now >= n->mtu_change_at)
-    lim = n->mtu_then;
-  if (lim && len > lim)
-    {
-      n->dropped++;
-      n->mtu_drops++;
-      return;
-    }
   if (n->mark[from])
     ecn = n->mark[from];
   if (n->bleach[from])
@@ -582,6 +574,14 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len,
         }
     }
 
+  if (n->mtu_change_at && n->now >= n->mtu_change_at)
+    lim = n->mtu_then;
+  if (lim && len > lim)
+    {
+      n->dropped++;
+      n->mtu_drops++;
+      return;
+    }
   if (index == n->drop_index || lossy (n))
     {
       n->dropped++;

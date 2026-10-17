@@ -229,6 +229,7 @@ switch_to (gq_conn *c, int idx)
     }
   c->prev_path = old >= 0 && validated_eff (c, old) ? old : -1;
   c->cur_path = idx;
+  conn_pmtu_switch (c, old, idx);
   if (n->dcid.len)
     {
       c->dcid = n->dcid;
@@ -312,6 +313,7 @@ failed (gq_conn *c, int idx)
 
           c->prev_path = -1;
           c->cur_path = back;
+          conn_pmtu_switch (c, idx, back);
           c->dcid = c->paths[back].dcid;
           c->dcid_seq = c->paths[back].dcid_seq;
           free_entry (c, idx);
