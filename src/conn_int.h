@@ -294,6 +294,9 @@ struct gq_conn
   gq_preferred_address offer;	/* Server: what it told the client, with the
 				   connection ID (sequence 1) and token.  */
   uint8_t have_offer;
+  gq_preferred_address peer_pref;	/* Client: what the server offered,  */
+  uint8_t pref_offered, pref_pending;	/* that it can still be taken up, and
+				   that the application is yet to be told.  */
   held_pkt *held;		/* Packets held for want of keys,  */
   unsigned n_held, cap_held;	/* in arrival order.  */
   uint8_t replaying;

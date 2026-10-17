@@ -61,8 +61,10 @@
    Path validation and migration (RFC 9000 sections 8.2 and 9) work on
    opaque addresses the caller supplies (gq_conn_recv_path,
    gq_conn_send_path): a peer that moves is followed and validated, and a
-   client can migrate or probe paths itself.  The server's
-   preferred_address is not used.
+   client can migrate or probe paths itself.  A server can offer a
+   preferred address (gq_conn_config.preferred_address), which a client is
+   told of (the preferred_address event) and takes up with
+   gq_conn_migrate_preferred.
 
    Unreliable DATAGRAM frames (RFC 9221) are supported when enabled.
 
@@ -71,7 +73,7 @@
 
    0-RTT (RFC 9001 section 4.6) is supported for QUIC v1 and v2 sessions.
 
-   The server's preferred_address is not used, and there is no multipath.  */
+   There is no multipath.  */
 
 #ifndef QUICKSTEP_CONN_H
 #define QUICKSTEP_CONN_H
@@ -191,6 +193,14 @@ typedef struct gq_conn_events
   void (*path_validated) (void *user, const gq_path *path);
   void (*path_failed) (void *user, const gq_path *path);
   void (*migrated) (void *user, const gq_path *path);
+  /* Client: the server offers an address to move to (RFC 9000 section
+     9.6), told once, when the handshake is confirmed.  PA has the server's
+     addresses; the library cannot turn them into the application's own
+     kind of address.  To take it up, build the gq_path (the server's
+     address of a family the local socket can reach, and the local address
+     to send from) and call gq_conn_migrate_preferred; to decline, do
+     nothing.  */
+  void (*preferred_address) (void *user, const gq_preferred_address *pa);
   /* Client: the server accepted (1) or rejected (0) the early data.  On
      rejection everything sent early is sent again in 1-RTT packets by
      the library; an application whose early data depended on the server's
@@ -483,6 +493,18 @@ int gq_conn_probe_path (gq_conn *c, uint64_t now_us, const gq_path *path);
    server forbids active migration (disable_active_migration) or this is a
    server; other errors as gq_conn_probe_path.  */
 int gq_conn_migrate (gq_conn *c, uint64_t now_us, const gq_path *path);
+
+/* Client: migrate to the preferred address the server offered (see the
+   preferred_address event), PATH being that address as the application
+   writes it.  As gq_conn_migrate: the path is validated, then used, and
+   the old connection ID retired; the packets to it carry the connection ID
+   the server offered with the address.  Unlike gq_conn_migrate it is
+   allowed when the server set disable_active_migration (RFC 9000 section
+   18.2).  GQ_ERR_UNAVAILABLE if this is a server or the server offered
+   nothing usable (or it was used already); other errors as
+   gq_conn_migrate.  */
+int gq_conn_migrate_preferred (gq_conn *c, uint64_t now_us,
+                               const gq_path *path);
 
 /* Produce the next datagram into OUT (capacity CAP, which must be at
    least 1200 bytes and the size of the datagrams in use now, which

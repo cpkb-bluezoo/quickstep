@@ -422,6 +422,14 @@ conn_maybe_confirm (gq_conn *c)
   c->handshake_confirmed = 1;
   ql_state (c, "handshake_confirmed", 1);
   conn_discard_space (c, SP_HANDSHAKE);
+  /* The server's preferred address can be taken up now (RFC 9000 section
+     9.6.2).  */
+  if (c->pref_pending)
+    {
+      c->pref_pending = 0;
+      if (c->ev.preferred_address)
+        c->ev.preferred_address (c->ev.user, &c->peer_pref);
+    }
 }
 
 void
@@ -617,6 +625,8 @@ store_preferred_address (gq_conn *c)
   memcpy (slot->token, pa.reset_token, GQ_RESET_TOKEN_LEN);
   slot->has_token = 1;
   conn_peer_token (c, slot->token);
+  c->peer_pref = pa;
+  c->pref_offered = c->pref_pending = 1;
 }
 
 int

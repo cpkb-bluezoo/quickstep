@@ -113,9 +113,10 @@ conn_path_init (gq_conn *c, const gq_path *initial)
   c->prev_path = -1;
 }
 
-/* A peer connection ID not in use on any path (or NULL).  */
+/* A peer connection ID not in use on any path (or NULL); if WANT is not
+   negative, the one of that sequence number or none.  */
 static pcid *
-fresh_cid (gq_conn *c)
+fresh_cid (gq_conn *c, int64_t want)
 {
   int i, k;
 
@@ -124,6 +125,8 @@ fresh_cid (gq_conn *c)
       int used = 0;
 
       if (!c->p[i].used || c->p[i].retire || c->p[i].seq == c->dcid_seq)
+        continue;
+      if (want >= 0 && c->p[i].seq != (uint64_t) want)
         continue;
       for (k = 0; k < MAX_PATHS; k++)
         if (c->paths[k].used && c->paths[k].dcid_seq == c->p[i].seq
@@ -136,7 +139,8 @@ fresh_cid (gq_conn *c)
 }
 
 static int
-path_add (gq_conn *c, const gq_path *p, int local_init, int need_fresh)
+path_add (gq_conn *c, const gq_path *p, int local_init, int need_fresh,
+          int64_t want)
 {
   int i, slot = -1;
   pathinfo *e;
@@ -152,8 +156,8 @@ path_add (gq_conn *c, const gq_path *p, int local_init, int need_fresh)
       }
   if (slot < 0)
     return -1;
-  f = fresh_cid (c);
-  if (f == NULL && need_fresh)
+  f = fresh_cid (c, want);
+  if (f == NULL && (need_fresh || want >= 0))
     return -2;
   e = &c->paths[slot];
   memset (e, 0, sizeof *e);
@@ -420,7 +424,7 @@ conn_path_cids_retired (gq_conn *c)
           live = 1;
       if (live)
         continue;
-      f = fresh_cid (c);
+      f = fresh_cid (c, -1);
       if (f)
         {
           e->dcid = f->cid;
@@ -448,7 +452,7 @@ conn_path_after_packet (gq_conn *c, uint64_t now, int nonprobing, int highest)
     return;
   if (idx < 0)
     {
-      idx = path_add (c, &c->rx, 0, 0);
+      idx = path_add (c, &c->rx, 0, 0, -1);
       if (idx < 0)
         return;
     }
@@ -473,7 +477,7 @@ conn_path_on_challenge (gq_conn *c, const uint8_t *data)
 
   if (idx < 0)
     {
-      idx = path_add (c, &c->rx, 0, 0);
+      idx = path_add (c, &c->rx, 0, 0, -1);
       if (idx < 0)
         return;
       /* A path we have not seen: check it too.  */
@@ -635,8 +639,10 @@ gq_conn_get_path (const gq_conn *c, gq_path *path)
   return GQ_OK;
 }
 
-int
-gq_conn_probe_path (gq_conn *c, uint64_t now_us, const gq_path *path)
+/* As gq_conn_probe_path; if WANT is not negative, with the peer connection
+   ID of that sequence number.  */
+static int
+probe_path (gq_conn *c, uint64_t now_us, const gq_path *path, int64_t want)
 {
   int idx;
 
@@ -649,7 +655,7 @@ gq_conn_probe_path (gq_conn *c, uint64_t now_us, const gq_path *path)
     return GQ_ERR_INVAL;
   if (idx >= 0)
     return GQ_OK;		/* Already known: being validated, or done.  */
-  idx = path_add (c, path, 1, 1);
+  idx = path_add (c, path, 1, 1, want);
   if (idx < 0)
     return GQ_ERR_RANGE;
   start_validation (c, &c->paths[idx], now_us);
@@ -658,15 +664,19 @@ gq_conn_probe_path (gq_conn *c, uint64_t now_us, const gq_path *path)
 }
 
 int
-gq_conn_migrate (gq_conn *c, uint64_t now_us, const gq_path *path)
+gq_conn_probe_path (gq_conn *c, uint64_t now_us, const gq_path *path)
+{
+  return probe_path (c, now_us, path, -1);
+}
+
+/* Validate PATH and move to it, with the connection ID of sequence number
+   WANT if that is not negative.  */
+static int
+migrate (gq_conn *c, uint64_t now_us, const gq_path *path, int64_t want)
 {
   int idx, r;
 
-  if (c->role != GQ_ROLE_CLIENT
-      || (c->have_peer_tp
-          && gq_tp_has (&c->peer_tp, GQ_TP_DISABLE_ACTIVE_MIGRATION)))
-    return GQ_ERR_UNAVAILABLE;
-  r = gq_conn_probe_path (c, now_us, path);
+  r = probe_path (c, now_us, path, want);
   if (r != GQ_OK)
     return r;
   idx = find (c, path);
@@ -681,4 +691,25 @@ gq_conn_migrate (gq_conn *c, uint64_t now_us, const gq_path *path)
     c->paths[idx].auto_switch = 1;
   conn_wake (c);
   return GQ_OK;
+}
+
+int
+gq_conn_migrate (gq_conn *c, uint64_t now_us, const gq_path *path)
+{
+  if (c->role != GQ_ROLE_CLIENT
+      || (c->have_peer_tp
+          && gq_tp_has (&c->peer_tp, GQ_TP_DISABLE_ACTIVE_MIGRATION)))
+    return GQ_ERR_UNAVAILABLE;
+  return migrate (c, now_us, path, -1);
+}
+
+/* The server's preferred address is the one move that a server which
+   forbids active migration allows (RFC 9000 section 18.2); its connection ID
+   goes with it.  */
+int
+gq_conn_migrate_preferred (gq_conn *c, uint64_t now_us, const gq_path *path)
+{
+  if (c->role != GQ_ROLE_CLIENT || !c->pref_offered)
+    return GQ_ERR_UNAVAILABLE;
+  return migrate (c, now_us, path, 1);
 }

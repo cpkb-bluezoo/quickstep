@@ -2825,6 +2825,179 @@ test_preferred_address_not_offered (void)
     }
 }
 
+/* As settle, for a connection that is allowed to move.  */
+static void
+settle_moving (struct pair *p)
+{
+  CHECK (run (&p->net, both_connected, 30000000));
+  run (&p->net, NULL, 1000000);
+}
+
+/* The preferred address taken up: the client moves to the server's second
+   address with the connection ID that came with it, the path is validated
+   from both ends, the old ID is retired, and the rest of the connection
+   goes by the new address only.  */
+static void
+test_preferred_address_migration (void)
+{
+  struct pref_hook h;
+  gq_conn_config sc;
+  gq_conn_config cc;
+  struct pair *p;
+  struct sbuf *s;
+  gq_path cur;
+  gq_conn_stats st;
+  uint64_t before;
+
+  memset (&h, 0, sizeof h);
+  h.answer = 1;
+  memset (&sc, 0, sizeof sc);
+  memset (&cc, 0, sizeof cc);
+  sc.preferred_address = pref_cb;
+  sc.preferred_address_user = &h;
+  p = pair_new_paths (&cc, &sc, 100);
+  p->cli.pref_take = 1;
+  p->qlog_sink[0].keep = p->qlog_sink[1].keep = 1;
+  settle_moving (p);
+  CHECK_EQ (p->cli.pref_events, 1);
+  CHECK_EQ (p->cli.pref_take, 0);		/* Taken up.  */
+  CHECK_EQ (p->cli.pref.ipv4_port, 4433);
+  CHECK_EQ (gq_conn_get_path (p->cli.c, &cur), GQ_OK);
+  CHECK (addr_same (&cur.remote, &p->net.S2));
+  CHECK_EQ (p->cli.pv, 1);
+  CHECK_EQ (p->cli.mig, 1);
+  CHECK_EQ (p->cli.c->dcid_seq, 1);		/* The offered ID.  */
+  CHECK (p->net.s2_to > 0 && p->net.s2_from > 0);
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK_EQ (st.migrations, 1);
+  CHECK (p->srv.retired >= 1);
+  /* A transfer goes by the second address and not the first.  */
+  before = p->net.s1_to;
+  s = start_transfer (p, 400000);
+  CHECK (run (&p->net, transfer_done, 60000000));
+  CHECK_EQ (s->n, 400000);
+  CHECK_EQ (p->net.s1_to, before);
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  CHECK_EQ (p->cli.bad + p->srv.bad, 0);
+  CHECK (qsink_count (&p->qlog_sink[0], "quic:migration_state_updated") >= 3);
+  /* Once; and no second go at it.  */
+  CHECK_EQ (gq_conn_migrate_preferred (p->cli.c, p->net.now, &cur),
+            GQ_ERR_INVAL);
+  pair_free (p);
+}
+
+/* The new address does not answer: validation fails, the client stays where
+   it was and the transfer is not troubled.  */
+static void
+test_preferred_address_unreachable (void)
+{
+  struct pref_hook h;
+  gq_conn_config sc;
+  gq_conn_config cc;
+  struct pair *p;
+  struct sbuf *s;
+  gq_path cur;
+
+  memset (&h, 0, sizeof h);
+  h.answer = 1;
+  memset (&sc, 0, sizeof sc);
+  memset (&cc, 0, sizeof cc);
+  sc.preferred_address = pref_cb;
+  sc.preferred_address_user = &h;
+  p = pair_new_paths (&cc, &sc, 101);
+  p->net.s2_dead = 1;
+  p->cli.pref_take = 1;
+  settle (p);
+  run (&p->net, NULL, 5000000);
+  CHECK_EQ (p->cli.pref_events, 1);
+  CHECK (p->cli.pf >= 1);
+  CHECK_EQ (gq_conn_get_path (p->cli.c, &cur), GQ_OK);
+  CHECK (addr_same (&cur.remote, &p->net.S));
+  s = start_transfer (p, 300000);
+  CHECK (run (&p->net, transfer_done, 60000000));
+  CHECK_EQ (s->n, 300000);
+  CHECK_EQ (p->net.s2_from, 0);
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  pair_free (p);
+}
+
+/* A server that forbids migration in general still lets a client move to the
+   address it offered (RFC 9000 section 18.2), and to no other.  */
+static void
+test_preferred_address_with_disable_active_migration (void)
+{
+  struct pref_hook h;
+  gq_conn_config sc;
+  gq_conn_config cc;
+  struct pair *p;
+  gq_path np, cur;
+
+  memset (&h, 0, sizeof h);
+  h.answer = 1;
+  memset (&sc, 0, sizeof sc);
+  memset (&cc, 0, sizeof cc);
+  sc.preferred_address = pref_cb;
+  sc.preferred_address_user = &h;
+  sc.disable_active_migration = 1;
+  p = pair_new_paths (&cc, &sc, 102);
+  p->cli.pref_take = 1;
+  settle_moving (p);
+  CHECK_EQ (gq_conn_get_path (p->cli.c, &cur), GQ_OK);
+  CHECK (addr_same (&cur.remote, &p->net.S2));
+  np.local = p->net.L[1];
+  np.remote = p->net.S2;
+  CHECK_EQ (gq_conn_migrate (p->cli.c, p->net.now, &np), GQ_ERR_UNAVAILABLE);
+  pair_free (p);
+}
+
+/* The client that does not take it up stays where it is, can still do so
+   later, and a call without an offer is refused.  */
+static void
+test_preferred_address_declined_then_taken (void)
+{
+  struct pref_hook h;
+  gq_conn_config sc;
+  gq_conn_config cc;
+  struct pair *p;
+  gq_path np, cur;
+
+  memset (&h, 0, sizeof h);
+  h.answer = 1;
+  memset (&sc, 0, sizeof sc);
+  memset (&cc, 0, sizeof cc);
+  sc.preferred_address = pref_cb;
+  sc.preferred_address_user = &h;
+  p = pair_new_paths (&cc, &sc, 103);
+  settle (p);
+  CHECK_EQ (p->cli.pref_events, 1);
+  CHECK_EQ (gq_conn_get_path (p->cli.c, &cur), GQ_OK);
+  CHECK (addr_same (&cur.remote, &p->net.S));
+  /* A server cannot.  */
+  np.local = p->net.S2;
+  np.remote = p->net.L[0];
+  CHECK_EQ (gq_conn_migrate_preferred (p->srv.c, p->net.now, &np),
+            GQ_ERR_UNAVAILABLE);
+  /* Later, the client does.  */
+  np.local = p->net.L[0];
+  np.remote = p->net.S2;
+  CHECK_EQ (gq_conn_migrate_preferred (p->cli.c, p->net.now, &np), GQ_OK);
+  run (&p->net, NULL, 1000000);
+  CHECK_EQ (gq_conn_get_path (p->cli.c, &cur), GQ_OK);
+  CHECK (addr_same (&cur.remote, &p->net.S2));
+  pair_free (p);
+
+  /* No offer, nothing to move to.  */
+  memset (&sc, 0, sizeof sc);
+  p = pair_new_paths (&cc, &sc, 104);
+  settle (p);
+  CHECK_EQ (p->cli.pref_events, 0);
+  np.local = p->net.L[0];
+  np.remote = p->net.S2;
+  CHECK_EQ (gq_conn_migrate_preferred (p->cli.c, p->net.now, &np),
+            GQ_ERR_UNAVAILABLE);
+  pair_free (p);
+}
+
 int
 main (void)
 {
@@ -2883,6 +3056,10 @@ main (void)
   test_preferred_address_offered ();
   test_preferred_address_not_offered ();
   test_preferred_address_large_params ();
+  test_preferred_address_migration ();
+  test_preferred_address_unreachable ();
+  test_preferred_address_with_disable_active_migration ();
+  test_preferred_address_declined_then_taken ();
   TST_DONE ();
 }
 

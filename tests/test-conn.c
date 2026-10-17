@@ -82,6 +82,8 @@ struct app
   int have_sess;
   uint32_t sess_version;
   int pv, pf, mig;		/* Path events.  */
+  int pref_events, pref_take;	/* Preferred address offers; take up.  */
+  gq_preferred_address pref;
   int early_bytes, early_result, early_dg;
   uint8_t params[512];
   size_t params_len;
@@ -122,7 +124,9 @@ struct net
      delivered only if it is addressed to an external address that is alive
      for incoming traffic.  */
   int paths;
-  gq_addr S, L[3];
+  gq_addr S, S2, L[3];	/* Server, and its preferred address.  */
+  int s2_dead;			/* Nothing reaches the server by S2.  */
+  uint64_t s2_to, s2_from, s1_to;	/* Bytes by S2 each way, and to S.  */
   struct
   {
     gq_addr ext;
@@ -330,6 +334,24 @@ ev_migrated (void *u, const gq_path *p)
 }
 
 static void
+ev_preferred (void *u, const gq_preferred_address *pa)
+{
+  struct app *a = u;
+
+  a->pref_events++;
+  a->pref = *pa;
+  if (a->pref_take && a->net->S2.len)
+    {
+      gq_path np;
+
+      np.local = a->net->L[0];
+      np.remote = a->net->S2;
+      a->pref_take = gq_conn_migrate_preferred (a->c, a->net->now, &np) == GQ_OK
+                     ? 0 : -1;
+    }
+}
+
+static void
 ev_datagram (void *u, const uint8_t *d, size_t n)
 {
   struct app *a = u;
@@ -534,6 +556,18 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len,
           if (n->m[j].mtu && (lim == 0 || n->m[j].mtu < lim))
             lim = n->m[j].mtu;
           src.local = n->S;
+          if (n->S2.len && addr_same (&n->S2, &to->remote))
+            {
+              if (n->s2_dead)
+                {
+                  n->dropped++;
+                  return;
+                }
+              src.local = n->S2;
+              n->s2_to += len;
+            }
+          else
+            n->s1_to += len;
           src.remote = n->m[j].ext;
           n->m[j].from_bytes += len;
           has_from = 1;
@@ -570,6 +604,16 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len,
             }
           src.local = n->L[n->m[j].local];
           src.remote = n->S;
+          if (n->S2.len && addr_same (&n->S2, &to->local))
+            {
+              if (n->s2_dead)
+                {
+                  n->dropped++;
+                  return;
+                }
+              src.remote = n->S2;
+              n->s2_from += len;
+            }
           has_from = 1;
         }
     }
@@ -941,6 +985,7 @@ fill_events (gq_conn_events *e, struct app *a)
   e->path_validated = ev_path_validated;
   e->path_failed = ev_path_failed;
   e->migrated = ev_migrated;
+  e->preferred_address = ev_preferred;
 }
 
 /* Groups the client offers (NULL: the policy's).  */
@@ -2414,6 +2459,7 @@ pair_new_paths (gq_conn_config *ccfg, const gq_conn_config *scfg, uint32_t seed)
       p->net.m[i].alive_in = 1;
       p->net.out_map[i] = i;
     }
+  p->net.S2 = mkaddr ("SRV2:443");
   p->net.m[3].ext = mkaddr ("EXT-0b");	/* Local 0 after a NAT rebinding.  */
   p->net.m[3].local = 0;
   return p;
