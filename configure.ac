@@ -68,9 +68,12 @@ AM_GNU_GETTEXT_VERSION([0.21])
 PKG_PROG_PKG_CONFIG
 
 dnl Crypto floor.  All primitives come from libgcrypt; we never
-dnl implement a cipher, hash, KEM or signature scheme ourselves.
-PKG_CHECK_MODULES([LIBGCRYPT], [libgcrypt >= 1.11.0],
-  [], [AC_MSG_ERROR([libgcrypt >= 1.11.0 is required])])
+dnl implement a cipher, hash, KEM or signature scheme ourselves.  1.12.0 is
+dnl the first release whose ML-KEM is the final FIPS 203 (1.11 has the
+dnl initial public draft, which RFC 10024's hybrid groups do not interoperate
+dnl with), and it adds ML-DSA.
+PKG_CHECK_MODULES([LIBGCRYPT], [libgcrypt >= 1.12.0],
+  [], [AC_MSG_ERROR([libgcrypt >= 1.12.0 is required])])
 
 dnl Certificate loading and path validation.  GnuTLS is the first
 dnl backend behind the gq_trust interface (src/trust.h); the interface

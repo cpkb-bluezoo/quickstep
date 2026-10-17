@@ -142,7 +142,7 @@ because TLS needs extract and expand separately), HKDF-Expand-Label
 Each is checked against the vectors in its RFC (@file{tests/test-crypto.c}).
 No primitive is implemented in this tree.
 
-Findings from probing the installed libgcrypt 1.12.4:
+Findings from probing libgcrypt 1.12.4:
 
 @itemize @bullet
 @item
@@ -153,13 +153,14 @@ built from libgcrypt alone: classical ECDH plus ML-KEM, combined as the
 RFC specifies.
 
 @item
-ML-DSA has a reserved algorithm ID (@code{GCRY_PK_MLDSA}) but no
-implementation, and GnuTLS 3.8.13 declares ML-DSA-44, 65 and 87 but the
-installed build has no backend for them.  Neither library gives
-post-quantum signatures on the development machine.  The policy lists
-the ML-DSA schemes, the signature module reports
-@code{GQ_ERR_UNAVAILABLE} for them, and they become available when a
-backend provides them.  Post-quantum key exchange is unaffected.
+libgcrypt 1.12 added an ML-DSA (Dilithium) implementation
+(@code{GCRY_PK_MLDSA}), which this library does not use: keys and
+certificate chains come through GnuTLS, and 3.8.13 declares ML-DSA-44, 65
+and 87 but its build that was probed has no backend for them.  So there
+are no post-quantum signatures yet.  The policy lists the ML-DSA schemes,
+the signature module reports @code{GQ_ERR_UNAVAILABLE} for them, and they
+become available when a backend provides them.  Post-quantum key exchange
+is unaffected.
 
 @item
 ECDH for X25519, secp256r1 and secp384r1 is done through libgcrypt's KEM

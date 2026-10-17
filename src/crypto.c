@@ -29,7 +29,7 @@
 
 #include "gettext.h"
 
-#define GQ_MIN_GCRYPT "1.11.0"
+#define GQ_MIN_GCRYPT "1.12.0"
 
 void
 gq_wipe (void *secret, size_t len)

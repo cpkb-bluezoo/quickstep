@@ -104,7 +104,7 @@ preferred_address, and the HTTP/3 and DoQ examples.  See the manual
 Building
 --------
 
-Requires libgcrypt >= 1.11 and, by default, GnuTLS >= 3.8.
+Requires libgcrypt >= 1.12 and, by default, GnuTLS >= 3.8.
 
   ./autogen.sh        # only when building from a repository checkout
   ./configure

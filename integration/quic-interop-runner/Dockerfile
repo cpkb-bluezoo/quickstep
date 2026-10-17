@@ -22,7 +22,7 @@ RUN apt-get update \
          texinfo \
     && rm -rf /var/lib/apt/lists/*
 
-# quickstep needs libgcrypt 1.11 or newer (ML-KEM), and that needs a newer
+# quickstep needs libgcrypt 1.12 or newer (the final ML-KEM), and that needs a newer
 # libgpg-error than Ubuntu 24.04 has: both are built here.
 ARG GPGERROR_VERSION=1.61
 ARG GPGERROR_SHA256=7a85413f2bc354f4f8aa832b718af122e48965e9e0eb9012ee659c13c6385c93
