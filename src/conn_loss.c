@@ -44,10 +44,12 @@ free_sent_frames (sent_pkt *p)
 void
 cc_init (gq_conn *c)
 {
+  uint32_t size = c->pmtu_cur ? c->pmtu_cur : CC_MAX_DATAGRAM;
+
   cong_init (&c->cc, c->cfg.congestion_control == GQ_CC_NEWRENO
-                     ? GQ_CC_NEWRENO : GQ_CC_CUBIC, CC_MAX_DATAGRAM);
+                     ? GQ_CC_NEWRENO : GQ_CC_CUBIC, size);
   /* RFC 9002 section 7.7: bursts are limited to the initial window.  */
-  pacer_init (&c->pace, c->cc.cwnd, (uint32_t) c->cfg.max_udp_payload);
+  pacer_init (&c->pace, c->cc.cwnd, size);
   c->send_blocked = 1;
   c->pace_deadline = c->pace_wait_us = 0;
   /* A new path starts the reports over.  */
@@ -455,6 +457,8 @@ process_ack (gq_conn *c, int sp, const gq_frame *f, uint64_t now)
     {
       sent_pkt *p = &x.got[i];
 
+      if (p->pmtu_probe)
+        conn_pmtu_acked (c, p->size);
       if (p->in_flight)
         cong_on_ack (&c->cc, p->time_us, p->size, c->send_blocked, now,
                      c->srtt);
@@ -512,6 +516,20 @@ loss_detect (gq_conn *c, int sp, uint64_t now)
       if (p->pn + K_PACKET_THRESHOLD <= s->largest_acked
           || (now > delay && p->time_us <= lost_before))
         {
+          if (p->pmtu_probe)
+            {
+              /* The path does not take that size, which says nothing of
+                 congestion (RFC 9000 section 14.4).  */
+              if (p->in_flight)
+                c->bytes_in_flight -= p->size;
+              if (p->ack_eliciting && s->ae_in_flight)
+                s->ae_in_flight--;
+              conn_pmtu_lost (c, p->size);
+              ql_packet_lost (c, sp, p,
+                              p->pn + K_PACKET_THRESHOLD <= s->largest_acked);
+              free_sent_frames (p);
+              continue;
+            }
           if (p->in_flight)
             {
               c->bytes_in_flight -= p->size;

@@ -128,6 +128,7 @@ struct net
     gq_addr ext;
     int local, alive_in;
     uint64_t to_bytes, from_bytes;	/* Seen at the server side.  */
+    size_t mtu;			/* This path's own limit (0: none).  */
   } m[6];
   int out_map[3];
   /* Called for every datagram a connection sends, with the path it is for
@@ -145,6 +146,11 @@ struct net
      CE (a bottleneck that signals congestion).  NO_ECN: the apps use the
      calls that know nothing of ECN.  */
   int mark[2], bleach[2], drop_ect[2], no_ecn;
+  /* The path MTU: datagrams longer than MTU are dropped (0: no limit), and
+     from MTU_CHANGE_AT (0: never) on, longer than MTU_THEN.  */
+  size_t mtu, mtu_then;
+  uint64_t mtu_change_at;
+  unsigned mtu_drops;
   unsigned ce_every[2], ce_count[2];
   int hold;			/* Stash datagrams to EXT-0 instead of sending.  */
   struct pkt *held[8];
@@ -493,12 +499,21 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len,
   int index = n->total++;
   gq_path src;
   int has_from = 0;
+  size_t lim = n->mtu;
 
   memset (&src, 0, sizeof src);
   if (n->tap)
     n->tap (n, from, n->paths ? to : NULL, n->tap_user);
   if (n->snoop)
     n->snoop (n, from, d, len, ecn, n->snoop_user);
+  if (n->mtu_change_at && n->now >= n->mtu_change_at)
+    lim = n->mtu_then;
+  if (lim && len > lim)
+    {
+      n->dropped++;
+      n->mtu_drops++;
+      return;
+    }
   if (n->mark[from])
     ecn = n->mark[from];
   if (n->bleach[from])
@@ -524,6 +539,8 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len,
           if (i == 3)
             i = 0;
           j = n->out_map[i];
+          if (n->m[j].mtu && (lim == 0 || n->m[j].mtu < lim))
+            lim = n->m[j].mtu;
           src.local = n->S;
           src.remote = n->m[j].ext;
           n->m[j].from_bytes += len;
@@ -539,6 +556,8 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len,
               n->dropped++;
               return;
             }
+          if (n->m[j].mtu && (lim == 0 || n->m[j].mtu < lim))
+            lim = n->m[j].mtu;
           n->m[j].to_bytes += len;
           if (n->hold && j == 0 && n->n_held < 8 && n->m[0].alive_in)
             {
@@ -628,7 +647,7 @@ flush (struct net *n)
                                         &to, &ecn), GQ_OK);
           if (len == 0)
             break;
-          CHECK (len <= 1200);
+          CHECK (len <= sizeof buf);
           enqueue (n, s, buf, len, n->paths ? &to : NULL, ecn);
         }
     }
@@ -928,6 +947,11 @@ fill_events (gq_conn_events *e, struct app *a)
 static const uint16_t *g_cgroups;
 static size_t g_n_cgroups;
 
+/* The ceiling on datagram size the connections get when the test does not
+   say: 1200, so that the tests that do not concern path MTU discovery see
+   the datagram size they always did.  Those that do, set it.  */
+static size_t g_ceiling = 1200;
+
 static struct pair *
 pair_new (const gq_conn_config *ccfg, const gq_conn_config *scfg,
           unsigned loss_pct, uint32_t seed)
@@ -971,6 +995,8 @@ pair_new (const gq_conn_config *ccfg, const gq_conn_config *scfg,
 
     cc.resume_params = g_resume_params;
     cc.resume_params_len = g_resume_params_len;
+    if (cc.max_udp_payload == 0)
+      cc.max_udp_payload = g_ceiling;
     if (cc.qlog == NULL)
       {
         cc.qlog = qsink_cb;
@@ -983,6 +1009,8 @@ pair_new (const gq_conn_config *ccfg, const gq_conn_config *scfg,
   {
     gq_conn_config sc = scfg ? *scfg : (gq_conn_config) { 0 };
 
+    if (sc.max_udp_payload == 0)
+      sc.max_udp_payload = g_ceiling;
     if (sc.qlog == NULL)
       {
         sc.qlog = qsink_cb;
@@ -1053,6 +1081,10 @@ pair_new_admit (const gq_conn_config *ccfg, unsigned loss, uint32_t seed,
   p->qlog_sink[0].who = "cli";
   p->qlog_sink[1].who = "srv";
   cc = ccfg ? *ccfg : p->scfg_conn;
+  if (cc.max_udp_payload == 0)
+    cc.max_udp_payload = g_ceiling;
+  if (p->scfg_conn.max_udp_payload == 0)
+    p->scfg_conn.max_udp_payload = g_ceiling;
   if (ccfg == NULL || cc.qlog == NULL)
     {
       cc.qlog = qsink_cb;

@@ -69,6 +69,10 @@ typedef struct cong
    is GQ_CC_CUBIC or GQ_CC_NEWRENO.  */
 void cong_init (cong *cc, int algo, uint32_t mss);
 
+/* The maximum datagram size changed (path MTU discovery): the minimum window
+   and the growth in a round trip follow.  The window itself does not.  */
+void cong_set_mss (cong *cc, uint32_t mss);
+
 /* A packet that was in flight, sent at SENT_US and SIZE bytes long, was
    acknowledged at NOW_US.  LIMITED: the sender was held back by the window
    (or the pacer) rather than by lack of data or the peer's flow control;
@@ -120,6 +124,7 @@ typedef struct pacer
 /* The bucket starts full.  BURST is the most that may go back to back from
    idle; DGRAM the maximum datagram size.  */
 void pacer_init (pacer *p, uint64_t burst, uint32_t dgram);
+void pacer_set_dgram (pacer *p, uint32_t dgram);
 
 /* The rate for a window: 1.25 windows per round trip in congestion
    avoidance, 2 in slow start (which grows the window by up to a factor of

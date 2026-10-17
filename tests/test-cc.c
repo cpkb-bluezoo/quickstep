@@ -604,10 +604,43 @@ test_hystart_reset_by_loss (void)
   CHECK (!cc.hs_round_started);
 }
 
+/* A larger datagram (path MTU discovery) moves the minimum window and the
+   growth per round trip with it, and leaves the window itself.  */
+static void
+test_mss_change (void)
+{
+  int algo;
+
+  for (algo = GQ_CC_CUBIC; algo <= GQ_CC_NEWRENO; algo++)
+    {
+      cong cc = new_cong (algo);
+      uint64_t before = cc.cwnd;
+      pacer p;
+
+      grow_to (&cc, 120000, 1000);
+      before = cc.cwnd;
+      cong_set_mss (&cc, 1452);
+      CHECK_EQ (cc.mss, 1452);
+      CHECK_EQ (cc.cwnd, before);
+      /* So low a window that the minimum decides: twice the new size.  */
+      cc.cwnd = 1000;
+      cc.recovery_start = 0;
+      cong_on_congestion_event (&cc, 2000, 3000);
+      CHECK_EQ (cc.cwnd, 2 * 1452);
+      CHECK_EQ (cc.ssthresh, 2 * 1452);
+      cong_on_persistent (&cc);
+      CHECK_EQ (cc.cwnd, 2 * 1452);
+      pacer_init (&p, 12000, 1200);
+      pacer_set_dgram (&p, 1452);
+      CHECK_EQ (p.dgram, 1452);
+    }
+}
+
 int
 main (void)
 {
   test_cbrt ();
+  test_mss_change ();
   test_pacer_burst ();
   test_pacer_late_check ();
   test_pacer_burst_cap ();

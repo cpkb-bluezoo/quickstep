@@ -81,6 +81,12 @@ hystart_reset (cong *cc)
 }
 
 void
+cong_set_mss (cong *cc, uint32_t mss)
+{
+  cc->mss = mss;
+}
+
+void
 cong_init (cong *cc, int algo, uint32_t mss)
 {
   uint64_t w = 2 * (uint64_t) mss;
@@ -293,6 +299,12 @@ cong_on_persistent (cong *cc)
 }
 
 /* ---- Pacing ---- */
+
+void
+pacer_set_dgram (pacer *p, uint32_t dgram)
+{
+  p->dgram = dgram;
+}
 
 void
 pacer_init (pacer *p, uint64_t burst, uint32_t dgram)

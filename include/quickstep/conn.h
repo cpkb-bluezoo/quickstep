@@ -250,7 +250,11 @@ typedef struct gq_conn_config
   uint64_t initial_max_streams_bidi;	/* 0: 100.  */
   uint64_t initial_max_streams_uni;	/* 0: 100.  */
   size_t send_buffer;			/* Per stream; 0: 256 KiB.  */
-  size_t max_udp_payload;		/* Largest datagram sent; 0: 1200.  */
+  /* The largest datagram to send, which path MTU discovery tries to reach:
+     datagrams start at 1200 bytes and, once the handshake is confirmed,
+     probes find how much more the path takes, up to this and what the peer
+     accepts.  0: 1452.  Within 1200 and 2048.  Receive buffers must hold it.  */
+  size_t max_udp_payload;
   size_t cid_len;			/* Our connection IDs; 0: 8.  */
   unsigned active_cid_limit;		/* 0: 4 (2 to 8).  */
   int disable_active_migration;
@@ -461,8 +465,10 @@ int gq_conn_probe_path (gq_conn *c, uint64_t now_us, const gq_path *path);
 int gq_conn_migrate (gq_conn *c, uint64_t now_us, const gq_path *path);
 
 /* Produce the next datagram into OUT (capacity CAP, which must be at
-   least the configured max_udp_payload).  *LEN is 0 when there is
-   nothing to send now.  */
+   least 1200 bytes and the size of the datagrams in use now, which
+   gq_conn_stats reports as max_datagram_size).  *LEN is 0 when there is
+   nothing to send now.  Path MTU discovery sends a probe only when CAP holds
+   it, so give the configured max_udp_payload.  */
 int gq_conn_send (gq_conn *c, uint64_t now_us, uint8_t *out, size_t cap,
                   size_t *len);
 
@@ -611,6 +617,10 @@ typedef struct gq_conn_stats
   uint64_t ecn_ect0_received, ecn_ect1_received, ecn_ce_received;
   int ecn_state;			/* A gq_ecn_state.  */
   uint64_t ecn_marked_sent;		/* Packets sent marked ECT(0).  */
+  /* Path MTU discovery: the size of the datagrams being sent, and whether
+     the search for a larger one has ended.  */
+  uint64_t max_datagram_size;
+  int pmtu_done;
 } gq_conn_stats;
 
 void gq_conn_get_stats (const gq_conn *c, gq_conn_stats *st);

@@ -56,6 +56,7 @@ typedef struct pk
   unsigned qf_n;
   const char *qtrigger;
   int spin;			/* The spin bit it was sealed with.  */
+  int pmtu_probe;		/* A path MTU probe.  */
 } pk;
 
 /* Start keeping what the log wants of the packet in slot SLOT of the
@@ -905,17 +906,18 @@ log_sent (gq_conn *c, pk *p, uint64_t pn, size_t pnl, size_t w, uint32_t did,
 }
 
 /* Pad, protect and account for the N packets of one datagram bound for
-   path DEST (an index into the path table).  */
+   path DEST (an index into the path table).  PAD_TO, if not 0, is the size
+   to pad the datagram to.  */
 static int
 finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
-                 const size_t *pnl, int n, int need_pad, size_t maxdg,
+                 const size_t *pnl, int n, size_t pad_to, size_t maxdg,
                  int dest, uint8_t *out, size_t *len)
 {
   size_t total = 0;
   int i, ae = 0, sent_handshake = 0, r = GQ_OK, marked;
   uint32_t did = c->ql.next_dgram_id++;
 
-  if (need_pad && maxdg >= GQ_MIN_INITIAL_DATAGRAM)
+  if (pad_to && maxdg >= pad_to)
     {
       pk *last = pks[n - 1];
       size_t t = 0, guard, padded = 0;
@@ -927,10 +929,10 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
             t += hdr_len_for (c, pks[i]->sp, pks[i]->early, pks[i]->len, pnl[i],
                          pns[i])
                  + pks[i]->len + GQ_AEAD_TAG_LEN;
-          if (t >= GQ_MIN_INITIAL_DATAGRAM)
+          if (t >= pad_to)
             break;
           {
-            size_t add_n = GQ_MIN_INITIAL_DATAGRAM - t;
+            size_t add_n = pad_to - t;
 
             if (add_n > sizeof last->pl - last->len)
               add_n = sizeof last->pl - last->len;
@@ -940,10 +942,10 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
           }
         }
       /* A longer payload can widen the Length field by a byte.  */
-      if (t > GQ_MIN_INITIAL_DATAGRAM && padded >= t - GQ_MIN_INITIAL_DATAGRAM)
+      if (t > pad_to && padded >= t - pad_to)
         {
-          last->len -= t - GQ_MIN_INITIAL_DATAGRAM;
-          padded -= t - GQ_MIN_INITIAL_DATAGRAM;
+          last->len -= t - pad_to;
+          padded -= t - pad_to;
         }
       last->pad += padded;
     }
@@ -956,7 +958,10 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
         spaces[i] = pks[i]->sp;
         early[i] = (uint8_t) pks[i]->early;
       }
-    marked = n <= N_SPACES && conn_ecn_marks (c, dest, spaces, early, n);
+    /* A path MTU probe is not marked: its loss, which is likely, must not
+       count against the path in the ECN test.  */
+    marked = n <= N_SPACES && !(n == 1 && pks[0]->pmtu_probe)
+             && conn_ecn_marks (c, dest, spaces, early, n);
   }
   for (i = 0; i < n && r == GQ_OK; i++)
     {
@@ -986,6 +991,9 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
           sp.ack_eliciting = 1;
           sp.in_flight = 1;
           sp.early = (uint8_t) p->early;
+          sp.pmtu_probe = (uint8_t) p->pmtu_probe;
+          if (p->pmtu_probe)
+            conn_pmtu_probe_sent (c);
           if (marked)
             sp.ecn_gen = conn_ecn_sent (c, 1, pns[i]);
           if (p->nsf)
@@ -1120,10 +1128,48 @@ build_probe (gq_conn *c, uint64_t now, uint8_t *out, size_t cap, size_t *len,
         p->pl[p->len++] = 0;
         p->pad++;
       }
-    r = finish_datagram (c, now, pks, &pn, &pnl, 1, 1, maxdg, idx, out, len);
+    r = finish_datagram (c, now, pks, &pn, &pnl, 1, GQ_MIN_INITIAL_DATAGRAM,
+                         maxdg, idx, out, len);
   }
   c->dcid = saved;
   c->tx_path = idx;
+  free (p);
+  return r;
+}
+
+/* A path MTU probe of SIZE bytes: an ACK if one is owed, a PING, and
+   padding to the size, alone in a datagram on the current path
+   (RFC 9000 section 14.4).  */
+static int
+build_pmtu_probe (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
+                  size_t size, size_t *len)
+{
+  space *s = &c->sp[SP_APP];
+  pk *p;
+  pk *pks[1];
+  uint64_t pn;
+  size_t pnl;
+  gq_frame f;
+  int r;
+
+  p = malloc (sizeof *p);
+  if (p == NULL)
+    return GQ_ERR_NOMEM;
+  memset (p, 0, sizeof *p);
+  pk_log_reset (c, p, 0);
+  p->sp = SP_APP;
+  p->pmtu_probe = 1;
+  p->cap = size - overhead_of (c, SP_APP);
+  p->hdr_est = overhead_of (c, SP_APP);
+  add_ack (c, p, now);
+  memset (&f, 0, sizeof f);
+  f.type = GQ_FRAME_PING;
+  add (p, &f, 1, NULL);
+  pks[0] = p;
+  pn = s->next_pn++;
+  pnl = gq_pn_encoded_len (pn, s->have_acked, s->largest_acked);
+  r = finish_datagram (c, now, pks, &pn, &pnl, 1, size, size < cap ? size : cap,
+                       c->cur_path, out, len);
   free (p);
   return r;
 }
@@ -1156,6 +1202,13 @@ build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
 
       if (idx >= 0)
         return build_probe (c, now, out, cap, len, idx);
+    }
+  if (c->state == GQ_CONN_ESTABLISHED)
+    {
+      size_t probe = conn_pmtu_next_probe (c, cap);
+
+      if (probe)
+        return build_pmtu_probe (c, now, out, cap, probe, len);
     }
   if (conn_path_budget (c, c->cur_path, &budget))
     {
@@ -1209,8 +1262,9 @@ build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
          && (c->role == GQ_ROLE_CLIENT || pks[i]->ae || pks[i]->closing))
         || pks[i]->challenge)
       need_pad = 1;
-  r = finish_datagram (c, now, pks, pns, pnl, n, need_pad, maxdg, c->cur_path,
-                       out, len);
+  r = finish_datagram (c, now, pks, pns, pnl, n,
+                       need_pad ? GQ_MIN_INITIAL_DATAGRAM : 0, maxdg,
+                       c->cur_path, out, len);
   free (storage);
   return r;
 }

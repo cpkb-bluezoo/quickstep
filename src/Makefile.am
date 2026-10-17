@@ -51,6 +51,7 @@ libquickstep_la_SOURCES = \
   conn_ecn.c \
   conn_loss.c \
   conn_path.c \
+  conn_pmtu.c \
   conn_recv.c \
   conn_send.c \
   conn_stream.c \

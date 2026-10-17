@@ -1872,6 +1872,199 @@ test_ecn_restarts_on_new_path (void)
   pair_free (p);
 }
 
+/* ---- Path MTU discovery (RFC 9000 section 14.3, RFC 8899) ---- */
+
+/* What the path saw of datagram sizes, and when.  */
+struct pmtu_obs
+{
+  size_t max[2];		/* The largest each end sent that got through.  */
+  size_t over_1200_before_confirm;
+  unsigned bigger_than[2];	/* Sent above the MTU of the path (probes).  */
+  size_t limit;
+};
+
+static void
+pmtu_snoop (struct net *n, int from, const uint8_t *dg, size_t len, int ecn,
+            void *user)
+{
+  struct pmtu_obs *o = user;
+  gq_conn *c = n->app[from]->c;
+
+  (void) dg;
+  (void) ecn;
+  if (len > 1200 && !c->handshake_confirmed)
+    o->over_1200_before_confirm++;
+  if (o->limit && len > o->limit)
+    {
+      o->bigger_than[from]++;
+      return;
+    }
+  if (len > o->max[from])
+    o->max[from] = len;
+}
+
+/* A transfer of RESP bytes to the client over a path with MTU, both ends
+   with CEILING; the observer is left in OBS.  */
+static struct pair *
+pmtu_transfer (size_t ceiling, size_t mtu, size_t resp, struct pmtu_obs *obs)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  struct sbuf *s;
+  uint64_t id;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.initial_max_data = 100u << 20;
+  cfg.initial_max_stream_data = 100u << 20;
+  cfg.max_udp_payload = ceiling;
+  p = pair_new (&cfg, &cfg, 0, 70);
+  p->qlog_sink[0].keep = p->qlog_sink[1].keep = 1;
+  p->net.latency = 20000;
+  p->net.mtu = mtu;
+  memset (obs, 0, sizeof *obs);
+  obs->limit = mtu;
+  p->net.snoop = pmtu_snoop;
+  p->net.snoop_user = obs;
+  p->srv.respond = resp;
+  CHECK (run (&p->net, both_connected, 30000000));
+  CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+  s = sb_get (&p->cli, id);
+  s->out_total = 10;
+  s->out_fin = 1;
+  CHECK (wait_for_stream (p, s, resp, 60000000));
+  run (&p->net, NULL, 2000000);
+  CHECK_EQ (p->cli.bad + p->srv.bad, 0);
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  return p;
+}
+
+/* A path that takes 1400 bytes: the search, with a ceiling of 1452, finds a
+   size within a few bytes of it and the data goes in datagrams that big.  */
+static void
+test_pmtu_discovers (void)
+{
+  struct pmtu_obs obs;
+  struct pair *p = pmtu_transfer (1452, 1400, 2000000, &obs);
+  gq_conn_stats st;
+  int e;
+
+  for (e = 0; e < 2; e++)
+    {
+      gq_conn_get_stats (e ? p->srv.c : p->cli.c, &st);
+      CHECK (st.max_datagram_size <= 1400);
+      CHECK (st.max_datagram_size >= 1400 - 16);
+      CHECK (st.pmtu_done);
+      CHECK (obs.max[e] >= 1400 - 16);
+    }
+  /* What did not fit was a probe, and not many of them.  */
+  CHECK (obs.bigger_than[0] + obs.bigger_than[1] > 0);
+  CHECK (p->net.mtu_drops < 60);
+  pair_free (p);
+}
+
+/* A path that takes what the ceiling is: the first probe is at the ceiling
+   and the search is over.  */
+static void
+test_pmtu_ceiling_reached (void)
+{
+  struct pmtu_obs obs;
+  struct pair *p = pmtu_transfer (1452, 1500, 1000000, &obs);
+  gq_conn_stats st;
+
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK_EQ (st.max_datagram_size, 1452);
+  CHECK (st.pmtu_done);
+  CHECK_EQ (p->net.mtu_drops, 0);
+  CHECK_EQ (obs.max[1], 1452);
+  CHECK_EQ (obs.max[0], 1452);
+  pair_free (p);
+}
+
+/* The configured size is the most that is sent, and 1200 sends nothing
+   larger or probes for it.  */
+static void
+test_pmtu_ceiling_is_a_ceiling (void)
+{
+  struct pmtu_obs obs;
+  struct pair *p = pmtu_transfer (1300, 0, 1000000, &obs);
+  gq_conn_stats st;
+
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK_EQ (st.max_datagram_size, 1300);
+  CHECK_EQ (obs.max[1], 1300);
+  CHECK_EQ (obs.max[0], 1300);
+  pair_free (p);
+  p = pmtu_transfer (1200, 0, 1000000, &obs);
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK_EQ (st.max_datagram_size, 1200);
+  CHECK (st.pmtu_done);
+  CHECK_EQ (obs.max[1], 1200);
+  CHECK_EQ (obs.max[0], 1200);
+  pair_free (p);
+}
+
+/* Nothing larger than 1200 is sent before the handshake is confirmed
+   (RFC 9000 section 14.3: probing starts then).  */
+static void
+test_pmtu_waits_for_the_handshake (void)
+{
+  struct pmtu_obs obs;
+  struct pair *p = pmtu_transfer (1452, 0, 200000, &obs);
+
+  CHECK_EQ (obs.over_1200_before_confirm, 0);
+  CHECK (obs.max[1] > 1200);
+  pair_free (p);
+}
+
+/* A probe that is lost is not a sign of congestion (RFC 9000 section 14.4):
+   the transfer over a path that drops them has no congestion events, and
+   the window is what it is without any probing.  */
+static void
+test_pmtu_probe_loss_is_not_congestion (void)
+{
+  struct pmtu_obs obs;
+  struct pair *p = pmtu_transfer (1452, 1300, 3000000, &obs);
+  gq_conn_stats st;
+
+  CHECK (p->net.mtu_drops >= 3);
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK_EQ (st.congestion_events, 0);
+  CHECK_EQ (st.packets_lost, 0);
+  CHECK (p->net.min_cwnd > 2 * 1200);
+  CHECK (st.pmtu_done);
+  pair_free (p);
+}
+
+/* The congestion controller and the pacer count in the size of the
+   datagrams in use.  */
+static void
+test_pmtu_controller_follows (void)
+{
+  struct pmtu_obs obs;
+  struct pair *p = pmtu_transfer (1452, 0, 500000, &obs);
+
+  CHECK_EQ (p->srv.c->cc.mss, 1452);
+  CHECK_EQ (p->srv.c->pace.dgram, 1452);
+  CHECK_EQ (p->cli.c->cc.mss, 1452);
+  pair_free (p);
+}
+
+/* The default ceiling is a size a path usually takes.  */
+static void
+test_pmtu_default_ceiling (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+
+  memset (&cfg, 0, sizeof cfg);
+  g_ceiling = 0;
+  p = pair_new (&cfg, &cfg, 0, 71);
+  g_ceiling = 1200;
+  CHECK_EQ (p->cli.c->cfg.max_udp_payload, 1452);
+  CHECK_EQ (p->srv.c->cfg.max_udp_payload, 1452);
+  pair_free (p);
+}
+
 int
 main (void)
 {
@@ -1910,6 +2103,13 @@ main (void)
   test_ecn_ce_is_congestion ();
   test_ecn_validation_of_counts ();
   test_ecn_restarts_on_new_path ();
+  test_pmtu_discovers ();
+  test_pmtu_ceiling_reached ();
+  test_pmtu_ceiling_is_a_ceiling ();
+  test_pmtu_waits_for_the_handshake ();
+  test_pmtu_probe_loss_is_not_congestion ();
+  test_pmtu_controller_follows ();
+  test_pmtu_default_ceiling ();
   TST_DONE ();
 }
 

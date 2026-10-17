@@ -643,7 +643,7 @@ ql_recovery_parameters (gq_conn *c)
   qkv_ms (w, "initial_rtt", CONN_INITIAL_RTT (c));
   qkv_u64 (w, "max_datagram_size", conn_max_datagram (c));
   qkv_u64 (w, "initial_congestion_window", c->cc.cwnd);
-  qkv_u64 (w, "minimum_congestion_window", CC_MIN_WINDOW);
+  qkv_u64 (w, "minimum_congestion_window", 2 * (uint64_t) c->cc.mss);
   qkv_milli (w, "loss_reduction_factor",
              c->cc.algo == GQ_CC_CUBIC ? 700 : 500);
   qkv_u64 (w, "persistent_congestion_threshold",

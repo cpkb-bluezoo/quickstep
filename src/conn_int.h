@@ -84,6 +84,7 @@ typedef struct sent_pkt
   uint32_t size;
   uint8_t ack_eliciting, in_flight, requeued;
   uint8_t early;		/* Sent as a 0-RTT packet.  */
+  uint8_t pmtu_probe;		/* A path MTU probe: its loss is not congestion.  */
   uint32_t ecn_gen;		/* Sent marked ECT(0), in this test: else 0.  */
   uint32_t nframes;
   sent_frame *frames;
@@ -266,6 +267,11 @@ struct gq_conn
   uint64_t rk_prev_until;	/* When the previous phase's read keys go.  */
   uint64_t aead_failed;		/* Packets that failed authentication.  */
   uint8_t ecn_state;		/* A gq_ecn_state.  */
+  /* Path MTU discovery: the size of datagrams sent now, the largest known
+     to work and the smallest known not to (or one past the ceiling, before
+     the first probe), and the probe being sent.  */
+  uint8_t pmtu_state, pmtu_probe_out, pmtu_fails;
+  uint32_t pmtu_cur, pmtu_lo, pmtu_hi, pmtu_probe_size;
   uint32_t ecn_gen;		/* Counts the tests; packets sent in one carry
 				   it, and none is 0.  */
   uint64_t ecn_test_sent, ecn_test_ae, ecn_test_acked, ecn_test_lost;
@@ -365,6 +371,16 @@ struct gq_conn
 
 /* conn.c */
 void conn_fail (gq_conn *c, uint64_t code, const char *reason);
+
+/* Path MTU discovery (conn_pmtu.c).  */
+#define PMTU_BASE 1200
+enum { PMTU_START = 0, PMTU_SEARCH, PMTU_DONE };
+void conn_pmtu_init (gq_conn *c);
+size_t conn_pmtu_next_probe (gq_conn *c, size_t cap);
+void conn_pmtu_probe_sent (gq_conn *c);
+void conn_pmtu_acked (gq_conn *c, size_t size);
+void conn_pmtu_lost (gq_conn *c, size_t size);
+int conn_pmtu_done (const gq_conn *c);
 
 /* ECN (conn_ecn.c).  */
 void conn_ecn_restart (gq_conn *c);

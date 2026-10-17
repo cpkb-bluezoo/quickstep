@@ -40,10 +40,12 @@ umax (uint64_t a, uint64_t b)
   return a > b ? a : b;
 }
 
+/* The size of the datagrams being sent: 1200 until path MTU discovery finds
+   that the path takes more, within what the peer receives.  */
 size_t
 conn_max_datagram (const gq_conn *c)
 {
-  size_t m = c->cfg.max_udp_payload;
+  size_t m = c->pmtu_cur;
 
   if (c->have_peer_tp && c->peer_tp.max_udp_payload_size < m)
     m = (size_t) c->peer_tp.max_udp_payload_size;
@@ -828,7 +830,7 @@ fill_defaults (gq_conn_config *g)
   if (g->send_buffer == 0)
     g->send_buffer = 256u << 10;
   if (g->max_udp_payload == 0)
-    g->max_udp_payload = 1200;
+    g->max_udp_payload = 1452;
   if (g->n_versions == 0)
     {
       if (g->version)
@@ -889,6 +891,7 @@ conn_alloc (enum gq_role role, const gq_conn_config *config,
     return NULL;
   c->role = role;
   c->rx_ecn = -1;
+  conn_pmtu_init (c);
   c->state = GQ_CONN_HANDSHAKE;
   if (config)
     c->cfg = *config;
@@ -1317,6 +1320,8 @@ gq_conn_get_stats (const gq_conn *c, gq_conn_stats *st)
   st->ecn_ce_received = c->ecn_in[2];
   st->ecn_state = c->ecn_state;
   st->ecn_marked_sent = c->ecn_marked_sent;
+  st->max_datagram_size = conn_max_datagram (c);
+  st->pmtu_done = conn_pmtu_done (c);
 }
 
 /* ECN is a gq_ecn, or -1 when the caller does not say.  */
