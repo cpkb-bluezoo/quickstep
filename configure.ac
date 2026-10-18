@@ -19,7 +19,7 @@ dnl License along with this program.  If not, see
 dnl <https://www.gnu.org/licenses/>.
 
 AC_PREREQ([2.71])
-AC_INIT([quickstep], [0.0.2], [bug-quickstep@gnu.org], [quickstep],
+AC_INIT([quickstep], [0.0.3], [bug-quickstep@gnu.org], [quickstep],
         [https://www.gnu.org/software/quickstep/])
 AC_CONFIG_SRCDIR([src/varint.c])
 AC_CONFIG_AUX_DIR([build-aux])

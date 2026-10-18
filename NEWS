@@ -1,18 +1,7 @@
 quickstep NEWS - history of user-visible changes.
 
-* Noteworthy changes in release 0.0.2 (2026-09-30)
+* Noteworthy changes in release 0.0.3 (2026-10-18)
 
-** The project is renamed from gnuquic to quickstep.  Public headers live
-under include/quickstep/, the library is libquickstep, and pkg-config is
-quickstep.pc.  The C API (gq_ / GQ_) is unchanged.
-
-* Noteworthy changes in release 0.0.1 (2026-09-27)
-
-** First tarball sent for FSF evaluation (as gnuquic).
-
-* Noteworthy changes in development (unreleased)
-
-** Initial development.
 ** gq_tls_info gains sig_scheme and client_sig_scheme: the SignatureScheme
 that signed the server's CertificateVerify, and the client's, as each end
 saw it (0 where there was none).  The interop programs print them, and the
@@ -231,6 +220,20 @@ previous key phase's read keys are dropped after three probe timeouts;
 AEAD integrity and confidentiality limits close the connection
 (AEAD_LIMIT_REACHED); an acknowledgement of a 0-RTT packet no longer
 allows the first key update.
+
+* Noteworthy changes in release 0.0.2 (2026-09-30)
+
+** The project is renamed from gnuquic to quickstep.  Public headers live
+under include/quickstep/, the library is libquickstep, and pkg-config is
+quickstep.pc.  The C API (gq_ / GQ_) is unchanged.
+
+* Noteworthy changes in release 0.0.1 (2026-09-27)
+
+** First tarball sent for FSF evaluation (as gnuquic).
+
+* Noteworthy changes before the first release
+
+** Initial development.
 ** Version negotiation for TLS and DTLS (tlsauto.h, dtlsauto.h): by
 default a server chooses between the TLS 1.3 and TLS 1.2 engines (or DTLS
 1.3 and 1.2) from the ClientHello, so one listener serves both and
