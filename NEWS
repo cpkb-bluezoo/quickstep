@@ -2,6 +2,11 @@ quickstep NEWS - history of user-visible changes.
 
 * Noteworthy changes in release ?.? (????-??-??) [?]
 
+** The peer's point on a NIST curve is checked to be on the curve, in
+uncompressed form, before ECDH, in secp256r1, secp384r1 and the hybrid
+groups that use them, on both the server and the client side.  libgcrypt
+before 1.12.4 accepts any point (an invalid-curve attack); configure still
+allows 1.12.0.
 ** QUIC, from the same interop failures gumdrop fixed: a server keeps its
 Handshake keys until HANDSHAKE_DONE is acknowledged, and a Handshake
 packet from a new address can migrate the connection.  A client Initial

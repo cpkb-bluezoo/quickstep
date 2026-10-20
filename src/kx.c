@@ -37,6 +37,7 @@ struct group
 {
   uint16_t id;
   int ec_algo;			/* gcry_kem algo, 0 if none.  */
+  const char *curve;		/* libgcrypt curve name of a NIST curve.  */
   size_t ec_pub, ec_sec;	/* Point (or X25519 key) and scalar sizes.  */
   size_t ec_raw, ec_out;	/* Raw KEM shared size, and bytes we keep.  */
   int is_x25519;
@@ -48,28 +49,28 @@ struct group
 #define MLKEM_SS 32
 
 static const struct group groups[] = {
-  { GQ_GROUP_X25519, GCRY_KEM_RAW_X25519, 32, 32, 32, 32, 1,
+  { GQ_GROUP_X25519, GCRY_KEM_RAW_X25519, NULL, 32, 32, 32, 32, 1,
     0, 0, 0, 0, 0 },
-  { GQ_GROUP_SECP256R1, GCRY_KEM_RAW_P256R1, 65, 32, 65, 32, 0,
+  { GQ_GROUP_SECP256R1, GCRY_KEM_RAW_P256R1, "NIST P-256", 65, 32, 65, 32, 0,
     0, 0, 0, 0, 0 },
-  { GQ_GROUP_SECP384R1, GCRY_KEM_RAW_P384R1, 97, 48, 97, 48, 0,
+  { GQ_GROUP_SECP384R1, GCRY_KEM_RAW_P384R1, "NIST P-384", 97, 48, 97, 48, 0,
     0, 0, 0, 0, 0 },
-  { GQ_GROUP_X25519_MLKEM768, GCRY_KEM_RAW_X25519, 32, 32, 32, 32, 1,
+  { GQ_GROUP_X25519_MLKEM768, GCRY_KEM_RAW_X25519, NULL, 32, 32, 32, 32, 1,
     GCRY_KEM_MLKEM768, GCRY_KEM_MLKEM768_PUBKEY_LEN,
     GCRY_KEM_MLKEM768_SECKEY_LEN, GCRY_KEM_MLKEM768_CIPHER_LEN, 1 },
-  { GQ_GROUP_SECP256R1_MLKEM768, GCRY_KEM_RAW_P256R1, 65, 32, 65, 32, 0,
+  { GQ_GROUP_SECP256R1_MLKEM768, GCRY_KEM_RAW_P256R1, "NIST P-256", 65, 32, 65, 32, 0,
     GCRY_KEM_MLKEM768, GCRY_KEM_MLKEM768_PUBKEY_LEN,
     GCRY_KEM_MLKEM768_SECKEY_LEN, GCRY_KEM_MLKEM768_CIPHER_LEN, 0 },
-  { GQ_GROUP_SECP384R1_MLKEM1024, GCRY_KEM_RAW_P384R1, 97, 48, 97, 48, 0,
+  { GQ_GROUP_SECP384R1_MLKEM1024, GCRY_KEM_RAW_P384R1, "NIST P-384", 97, 48, 97, 48, 0,
     GCRY_KEM_MLKEM1024, GCRY_KEM_MLKEM1024_PUBKEY_LEN,
     GCRY_KEM_MLKEM1024_SECKEY_LEN, GCRY_KEM_MLKEM1024_CIPHER_LEN, 0 },
-  { GQ_GROUP_MLKEM512, 0, 0, 0, 0, 0, 0,
+  { GQ_GROUP_MLKEM512, 0, NULL, 0, 0, 0, 0, 0,
     GCRY_KEM_MLKEM512, GCRY_KEM_MLKEM512_PUBKEY_LEN,
     GCRY_KEM_MLKEM512_SECKEY_LEN, GCRY_KEM_MLKEM512_CIPHER_LEN, 0 },
-  { GQ_GROUP_MLKEM768, 0, 0, 0, 0, 0, 0,
+  { GQ_GROUP_MLKEM768, 0, NULL, 0, 0, 0, 0, 0,
     GCRY_KEM_MLKEM768, GCRY_KEM_MLKEM768_PUBKEY_LEN,
     GCRY_KEM_MLKEM768_SECKEY_LEN, GCRY_KEM_MLKEM768_CIPHER_LEN, 0 },
-  { GQ_GROUP_MLKEM1024, 0, 0, 0, 0, 0, 0,
+  { GQ_GROUP_MLKEM1024, 0, NULL, 0, 0, 0, 0, 0,
     GCRY_KEM_MLKEM1024, GCRY_KEM_MLKEM1024_PUBKEY_LEN,
     GCRY_KEM_MLKEM1024_SECKEY_LEN, GCRY_KEM_MLKEM1024_CIPHER_LEN, 0 }
 };
@@ -125,6 +126,45 @@ all_zero (const uint8_t *p, size_t n)
   while (n--)
     acc |= *p++;
   return acc == 0;
+}
+
+/* The peer's point on a NIST curve must be a point of that curve, in the
+   uncompressed form with both coordinates reduced (RFC 8446 section
+   4.2.8.2).  libgcrypt's ECDH takes whatever it is given before 1.12.4 and
+   an unchecked point is an invalid-curve attack, so it is checked here
+   whatever the version.  X25519 accepts every 32 bytes and its low-order
+   results are caught after the fact (ec_extract).  */
+static int
+ec_peer_ok (const struct group *g, const uint8_t *q)
+{
+  gcry_ctx_t ctx = NULL;
+  gcry_mpi_t x = NULL, y = NULL, p = NULL;
+  gcry_mpi_point_t pt = NULL;
+  size_t c = (g->ec_pub - 1) / 2;
+  int ok = 0;
+
+  if (g->curve == NULL)
+    return 1;
+  if (q[0] != 0x04 || gcry_mpi_ec_new (&ctx, NULL, g->curve))
+    return 0;
+  if (gcry_mpi_scan (&x, GCRYMPI_FMT_USG, q + 1, c, NULL) == 0
+      && gcry_mpi_scan (&y, GCRYMPI_FMT_USG, q + 1 + c, c, NULL) == 0)
+    {
+      p = gcry_mpi_ec_get_mpi ("p", ctx, 1);
+      pt = gcry_mpi_point_new (0);
+    }
+  if (p != NULL && pt != NULL && gcry_mpi_cmp (x, p) < 0
+      && gcry_mpi_cmp (y, p) < 0)
+    {
+      gcry_mpi_point_set (pt, x, y, GCRYMPI_CONST_ONE);
+      ok = gcry_mpi_ec_curve_point (pt, ctx);
+    }
+  gcry_mpi_point_release (pt);
+  gcry_mpi_release (x);
+  gcry_mpi_release (y);
+  gcry_mpi_release (p);
+  gcry_ctx_release (ctx);
+  return ok;
 }
 
 /* ECDH half: the classical shared secret from KEM raw output.  For the
@@ -247,6 +287,8 @@ gq_kx_respond (unsigned group, const uint8_t *client_share,
   split (g, client_share, g->ec_pub, g->kem_pub, &ec_peer, &pq_peer);
   if (g->ec_algo)
     {
+      if (!ec_peer_ok (g, ec_peer))
+        return GQ_ERR_CRYPTO;		/* Not a valid point.  */
       if (gcry_kem_encap (g->ec_algo, ec_peer, g->ec_pub, ec_ct, g->ec_pub,
                           ec_raw, g->ec_raw, NULL, 0))
         return GQ_ERR_CRYPTO;		/* Not a valid point.  */
@@ -305,6 +347,8 @@ gq_kx_complete (const gq_kx_key *key, const uint8_t *server_share,
   split (g, server_share, g->ec_pub, g->kem_ct, &ec_peer, &pq_peer);
   if (g->ec_algo)
     {
+      if (!ec_peer_ok (g, ec_peer))
+        return GQ_ERR_CRYPTO;		/* Not a valid point.  */
       if (gcry_kem_decap (g->ec_algo, key->secret, g->ec_sec, ec_peer,
                           g->ec_pub, ec_raw, g->ec_raw, NULL, 0))
         return GQ_ERR_CRYPTO;

@@ -327,6 +327,73 @@ test_pure_lengths (void)
     }
 }
 
+/* The peer's elliptic curve point must be on the curve (RFC 8446 section
+   4.2.8.2): libgcrypt's ECDH takes any point, and an unchecked one is an
+   invalid-curve attack.  For each group with a NIST curve, a share whose
+   point is (0, 0), is off the curve (a valid point with its last byte
+   changed) or is in compressed form is refused, both by the server that
+   receives it from a client and by the client that receives it from a
+   server.  The curve is first in the share of all these groups.  */
+static void
+test_invalid_points (void)
+{
+  static const struct
+  {
+    unsigned group;
+    size_t point;
+  } v[] = {
+    { GQ_GROUP_SECP256R1, 65 }, { GQ_GROUP_SECP384R1, 97 },
+    { GQ_GROUP_SECP256R1_MLKEM768, 65 }, { GQ_GROUP_SECP384R1_MLKEM1024, 97 }
+  };
+  size_t i, bad;
+
+  for (i = 0; i < sizeof v / sizeof v[0]; i++)
+    {
+      static gq_kx_key key;
+      static uint8_t good[GQ_KX_SHARE_MAX], share[GQ_KX_SHARE_MAX];
+      static uint8_t server[GQ_KX_SHARE_MAX], goodserver[GQ_KX_SHARE_MAX];
+      uint8_t ss[GQ_KX_SHARED_MAX];
+      unsigned g = v[i].group;
+      size_t pt = v[i].point, cl, sl = 0, n, m;
+
+      CHECK_EQ (gq_kx_generate (g, &key), GQ_OK);
+      cl = key.share_len;
+      memcpy (good, key.share, cl);
+      CHECK_EQ (gq_kx_respond (g, good, cl, goodserver, sizeof goodserver,
+                               &sl, ss, sizeof ss, &m), GQ_OK);
+
+      for (bad = 0; bad < 3; bad++)
+        {
+          /* Client share to the server.  */
+          memcpy (share, good, cl);
+          if (bad == 0)
+            {
+              memset (share + 1, 0, pt - 1);	/* (0, 0).  */
+            }
+          else if (bad == 1)
+            share[pt - 1] ^= 0x55;		/* Off the curve.  */
+          else
+            share[0] = 0x02;			/* Compressed form.  */
+          CHECK (gq_kx_respond (g, share, cl, server, sizeof server, &n, ss,
+                                sizeof ss, &m) != GQ_OK);
+
+          /* Server share to the client.  */
+          memcpy (share, goodserver, sl);
+          if (bad == 0)
+            memset (share + 1, 0, pt - 1);
+          else if (bad == 1)
+            share[pt - 1] ^= 0x55;
+          else
+            share[0] = 0x02;
+          CHECK (gq_kx_complete (&key, share, sl, ss, sizeof ss, &m)
+                 != GQ_OK);
+        }
+      /* And the untouched ones still work.  */
+      CHECK_EQ (gq_kx_complete (&key, goodserver, sl, ss, sizeof ss, &m),
+                GQ_OK);
+    }
+}
+
 static void
 test_errors (void)
 {
@@ -388,5 +455,6 @@ main (void)
   test_pure_kat ();
   test_pure_lengths ();
   test_errors ();
+  test_invalid_points ();
   TST_DONE ();
 }
