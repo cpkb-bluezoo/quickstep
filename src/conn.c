@@ -417,19 +417,36 @@ conn_discard_space (gq_conn *c, int sp)
 void
 conn_maybe_confirm (gq_conn *c)
 {
-  if (c->handshake_confirmed)
-    return;
-  c->handshake_confirmed = 1;
-  ql_state (c, "handshake_confirmed", 1);
-  conn_discard_space (c, SP_HANDSHAKE);
-  /* The server's preferred address can be taken up now (RFC 9000 section
-     9.6.2).  */
-  if (c->pref_pending)
+  if (!c->handshake_confirmed)
     {
-      c->pref_pending = 0;
-      if (c->ev.preferred_address)
-        c->ev.preferred_address (c->ev.user, &c->peer_pref);
+      c->handshake_confirmed = 1;
+      ql_state (c, "handshake_confirmed", 1);
+      /* The server's preferred address can be taken up now (RFC 9000
+         section 9.6.2).  */
+      if (c->pref_pending)
+        {
+          c->pref_pending = 0;
+          if (c->ev.preferred_address)
+            c->ev.preferred_address (c->ev.user, &c->peer_pref);
+        }
     }
+  /* A server keeps its Handshake keys until HANDSHAKE_DONE is
+     acknowledged: a client that lost the frame goes on sending at the
+     Handshake level, and from a new address that is the only authenticated
+     packet the server will see (RFC 9001 section 4.9.2, held back).
+     It does not send at that level any more.  The peer discards its
+     Handshake keys when it receives HANDSHAKE_DONE, so a packet sent
+     afterwards cannot be read.  */
+  if (c->role == GQ_ROLE_SERVER && !c->handshake_done_acked)
+    {
+      space *s = &c->sp[SP_HANDSHAKE];
+
+      s->ack_pending = s->ack_now = 0;
+      s->ack_deadline = 0;
+      s->probes = 0;
+      return;
+    }
+  conn_discard_space (c, SP_HANDSHAKE);
 }
 
 void
@@ -629,6 +646,8 @@ store_preferred_address (gq_conn *c)
   c->pref_offered = c->pref_pending = 1;
 }
 
+static void conn_issue_cids (gq_conn *c);
+
 int
 conn_apply_peer_params (gq_conn *c)
 {
@@ -666,19 +685,61 @@ conn_apply_peer_params (gq_conn *c)
     c->idle_timeout_us = idle;
   streams_apply_peer_params (c);
   store_preferred_address (c);
-  /* Offer the peer spare connection IDs, up to what it will keep.  */
-  while (1)
-    {
-      size_t active = 0, i;
-
-      for (i = 0; i < MAX_LCID; i++)
-        active += c->l[i].used;
-      if (active >= c->peer_cid_limit || active >= MAX_LCID)
-        break;
-      if (conn_new_lcid (c, 0) != GQ_OK)
-        break;
-    }
+  conn_issue_cids (c);
   return GQ_OK;
+}
+
+/* IDs the peer is still to keep: retire_prior_to does not cover them.  */
+static size_t
+local_cids_active (const gq_conn *c)
+{
+  size_t i, n = 0;
+
+  for (i = 0; i < MAX_LCID; i++)
+    if (c->l[i].used && c->l[i].seq >= c->our_retire_prior)
+      n++;
+  return n;
+}
+
+/* Issue spares up to the peer's active_connection_id_limit.  */
+static void
+conn_issue_cids (gq_conn *c)
+{
+  if (c->peer_cid_limit == 0)
+    return;
+  while (local_cids_active (c) < c->peer_cid_limit
+         && local_cids_active (c) < MAX_LCID)
+    if (conn_new_lcid (c, 0) != GQ_OK)
+      break;
+}
+
+/* The peer has addressed us with one of our connection IDs.  When that is
+   not the oldest and the peer is already at its limit, retire the ones it
+   has moved on from and issue a replacement (RFC 9000 section 5.1.2).  A
+   peer that retires IDs itself is left alone: this runs only at the limit.  */
+void
+conn_cid_peer_using (gq_conn *c, const uint8_t *cid, size_t len)
+{
+  size_t i;
+  uint64_t seq = UINT64_MAX;
+
+  if (!c->handshake_confirmed || cid == NULL || len == 0)
+    return;
+  if (c->role == GQ_ROLE_SERVER && !conn_path_rx_changed (c))
+    return;
+  for (i = 0; i < MAX_LCID; i++)
+    if (c->l[i].used && c->l[i].cid.len == len
+        && memcmp (c->l[i].cid.data, cid, len) == 0)
+      {
+        seq = c->l[i].seq;
+        break;
+      }
+  if (seq == UINT64_MAX || seq <= c->our_retire_prior)
+    return;
+  if (local_cids_active (c) < c->peer_cid_limit)
+    return;
+  c->our_retire_prior = seq;
+  conn_issue_cids (c);
 }
 
 /* ---- TLS sink ---- */
@@ -1499,7 +1560,10 @@ gq_conn_send_path (gq_conn *c, uint64_t now_us, uint8_t *out, size_t cap,
     return GQ_OK;
   if (cap < conn_max_datagram (c))
     return GQ_ERR_BUFSIZE;
-  r = conn_build_datagram (c, now_us, out, cap, len);
+  if (c->lead_ack)
+    r = conn_send_version_ack (c, now_us, out, cap, len);
+  else
+    r = conn_build_datagram (c, now_us, out, cap, len);
   ql_after (c);
   if (to)
     *to = c->paths[c->tx_path].p;

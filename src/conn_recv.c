@@ -428,6 +428,11 @@ on_frame (void *user, const gq_frame *f)
     {
     case GQ_FRAME_PADDING:
     case GQ_FRAME_PING:
+      /* A PING in Initial, before the handshake finishes, is the client's
+         probe: its timer ran out without hearing from this server.  */
+      if (f->type == GQ_FRAME_PING && c->role == GQ_ROLE_SERVER
+          && sp == SP_INITIAL && !c->handshake_complete)
+        c->client_probed = 1;
       return 0;
     case GQ_FRAME_PATH_RESPONSE:
       conn_path_on_response (c, f->u.path_challenge.data, c->now);
@@ -449,6 +454,19 @@ on_frame (void *user, const gq_frame *f)
         u.level = sp == SP_INITIAL ? GQ_LEVEL_INITIAL
                 : sp == SP_HANDSHAKE ? GQ_LEVEL_HANDSHAKE
                 : GQ_LEVEL_APPLICATION;
+        c->pkt_crypto = 1;
+        /* A ClientHello the server has already seen, said again, is the
+           same probe as a PING: quic-go retransmits it without one.  */
+        if (c->role == GQ_ROLE_SERVER && sp == SP_INITIAL
+            && !c->handshake_complete)
+          {
+            uint64_t end = f->u.crypto.offset + f->u.crypto.data.len;
+
+            if (end <= c->initial_crypto_end)
+              c->client_probed = 1;
+            if (end > c->initial_crypto_end)
+              c->initial_crypto_end = end;
+          }
         if (c->sp[sp].discarded || c->tls == NULL)
           return 0;
         r = gq_rstream_push (&c->sp[sp].cr, f->u.crypto.offset,
@@ -500,6 +518,30 @@ on_frame (void *user, const gq_frame *f)
         info.reason = f->u.connection_close.reason.data;
         info.reason_len = f->u.connection_close.reason.len;
         x->closing = 1;
+        /* Handshake (and Initial) can only send APPLICATION_ERROR for an
+           application close.  The code itself follows in the 1-RTT packet
+           of this datagram; remember this until the datagram is done.
+           The reason is copied: a replayed packet is freed first.
+           Return 0 so parsing this packet is not a handler failure:
+           the connection is not closing until the datagram has been read.  */
+        if ((!info.application && info.error == GQ_QERR_APPLICATION
+             && !c->rx_close_set)
+            || (info.application && c->rx_close_set
+                && !c->rx_close.application))
+          {
+            size_t n = info.reason_len;
+
+            if (n > sizeof c->rx_close_reason)
+              n = sizeof c->rx_close_reason;
+            if (n && info.reason)
+              memcpy (c->rx_close_reason, info.reason, n);
+            info.reason_len = n;
+            info.reason = (const uint8_t *) c->rx_close_reason;
+            c->rx_close = info;
+            c->rx_close_set = 1;
+            return 0;
+          }
+        c->rx_close_set = 0;
         conn_enter_closing (c, &info, 1);
         return 1;
       }
@@ -597,6 +639,10 @@ note_received (gq_conn *c, int sp, uint64_t pn, int ae, uint64_t now)
       c->ecn_in[ecn_slot (c->rx_ecn)]++;
     }
   if (!ae)
+    return;
+  /* The server keeps Handshake keys to read a late packet, and does not
+     acknowledge it: the peer has dropped its own keys.  */
+  if (sp == SP_HANDSHAKE && c->role == GQ_ROLE_SERVER && c->handshake_confirmed)
     return;
   s->ack_pending = 1;
   s->ae_since_ack++;
@@ -778,6 +824,10 @@ recv_retry (gq_conn *c, const gq_long_header *h, const uint8_t *pkt, size_t len)
   s->probes = 0;
   s->loss_time = 0;
   c->pto_count = 0;
+  /* The server discarded 0-RTT as well.  Send it again as 0-RTT, and do
+     not leave it counting against the window until loss detection, which
+     would be after the handshake and so at 1-RTT.  */
+  conn_discard_early_sent (c);
   return 1;
 }
 
@@ -1089,7 +1139,12 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
       drop_long (c, &h, "connection_unknown");
       return 0;
     }
-  if (c->dcid_set && (c->role == GQ_ROLE_SERVER || c->got_peer_packet)
+  /* Until an Initial carrying CRYPTO settles it, a client accepts a new
+     Source Connection ID on an Initial: a Retry's is provisional, and so
+     is an acknowledgement-only Initial (RFC 9000 section 7.2).  */
+  if (c->dcid_set
+      && (c->role == GQ_ROLE_SERVER || c->got_peer_packet)
+      && !(c->role == GQ_ROLE_CLIENT && sp == SP_INITIAL && !c->scid_settled)
       && (h.scid.len != c->dcid.len
           || memcmp (h.scid.data, c->dcid.data, h.scid.len)))
     {
@@ -1142,21 +1197,58 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
       s->rk = sk;
       s->wk = ck;
     }
-  if (c->role == GQ_ROLE_CLIENT && !c->got_peer_packet)
-    {
-      /* The server picked its own connection ID: use it from now on.  */
-      c->dcid.len = (uint8_t) h.scid.len;
-      memcpy (c->dcid.data, h.scid.data, h.scid.len);
-      c->p[0].cid = c->dcid;
-    }
   c->got_peer_packet = 1;
   ql_rx_cid (c, h.dcid.data, h.dcid.len);
   if (sp == SP_HANDSHAKE)
     ql_handshake_started (c);
   log_long (c, &h, pkt, pn, poff, plen);
-  if (process_payload (c, sp, pkt + poff, plen, &ae, NULL) != 0)
-    return 1;
-  note_received (c, sp, pn, ae, now);
+  {
+    gq_packet_keys pre_wk;
+    int nonprobing = 0, highest, arm = 0;
+
+    /* RFC 9368 section 2.3: acknowledge the first Initial in the client's
+       version before its frames reach TLS, which may switch the version
+       in this same call.  The ACK goes out ahead of that flight.  */
+    if (c->role == GQ_ROLE_SERVER && sp == SP_INITIAL && s->next_pn == 0
+        && c->cfg.n_versions > 1 && !c->switched)
+      {
+        pre_wk = s->wk;
+        arm = 1;
+      }
+    c->pkt_crypto = 0;
+    highest = !s->have_recv || pn > s->largest_recv;
+    if (process_payload (c, sp, pkt + poff, plen, &ae, &nonprobing) != 0)
+      return 1;
+    if (arm && c->switched && c->state < GQ_CONN_CLOSING)
+      {
+        c->lead_wk = pre_wk;
+        c->lead_version = c->orig_version;
+        c->lead_ack = 1;
+      }
+    /* Each server Initial that decrypts may move the destination
+       connection ID; the first that carries CRYPTO settles it.  */
+    if (c->role == GQ_ROLE_CLIENT && sp == SP_INITIAL && !c->scid_settled)
+      {
+        if (h.scid.len != c->dcid.len
+            || memcmp (h.scid.data, c->dcid.data, c->dcid.len) != 0)
+          {
+            c->dcid.len = (uint8_t) h.scid.len;
+            memcpy (c->dcid.data, h.scid.data, h.scid.len);
+            c->p[0].cid = c->dcid;
+          }
+        if (c->pkt_crypto)
+          c->scid_settled = 1;
+      }
+    note_received (c, sp, pn, ae, now);
+    /* A Handshake packet after the handshake finished still decrypts
+       until HANDSHAKE_DONE is acknowledged.  While the server is still on
+       the path the handshake used, a new address on it is a migration like
+       one on a 1-RTT packet.  After the server has moved, a late Handshake
+       packet from the old address is not another migration.  */
+    if (sp == SP_HANDSHAKE && c->role == GQ_ROLE_SERVER
+        && c->handshake_confirmed && c->paths[c->cur_path].initial)
+      conn_path_after_packet (c, now, nonprobing, highest);
+  }
   if (c->role == GQ_ROLE_SERVER && sp == SP_HANDSHAKE)
     {
       /* The client has proven it can receive at its address, and has
@@ -1296,6 +1388,7 @@ recv_short (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t *used)
     return 1;
   note_received (c, SP_APP, pn, ae, now);
   conn_spin_received (c, (pkt[0] >> 5) & 1, highest);
+  conn_cid_peer_using (c, h.dcid.data, h.dcid.len);
   conn_path_after_packet (c, now, nonprobing, highest);
   return 1;
 failed:
@@ -1379,6 +1472,15 @@ conn_replay_held (gq_conn *c)
     }
   while (progress && c->state < GQ_CONN_CLOSING);
   c->replaying = 0;
+  if (c->rx_close_set && c->state < GQ_CONN_CLOSING)
+    {
+      gq_conn_close_info info = c->rx_close;
+
+      c->rx_close_set = 0;
+      conn_enter_closing (c, &info, 1);
+    }
+  else
+    c->rx_close_set = 0;
   if (c->state >= GQ_CONN_CLOSING)
     conn_held_free (c);
 }
@@ -1421,5 +1523,20 @@ conn_receive_datagram (gq_conn *c, uint64_t now, uint8_t *data, size_t len)
         }
       off += used;
     }
+  if (c->client_probed && c->state < GQ_CONN_CLOSING)
+    {
+      c->client_probed = 0;
+      conn_repeat_oldest (c, SP_INITIAL);
+      conn_repeat_oldest (c, SP_HANDSHAKE);
+    }
+  if (c->rx_close_set && c->state < GQ_CONN_CLOSING)
+    {
+      gq_conn_close_info info = c->rx_close;
+
+      c->rx_close_set = 0;
+      conn_enter_closing (c, &info, 1);
+    }
+  else
+    c->rx_close_set = 0;
   return GQ_OK;
 }

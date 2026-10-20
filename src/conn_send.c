@@ -553,7 +553,9 @@ add_app_frames (gq_conn *c, pk *p)
           add (p, &f, 1, &e);
         }
     cp->n_resp = 0;
-    if (cp->need_challenge && room (p) >= 9)
+    /* A preferred-address move holds its challenge so the PING goes
+       first and the peer's challenge is the first packet it sends.  */
+    if (cp->need_challenge && !cp->chal_hold && room (p) >= 9)
       {
         memset (&f, 0, sizeof f);
         f.type = GQ_FRAME_PATH_CHALLENGE;
@@ -570,6 +572,7 @@ add_app_frames (gq_conn *c, pk *p)
         memset (&f, 0, sizeof f);
         f.type = GQ_FRAME_NEW_CONNECTION_ID;
         f.u.new_connection_id.seq = c->l[i].seq;
+        f.u.new_connection_id.retire_prior_to = c->our_retire_prior;
         f.u.new_connection_id.cid_len = c->l[i].cid.len;
         memcpy (f.u.new_connection_id.cid, c->l[i].cid.data, c->l[i].cid.len);
         memcpy (f.u.new_connection_id.reset_token, c->l[i].token,
@@ -771,6 +774,13 @@ assemble (gq_conn *c, int sp, uint64_t now, size_t budget, size_t maxdg,
   p->hdr_est = ov;
   if (c->state == GQ_CONN_CLOSING)
     {
+      /* An application close in an earlier space can only say
+         APPLICATION_ERROR.  When the 1-RTT packet will carry the real
+         code, do not send the placeholder ahead of it: a peer that still
+         has Handshake keys would close on the placeholder.  */
+      if (c->close_app && sp != SP_APP && c->sp[SP_APP].have_wk
+          && !c->sp[SP_APP].discarded)
+        return 0;
       add_close (c, p);
       return p->len > 0;
     }
@@ -1080,7 +1090,7 @@ build_probe (gq_conn *c, uint64_t now, uint8_t *out, size_t cap, size_t *len,
   uint64_t pn;
   size_t pnl;
   unsigned k;
-  int r;
+  int r, sent_ping = 0;
   int limited = conn_path_budget (c, idx, &budget);
 
   if (maxdg > cap)
@@ -1098,22 +1108,25 @@ build_probe (gq_conn *c, uint64_t now, uint8_t *out, size_t cap, size_t *len,
   c->dcid = e->dcid;		/* Header size and header both use it.  */
   p->cap = maxdg - overhead_of (c, SP_APP);
   p->hdr_est = overhead_of (c, SP_APP);
-  for (k = 0; k < e->n_resp; k++)
-    if (room (p) >= 9)
-      {
-        gq_frame f;
-        sent_frame sf;
-
-        memset (&f, 0, sizeof f);
-        f.type = GQ_FRAME_PATH_RESPONSE;
-        memcpy (f.u.path_challenge.data, e->resp[k], 8);
-        memset (&sf, 0, sizeof sf);
-        sf.type = SF_PATH_RESPONSE;
-        add (p, &f, 1, &sf);
-      }
-  e->n_resp = 0;
-  if (e->need_challenge && room (p) >= 9)
+  /* A move to the server's preferred address starts with a PING, so the
+     packet is not a probe (RFC 9000 section 9.1).  The challenge follows,
+     once the server has challenged or a short timer has run: the first
+     packet a peer sends on the path is then its own challenge.  */
+  if (e->ping_first && !e->pinged && room (p) >= 1)
     {
+      gq_frame f;
+
+      memset (&f, 0, sizeof f);
+      f.type = GQ_FRAME_PING;
+      add (p, &f, 1, NULL);
+      e->pinged = 1;
+      sent_ping = 1;
+    }
+  else if (e->need_challenge && !e->chal_hold && room (p) >= 9)
+    {
+      /* The challenge goes alone.  A PATH_RESPONSE owed on this path
+         waits for the next datagram, so the first packet carries the
+         challenge.  */
       gq_frame f;
       sent_frame sf;
 
@@ -1124,6 +1137,23 @@ build_probe (gq_conn *c, uint64_t now, uint8_t *out, size_t cap, size_t *len,
       sf.type = SF_PATH_CHALLENGE;
       add (p, &f, 1, &sf);
       p->challenge = 1;
+    }
+  else
+    {
+      for (k = 0; k < e->n_resp; k++)
+        if (room (p) >= 9)
+          {
+            gq_frame f;
+            sent_frame sf;
+
+            memset (&f, 0, sizeof f);
+            f.type = GQ_FRAME_PATH_RESPONSE;
+            memcpy (f.u.path_challenge.data, e->resp[k], 8);
+            memset (&sf, 0, sizeof sf);
+            sf.type = SF_PATH_RESPONSE;
+            add (p, &f, 1, &sf);
+          }
+      e->n_resp = 0;
     }
   if (p->len == 0)
     {
@@ -1147,6 +1177,11 @@ build_probe (gq_conn *c, uint64_t now, uint8_t *out, size_t cap, size_t *len,
   }
   c->dcid = saved;
   c->tx_path = idx;
+  /* The PING is the client's word that it is moving.  Later datagrams
+     go to the new path, or an in-flight packet on the old one looks
+     like a migration back.  */
+  if (sent_ping && r == GQ_OK && *len > 0)
+    conn_path_commit (c, idx);
   free (p);
   return r;
 }
@@ -1243,6 +1278,12 @@ build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
       space *s = &c->sp[sp];
 
       if (s->discarded || (!s->have_wk && !(sp == SP_APP && early_usable (c))))
+        continue;
+      /* Server Handshake keys stay until HANDSHAKE_DONE is acknowledged,
+         so a late Handshake packet can still be read.  Nothing is sent
+         with them once the handshake is confirmed.  */
+      if (sp == SP_HANDSHAKE && c->role == GQ_ROLE_SERVER
+          && c->handshake_confirmed)
         continue;
       if (est + 1 >= maxdg)
         break;
@@ -1354,6 +1395,77 @@ log_blocked (gq_conn *c)
       && strcmp (why, "stream_flow_control"))
     dgram_why = why;
   ql_blocked (c, why, dgram_why);
+}
+
+/* An ACK of the client's first Initial, in the version it used, sent before
+   any packet of a version this server has switched to (RFC 9368 section 2.3).  */
+int
+conn_send_version_ack (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
+                       size_t *len)
+{
+  space *s = &c->sp[SP_INITIAL];
+  gq_packet_keys saved = s->wk;
+  uint32_t ver = c->version;
+  pk *p;
+  pk *pks[1];
+  uint64_t pn, budget = 0;
+  size_t pnl, maxdg;
+  int limited, r;
+
+  *len = 0;
+  c->lead_ack = 0;
+  if (s->discarded || !s->have_recv || cap < 128)
+    {
+      gq_packet_keys_wipe (&c->lead_wk);
+      return GQ_OK;
+    }
+  p = malloc (sizeof *p);
+  if (p == NULL)
+    {
+      gq_packet_keys_wipe (&c->lead_wk);
+      return GQ_ERR_NOMEM;
+    }
+  memset (p, 0, sizeof *p);
+  pk_log_reset (c, p, 0);
+  s->wk = c->lead_wk;
+  c->version = c->lead_version;
+  s->ack_pending = 1;
+  maxdg = conn_max_datagram (c);
+  if (maxdg > cap)
+    maxdg = cap;
+  limited = conn_path_budget (c, c->cur_path, &budget);
+  if (limited && budget < maxdg)
+    maxdg = (size_t) budget;
+  p->sp = SP_INITIAL;
+  p->cap = maxdg > overhead_of (c, SP_INITIAL)
+           ? maxdg - overhead_of (c, SP_INITIAL) : 0;
+  p->hdr_est = overhead_of (c, SP_INITIAL);
+  add_ack (c, p, now);
+  if (p->len == 0 || p->cap < p->len)
+    {
+      s->wk = saved;
+      c->version = ver;
+      gq_packet_keys_wipe (&c->lead_wk);
+      free (p);
+      return GQ_OK;
+    }
+  pn = s->next_pn++;
+  pnl = gq_pn_encoded_len (pn, s->have_acked, s->largest_acked);
+  while (p->len < 4 - pnl && p->len < p->cap)
+    {
+      p->pl[p->len++] = 0;
+      p->pad++;
+    }
+  pks[0] = p;
+  r = finish_datagram (c, now, pks, &pn, &pnl, 1,
+                       !limited || budget >= GQ_MIN_INITIAL_DATAGRAM
+                       ? GQ_MIN_INITIAL_DATAGRAM : 0,
+                       maxdg, c->cur_path, out, len);
+  s->wk = saved;
+  c->version = ver;
+  gq_packet_keys_wipe (&c->lead_wk);
+  free (p);
+  return r;
 }
 
 int

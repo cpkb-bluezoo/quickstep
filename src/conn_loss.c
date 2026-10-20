@@ -314,6 +314,10 @@ frames_acked (gq_conn *c, int sp, const sent_pkt *p)
             if (c->p[k].used && c->p[k].seq == f->a && c->p[k].retire)
               c->p[k].used = 0;
           break;
+        case SF_HANDSHAKE_DONE:
+          c->handshake_done_acked = 1;
+          conn_maybe_confirm (c);
+          break;
         default:
           break;
         }
@@ -611,7 +615,9 @@ pto_space (const gq_conn *c, uint64_t *when)
      (RFC 9002 section 6.2.2.1): the client must keep probing the handshake.  */
   for (sp = 0; sp < N_SPACES; sp++)
     if (!c->sp[sp].discarded && c->sp[sp].ae_in_flight
-        && (sp != SP_APP || c->handshake_confirmed))
+        && (sp != SP_APP || c->handshake_confirmed)
+        && !(sp == SP_HANDSHAKE && c->role == GQ_ROLE_SERVER
+             && c->handshake_confirmed))
       any = 1;
   if (!any)
     {
@@ -634,6 +640,9 @@ pto_space (const gq_conn *c, uint64_t *when)
       if (s->discarded || s->ae_in_flight == 0)
         continue;
       if (sp == SP_APP && !c->handshake_confirmed)
+        continue;
+      if (sp == SP_HANDSHAKE && c->role == GQ_ROLE_SERVER
+          && c->handshake_confirmed)
         continue;
       /* A probe needs credit for a packet: with less, there is no point in
          a timer (RFC 9002 section 6.2.2.1).  */
@@ -705,6 +714,8 @@ on_loss_timeout (gq_conn *c, uint64_t now)
      held by the window (RFC 9002 section 6.2.4), and gets the data across.  */
   for (i = 0; i < (size_t) sp; i++)
     if (!c->sp[i].discarded && c->sp[i].have_wk
+        && !(i == SP_HANDSHAKE && c->role == GQ_ROLE_SERVER
+             && c->handshake_confirmed)
         && gq_sstream_pending (&c->sp[i].cs, UINT64_MAX))
       c->sp[i].probes = 2;
   /* Retransmit what the oldest outstanding packet carried: it is the one
@@ -727,6 +738,27 @@ on_loss_timeout (gq_conn *c, uint64_t now)
    Initial with no CRYPTO frame).  Both probes of a PTO carry it, so the
    second repeats what the first sent.  What is acknowledged in the meantime
    is not sent (gq_sstream_on_lost).  */
+/* The oldest ack-eliciting packet still outstanding in SP goes back on the
+   queues, so the next datagram carries it.  A client's Initial probe is
+   taken as loss of that flight (RFC 9002 section 6.2.4, applied at once).  */
+void
+conn_repeat_oldest (gq_conn *c, int sp)
+{
+  space *s = &c->sp[sp];
+  size_t i;
+
+  if (s->discarded || !s->have_wk)
+    return;
+  for (i = 0; i < s->n_sent; i++)
+    if (s->sent[i].ack_eliciting && !s->sent[i].requeued
+        && s->sent[i].nframes)
+      {
+        requeue_frames (c, sp, &s->sent[i]);
+        s->sent[i].requeued = 1;
+        return;
+      }
+}
+
 void
 conn_probe_crypto (gq_conn *c, int sp)
 {
@@ -779,6 +811,34 @@ conn_early_accepted (gq_conn *c)
     }
   if (c->ev.early_data_result)
     c->ev.early_data_result (c->ev.user, 1);
+}
+
+/* A Retry threw away everything sent before it, 0-RTT included.  The keys
+   are unchanged, so the stream data goes out again as 0-RTT now, and the
+   packets stop counting against the window.  It is not a loss.  */
+void
+conn_discard_early_sent (gq_conn *c)
+{
+  space *s = &c->sp[SP_APP];
+  size_t i, j = 0;
+
+  for (i = 0; i < s->n_sent; i++)
+    {
+      sent_pkt *p = &s->sent[i];
+
+      if (!p->early)
+        {
+          s->sent[j++] = *p;
+          continue;
+        }
+      if (p->in_flight)
+        c->bytes_in_flight -= p->size;
+      if (p->ack_eliciting && s->ae_in_flight)
+        s->ae_in_flight--;
+      requeue_frames (c, SP_APP, p);
+      free_sent_frames (p);
+    }
+  s->n_sent = j;
 }
 
 /* Rejected: whatever went out as 0-RTT is void.  Stream data goes out again

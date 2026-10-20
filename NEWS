@@ -1,5 +1,23 @@
 quickstep NEWS - history of user-visible changes.
 
+* Noteworthy changes in release ?.? (????-??-??) [?]
+
+** QUIC, from the same interop failures gumdrop fixed: a server keeps its
+Handshake keys until HANDSHAKE_DONE is acknowledged, and a Handshake
+packet from a new address can migrate the connection.  A client Initial
+probe (a PING, or a ClientHello that does not advance) is answered by
+resending the oldest unacknowledged Initial and Handshake data.  0-RTT
+sent before a Retry goes out again as 0-RTT.  The server's connection ID
+is taken from its Initial packets, and settled by the first that carries
+CRYPTO.  A server that may change version acknowledges the first Initial
+in the client's version before switching.  A client moving to a preferred
+address sends a PING first, moves its own traffic there, and sends its
+challenge once the server has challenged.  A server challenges a new path
+before answering one.  When a peer at its connection-ID limit starts using
+a newer ID, the older ones are retired and a replacement is issued.  An
+application close is sent only in 1-RTT once those keys exist, so the
+error code is not replaced by APPLICATION_ERROR.
+
 * Noteworthy changes in release 0.0.3 (2026-10-18)
 
 ** gq_tls_info gains sig_scheme and client_sig_scheme: the SignatureScheme

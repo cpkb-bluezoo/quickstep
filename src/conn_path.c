@@ -191,6 +191,17 @@ start_validation (gq_conn *c, pathinfo *e, uint64_t now)
   e->n_chal = 0;
   e->chal_deadline = now + t;
   e->chal_next = now + t / MAX_CHALLENGES;
+  /* Hold the challenge briefly so a PING can go first, and so the peer's
+     own challenge is the first packet it sends on the path.  */
+  if (e->ping_first)
+    {
+      uint64_t wait = t / 4;
+
+      if (wait < 1000)
+        wait = 1000;
+      e->chal_hold = 1;
+      e->chal_hold_until = now + wait;
+    }
   if (e != &c->paths[c->cur_path])
     ql_migration (c, "probing_started", (int) (e - c->paths));
 }
@@ -217,8 +228,11 @@ retire_seq (gq_conn *c, uint64_t seq)
       c->p[i].retire = 1;
 }
 
+/* ANNOUNCE is 0 when the preferred-address PING has moved sending here
+   before the path has validated: the peer must see no further traffic on
+   the old path, and the migration is reported when validation succeeds.  */
 static void
-switch_to (gq_conn *c, int idx)
+switch_to (gq_conn *c, int idx, int announce)
 {
   int old = c->cur_path;
   pathinfo *n = &c->paths[idx];
@@ -247,10 +261,29 @@ switch_to (gq_conn *c, int idx)
   c->have_rtt = 0;
   c->srtt = CONN_INITIAL_RTT (c);
   c->rttvar = CONN_INITIAL_RTT (c) / 2;
+  if (!announce)
+    {
+      n->moved_quiet = 1;
+      return;
+    }
+  n->moved_quiet = 0;
   c->migrations++;
   ql_migration (c, "migration_started", idx);
   if (c->ev.migrated)
     c->ev.migrated (c->ev.user, &n->p);
+}
+
+/* The preferred-address PING has gone out: this path is where the
+   connection sends from now on.  Validation still has to succeed, and
+   failure returns to the path that was current.  */
+void
+conn_path_commit (gq_conn *c, int idx)
+{
+  if (idx < 0 || idx >= MAX_PATHS || !c->paths[idx].used)
+    return;
+  if (!c->paths[idx].auto_switch || idx == c->cur_path)
+    return;
+  switch_to (c, idx, 0);
 }
 
 static void
@@ -268,7 +301,15 @@ validated (gq_conn *c, int idx)
   if (c->ev.path_validated)
     c->ev.path_validated (c->ev.user, &e->p);
   if (e->auto_switch && idx != c->cur_path)
-    switch_to (c, idx);
+    switch_to (c, idx, 1);
+  else if (idx == c->cur_path && e->moved_quiet)
+    {
+      e->moved_quiet = 0;
+      c->migrations++;
+      ql_migration (c, "migration_started", idx);
+      if (c->ev.migrated)
+        c->ev.migrated (c->ev.user, &e->p);
+    }
   if (idx == c->cur_path)
     ql_migration (c, "migration_complete", idx);
   if (idx == c->cur_path && c->prev_path >= 0)
@@ -298,10 +339,12 @@ failed (gq_conn *c, int idx)
 {
   pathinfo *e = &c->paths[idx];
   gq_path p = e->p;
+  int quiet = e->moved_quiet;
 
   c->path_failures++;
-  ql_migration (c, idx == c->cur_path ? "migration_abandoned"
-                                      : "probing_abandoned", idx);
+  ql_migration (c, idx == c->cur_path && !quiet ? "migration_abandoned"
+                                                : "probing_abandoned", idx);
+  e->moved_quiet = 0;
   if (!e->local_init)
     {
       /* Do not switch straight back to something that just failed.  */
@@ -323,7 +366,8 @@ failed (gq_conn *c, int idx)
           free_entry (c, idx);
           if (c->ev.path_failed)
             c->ev.path_failed (c->ev.user, &p);
-          if (c->ev.migrated)
+          /* A move that was never reported has nothing to report now.  */
+          if (!quiet && c->ev.migrated)
             c->ev.migrated (c->ev.user, &c->paths[back].p);
           return;
         }
@@ -459,7 +503,7 @@ conn_path_after_packet (gq_conn *c, uint64_t now, int nonprobing, int highest)
   if (!c->paths[idx].validated && c->paths[idx].n_chal == 0
       && !c->paths[idx].need_challenge)
     start_validation (c, &c->paths[idx], now);
-  switch_to (c, idx);
+  switch_to (c, idx, 1);
   /* What is in flight went to the old address and may never be
      acknowledged, so the window the new path starts with can be full
      before it has sent anything.  The challenge must still be the first
@@ -486,6 +530,8 @@ conn_path_on_challenge (gq_conn *c, const uint8_t *data)
   e = &c->paths[idx];
   if (e->n_resp < 2)
     memcpy (e->resp[e->n_resp++], data, 8);
+  /* The peer has challenged: ours may go now, and ahead of the response.  */
+  e->chal_hold = 0;
 }
 
 void
@@ -545,6 +591,16 @@ conn_path_note_sent (gq_conn *c, int idx, size_t len)
     c->bytes_sent += len;
 }
 
+/* 1 when the datagram in hand arrived on some path other than the current
+   one, including a path not in the table yet.  */
+int
+conn_path_rx_changed (const gq_conn *c)
+{
+  if (!c->rx_known)
+    return 0;
+  return find (c, &c->rx) != c->cur_path;
+}
+
 int
 conn_path_probe_pending (gq_conn *c, uint64_t now)
 {
@@ -558,7 +614,14 @@ conn_path_probe_pending (gq_conn *c, uint64_t now)
 
       if (!e->used || i == c->cur_path || !e->p.remote.len)
         continue;
-      if (!(e->n_resp || e->need_challenge))
+      if (e->ping_first && !e->pinged)
+        return i;
+      if (e->chal_hold && c->now < e->chal_hold_until)
+        {
+          if (!e->n_resp)
+            continue;
+        }
+      else if (!(e->n_resp || e->need_challenge))
         continue;
       if (conn_path_budget (c, i, &b) && b < 100)
         continue;
@@ -597,6 +660,9 @@ conn_path_deadline (const gq_conn *c)
         continue;
       if (t == 0 || e->chal_deadline < t)
         t = e->chal_deadline;
+      if (e->chal_hold && e->chal_hold_until
+          && (t == 0 || e->chal_hold_until < t))
+        t = e->chal_hold_until;
       if (e->chal_sent < MAX_CHALLENGES && !e->need_challenge
           && e->chal_next < t)
         t = e->chal_next;
@@ -613,7 +679,11 @@ conn_path_on_timeout (gq_conn *c, uint64_t now)
     {
       pathinfo *e = &c->paths[i];
 
-      if (!e->used || e->chal_deadline == 0)
+      if (!e->used)
+        continue;
+      if (e->chal_hold && now >= e->chal_hold_until)
+        e->chal_hold = 0;
+      if (e->chal_deadline == 0)
         continue;
       if (now >= e->chal_deadline)
         failed (c, i);
@@ -658,6 +728,10 @@ probe_path (gq_conn *c, uint64_t now_us, const gq_path *path, int64_t want)
   idx = path_add (c, path, 1, 1, want);
   if (idx < 0)
     return GQ_ERR_RANGE;
+  /* Only the preferred-address move names a connection ID.  It is where
+     the client means to stay, so the first packet is not a probe.  */
+  if (c->role == GQ_ROLE_CLIENT && want >= 0)
+    c->paths[idx].ping_first = 1;
   start_validation (c, &c->paths[idx], now_us);
   conn_wake (c);
   return GQ_OK;
@@ -684,7 +758,7 @@ migrate (gq_conn *c, uint64_t now_us, const gq_path *path, int64_t want)
     return GQ_ERR_INVAL;
   if (c->paths[idx].validated)
     {
-      switch_to (c, idx);
+      switch_to (c, idx, 1);
       ql_migration (c, "migration_complete", idx);
     }
   else

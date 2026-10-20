@@ -187,6 +187,14 @@ typedef struct pathinfo
   uint8_t chal[MAX_CHALLENGES][8];	/* Outstanding challenge data.  */
   unsigned n_chal;
   uint8_t need_challenge;
+  uint8_t ping_first;		/* Preferred address: a PING, then the
+				   challenge (RFC 9000 section 9.1).  */
+  uint8_t pinged;
+  uint8_t moved_quiet;		/* Sending here, not reported until it
+				   validates.  */
+  uint8_t chal_hold;		/* The challenge waits for the peer's, or
+				   for chal_hold_until.  */
+  uint64_t chal_hold_until;
   unsigned chal_sent;
   uint64_t chal_next, chal_deadline;
   uint32_t pmtu;		/* The datagram size found for it, or 0.  */
@@ -229,6 +237,11 @@ struct gq_conn
   size_t peer_tp_raw_len;
   gq_packet_keys orig_rk;	/* Server: Initial keys of orig_version.  */
   uint8_t have_orig_rk;
+  /* Server: an ACK of the first Initial, sealed in the client's version
+     before a compatible switch (RFC 9368 section 2.3).  */
+  uint8_t lead_ack;
+  uint32_t lead_version;
+  gq_packet_keys lead_wk;
 
   gq_tls *tls;
   gq_tls_config ctls;		/* Copies of the caller's configuration:  */
@@ -246,10 +259,15 @@ struct gq_conn
   uint8_t handshake_confirmed;
   uint8_t handshake_done_pending;
   uint8_t handshake_done_sent;
+  uint8_t handshake_done_acked;	/* Server: Handshake keys stay until then.  */
   uint8_t connected_notified;
   uint8_t got_first_initial;		/* Server: keys derived.  */
   uint8_t peer_addr_validated;
   uint8_t got_peer_packet;
+  uint8_t scid_settled;		/* Client: an Initial with CRYPTO fixed dcid.  */
+  uint8_t pkt_crypto;		/* The packet in hand carried CRYPTO.  */
+  uint8_t client_probed;	/* Server: this datagram was an Initial probe.  */
+  uint64_t initial_crypto_end;	/* How far the ClientHello has been seen.  */
 
   gq_cid odcid;			/* Original destination CID (client's).  */
   gq_cid initial_dcid;		/* Destination ID the Initial keys come from.  */
@@ -265,6 +283,7 @@ struct gq_conn
   lcid l[MAX_LCID];
   pcid p[MAX_PCID];
   uint64_t next_lseq;
+  uint64_t our_retire_prior;	/* retire_prior_to on the IDs we issue.  */
   uint64_t peer_retire_prior;
   gq_cid dcid;			/* Current destination CID.  */
   uint8_t dcid_set;
@@ -391,6 +410,12 @@ struct gq_conn
   char close_reason[64];
   size_t close_reason_len;
   uint8_t closed_notified;
+  /* A Handshake CONNECTION_CLOSE cannot carry an application code: it
+     says APPLICATION_ERROR, and the 1-RTT packet of the same datagram
+     may carry the real one.  Held until the datagram has been read.  */
+  uint8_t rx_close_set;
+  gq_conn_close_info rx_close;
+  char rx_close_reason[64];
 
   /* Set by a handler that decided the connection must close.  */
   int err_set;
@@ -454,6 +479,9 @@ uint64_t conn_wall_seconds (const gq_conn *c);
 int conn_apply_peer_params (gq_conn *c);
 int conn_discard_space (gq_conn *c, int sp);
 void conn_maybe_confirm (gq_conn *c);
+void conn_cid_peer_using (gq_conn *c, const uint8_t *cid, size_t len);
+int conn_send_version_ack (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
+                           size_t *len);
 void conn_notify_connected (gq_conn *c, const gq_tls_info *info);
 size_t conn_max_datagram (const gq_conn *c);
 
@@ -533,6 +561,8 @@ uint64_t conn_loss_deadline (const gq_conn *c);
 void on_loss_timeout (gq_conn *c, uint64_t now);
 void requeue_frames (gq_conn *c, int sp, sent_pkt *p);
 void conn_probe_crypto (gq_conn *c, int sp);
+void conn_repeat_oldest (gq_conn *c, int sp);
+void conn_discard_early_sent (gq_conn *c);
 uint64_t pto_interval (const gq_conn *c, int sp);
 int conn_can_send_ae (const gq_conn *c);
 void cc_init (gq_conn *c);
@@ -569,6 +599,8 @@ void conn_path_account_recv (gq_conn *c, size_t len);
 void conn_path_on_challenge (gq_conn *c, const uint8_t *data);
 void conn_path_on_response (gq_conn *c, const uint8_t *data, uint64_t now);
 int conn_path_probe_pending (gq_conn *c, uint64_t now);
+void conn_path_commit (gq_conn *c, int idx);
+int conn_path_rx_changed (const gq_conn *c);
 void conn_path_challenge_data (gq_conn *c, int idx, uint8_t out[8]);
 uint64_t conn_path_deadline (const gq_conn *c);
 void conn_path_on_timeout (gq_conn *c, uint64_t now);
