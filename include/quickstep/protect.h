@@ -101,16 +101,20 @@ int gq_packet_seal (const gq_packet_keys *k, uint64_t pn, uint8_t *pkt,
    the first byte (for example the key phase bit of a short header) and
    the packet number bytes, and returns their count in *PN_LEN.  It does
    not authenticate anything.  LEN is the packet size including the tag.
-   GQ_ERR_ENCODING if the packet is too short to sample.  */
+   GQ_ERR_RANGE if the packet is too short to sample: it cannot be
+   unprotected and is to be discarded, not treated as an error of the
+   connection.  */
 int gq_hp_remove (const gq_packet_keys *k, uint8_t *pkt, size_t len,
                   size_t pn_offset, size_t *pn_len);
 
 /* Receive side, step 2: authenticate and decrypt in place.  FULL_PN is
    the packet number reconstructed with gq_pn_decode.  On success the
    plaintext frames are PKT[*PAYLOAD_OFF .. *PAYLOAD_OFF + *PAYLOAD_LEN).
-   On failure returns GQ_ERR_CRYPTO and leaves no plaintext behind.  A
-   nonzero reserved header bit after decryption is GQ_ERR_ENCODING (the
-   connection layer should treat it as a protocol violation).  */
+   On failure returns GQ_ERR_CRYPTO and leaves no plaintext behind, or
+   GQ_ERR_RANGE if the packet is too short to hold a tag (discard it).  A
+   nonzero reserved header bit after decryption is GQ_ERR_ENCODING, the only
+   case in which it is returned: the packet was authentic, so the connection
+   layer should treat it as a protocol violation.  */
 int gq_packet_decrypt (const gq_packet_keys *k, uint64_t full_pn,
                        uint8_t *pkt, size_t len, size_t pn_offset,
                        size_t pn_len, size_t *payload_off,

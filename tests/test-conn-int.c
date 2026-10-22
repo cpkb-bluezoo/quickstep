@@ -573,6 +573,71 @@ test_stream_frames_after_the_end (void)
   pair_free (p);
 }
 
+/* An Initial whose Length field is too small to hold a header protection
+   sample cannot be unprotected, and anyone who has seen the connection IDs
+   (they are in the clear) can send one.  RFC 9000 section 12.2 and RFC 9001
+   section 5.4: it is discarded; it must not close the connection.  */
+static size_t
+tiny_initial (uint8_t *out, uint32_t version, const uint8_t *dcid,
+              size_t dcid_len, const uint8_t *scid, size_t scid_len,
+              unsigned length)
+{
+  size_t n = 0;
+
+  out[n++] = version == GQ_VERSION_2 ? 0xd0 : 0xc0;
+  out[n++] = (uint8_t) (version >> 24);
+  out[n++] = (uint8_t) (version >> 16);
+  out[n++] = (uint8_t) (version >> 8);
+  out[n++] = (uint8_t) version;
+  out[n++] = (uint8_t) dcid_len;
+  memcpy (out + n, dcid, dcid_len);
+  n += dcid_len;
+  out[n++] = (uint8_t) scid_len;
+  memcpy (out + n, scid, scid_len);
+  n += scid_len;
+  out[n++] = 0;			/* No token.  */
+  out[n++] = (uint8_t) length;	/* Under 64: one byte.  */
+  memset (out + n, 0x5a, length);
+  return n + length;
+}
+
+static void
+test_tiny_long_packets_are_dropped (void)
+{
+  struct pair *p = pair_new (NULL, NULL, 0, 1);
+  gq_conn *c = p->cli.c, *s = p->srv.c;
+  uint8_t pkt[256], first[2048];
+  gq_cid ccid[4];
+  size_t n, flen = 0;
+  unsigned len;
+  uint8_t fake_scid[8] = { 9, 9, 9, 9, 9, 9, 9, 9 };
+
+  CHECK_EQ (gq_conn_local_cids (c, ccid, 4), 1);
+  /* Client, before the server has said anything.  */
+  for (len = 1; len < 20; len++)
+    {
+      n = tiny_initial (pkt, gq_conn_version (c), ccid[0].data, ccid[0].len,
+                        fake_scid, sizeof fake_scid, len);
+      gq_conn_recv (c, p->net.now, pkt, n);
+      CHECK (c->state < GQ_CONN_CLOSING);
+      CHECK_EQ (p->cli.closed, 0);
+    }
+  /* Server, once the client's Initial has started it.  */
+  CHECK_EQ (gq_conn_send (c, p->net.now, first, sizeof first, &flen), GQ_OK);
+  CHECK (flen >= GQ_MIN_INITIAL_DATAGRAM);
+  gq_conn_recv (s, p->net.now, first, flen);
+  CHECK (s->state < GQ_CONN_CLOSING);
+  for (len = 1; len < 20; len++)
+    {
+      n = tiny_initial (pkt, gq_conn_version (s), s->initial_dcid.data,
+                        s->initial_dcid.len, ccid[0].data, ccid[0].len, len);
+      gq_conn_recv (s, p->net.now, pkt, n);
+      CHECK (s->state < GQ_CONN_CLOSING);
+      CHECK_EQ (p->srv.closed, 0);
+    }
+  pair_free (p);
+}
+
 /* RFC 9000 section 14.1: the datagram of a server's first flight is padded to
    1200 bytes.  */
 static void
@@ -3171,6 +3236,7 @@ main (void)
   test_acked_acks_are_retired ();
   test_persistent_congestion_over_several_rounds ();
   test_stream_frames_after_the_end ();
+  test_tiny_long_packets_are_dropped ();
   test_server_first_flight_padded ();
   test_padding_not_in_1rtt ();
   test_handshake_probes_carry_crypto ();

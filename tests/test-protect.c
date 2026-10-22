@@ -236,9 +236,12 @@ test_seal_errors_and_reserved (void)
             GQ_OK);
   CHECK_EQ (out, 21);
 
-  /* Too short to sample on receipt.  */
+  /* Too short to sample on receipt.  This is not a malformed packet the
+     connection should react to, only one that cannot be unprotected, so it
+     must not look like the reserved-bits error below (RFC 9001 section
+     5.4: such packets are discarded).  */
   CHECK_EQ (gq_packet_open (&k, 0, 0, pkt, 20, 1, &pn, &off, &plen),
-            GQ_ERR_ENCODING);
+            GQ_ERR_RANGE);
 
   /* Reserved bits set in the plaintext header: authentic, but illegal.  */
   gq_short_header_build (NULL, 0, 0, 0, 7, 1, pkt, sizeof pkt, &hdr);

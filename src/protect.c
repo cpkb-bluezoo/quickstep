@@ -219,8 +219,12 @@ gq_hp_remove (const gq_packet_keys *k, uint8_t *pkt, size_t len,
 {
   if (k == NULL || pkt == NULL || pn_len == NULL || pn_offset == 0)
     return GQ_ERR_INVAL;
+  /* Too short to sample.  Not GQ_ERR_ENCODING: that is reserved for the
+     authentic-but-illegal reserved bits, a protocol violation.  A packet
+     that cannot be unprotected is simply discarded, and anyone who has seen
+     the (cleartext) connection IDs can send one.  */
   if (len < pn_offset + 4 + GQ_HP_SAMPLE_LEN)
-    return GQ_ERR_ENCODING;
+    return GQ_ERR_RANGE;
   return hp_mask (k, pkt, pn_offset, pn_len, 1);
 }
 
@@ -238,7 +242,7 @@ gq_packet_decrypt (const gq_packet_keys *k, uint64_t full_pn, uint8_t *pkt,
       || pn_len < 1 || pn_len > 4)
     return GQ_ERR_INVAL;
   if (len < hdr + GQ_AEAD_TAG_LEN)
-    return GQ_ERR_ENCODING;
+    return GQ_ERR_RANGE;	/* Cannot be a packet; see gq_hp_remove.  */
 
   make_nonce (k, full_pn, nonce);
   r = gq_aead_open (k->aead, k->key, gq_aead_key_size (k->aead), nonce,
