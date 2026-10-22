@@ -1413,6 +1413,32 @@ test_undecryptable_initial_is_forgotten (void)
   net_free (net);
 }
 
+/* The ID a Retry makes the client use is the connection's first, and the
+   endpoint finds short-header packets by IDs of its own length: with an ID
+   length other than the Retry default the two must still agree, or the
+   server resets the client it just asked for proof from.  */
+static void
+test_retry_with_other_cid_length (void)
+{
+  gq_endpoint_config sc;
+  struct net *net;
+  int connected = 0;
+  unsigned i;
+
+  memset (&sc, 0, sizeof sc);
+  sc.conn.cid_len = 12;
+  sc.admit.require_retry = 1;
+  net = net_new (&sc, 16, NULL);
+  client_conn (net, 1, NULL);
+  CHECK (run (net, all_clients_done, 60000000));
+  CHECK (net->retries >= 1);
+  for (i = 0; i < (unsigned) net->node[1].napp; i++)
+    connected += net->node[1].app[i].connected;
+  CHECK_EQ (connected, 1);
+  CHECK_EQ (net->node[1].app[0].closed, 0);
+  net_free (net);
+}
+
 /* Busy servers ask for a Retry without being told to: by default once half
    of max_connections exist, so that the rest can only be taken up by clients
    that can receive at their address.  */
@@ -1498,6 +1524,7 @@ main (void)
   test_limits_and_refusal ();
   test_undecryptable_initial_is_forgotten ();
   test_retry_by_default_when_busy ();
+  test_retry_with_other_cid_length ();
   test_idle_timeouts ();
   test_rebinding_through_endpoint ();
   test_late_initial ();

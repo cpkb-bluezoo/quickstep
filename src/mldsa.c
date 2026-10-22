@@ -661,6 +661,8 @@ gqi_mldsa_key_from_pem (const void *pem, size_t len, struct gqi_mldsa_key *key)
     return GQ_ERR_NOMEM;
   if (!b64_decode (b, (size_t) (e - b), der, (size_t) (e - b) / 4 * 3 + 3, &dl))
     {
+      /* Some of the key may have been decoded before it failed.  */
+      gq_wipe (der, (size_t) (e - b) / 4 * 3 + 3);
       free (der);
       return GQ_ERR_UNSUPPORTED;
     }

@@ -46,14 +46,14 @@ gq_token_keys_rotate (gq_token_keys *k)
   memcpy (k->key[1], k->key[0], GQ_TOKEN_KEY_LEN);
   memcpy (k->key[0], fresh, sizeof fresh);
   k->have_prev = 1;
-  memset (fresh, 0, sizeof fresh);
+  gq_wipe (fresh, sizeof fresh);
   return GQ_OK;
 }
 
 void
 gq_token_keys_wipe (gq_token_keys *k)
 {
-  memset (k, 0, sizeof *k);
+  gq_wipe (k, sizeof *k);
 }
 
 int
@@ -68,6 +68,12 @@ gq_token_make (const gq_token_keys *k, enum gq_token_kind kind,
   if (kind != GQ_TOKEN_RETRY && kind != GQ_TOKEN_NEW_TOKEN)
     return GQ_ERR_INVAL;
   if (kind == GQ_TOKEN_RETRY && (odcid == NULL || scid == NULL))
+    return GQ_ERR_INVAL;
+  /* The IDs are copied into PT below, which has room for two of at most
+     GQ_MAX_CID_LEN, and parse() wants both present.  */
+  if (kind == GQ_TOKEN_RETRY
+      && (odcid->len == 0 || odcid->len > GQ_MAX_CID_LEN
+          || scid->len == 0 || scid->len > GQ_MAX_CID_LEN))
     return GQ_ERR_INVAL;
   pt[n++] = (uint8_t) kind;
   for (i = 0; i < 8; i++)

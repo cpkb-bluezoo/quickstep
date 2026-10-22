@@ -186,8 +186,11 @@ on_param (void *user, uint64_t id, gq_slice v)
         tp->chosen_version = (uint32_t) v.data[0] << 24 | (uint32_t) v.data[1] << 16
                              | (uint32_t) v.data[2] << 8 | v.data[3];
         n = v.len / 4 - 1;
+        /* All of them or none: a client compares a Version Negotiation
+           packet with this list to see if it was forged, and a list cut
+           short could make a forgery look right.  */
         if (n > GQ_TP_MAX_VERSIONS)
-          n = GQ_TP_MAX_VERSIONS;	/* Keep what fits; the rest is ignored.  */
+          goto bad;
         for (i = 0; i < n; i++)
           tp->available_versions[i] = (uint32_t) v.data[4 + 4 * i] << 24
             | (uint32_t) v.data[5 + 4 * i] << 16

@@ -75,7 +75,10 @@ typedef struct gq_cid
   uint8_t data[GQ_MAX_CID_LEN];
 } gq_cid;
 
-#define GQ_TP_MAX_VERSIONS 8
+/* Versions in a version_information list (RFC 9368), and in the lists of
+   versions a connection or an admission step is configured with.  A peer's
+   list longer than this is refused.  */
+#define GQ_TP_MAX_VERSIONS 16
 
 typedef struct gq_preferred_address
 {

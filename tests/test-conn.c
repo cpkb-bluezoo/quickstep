@@ -2580,6 +2580,10 @@ test_admit_input (void)
                        &acc);
   CHECK_EQ (act, GQ_ADMIT_REPLY);
   CHECK (rl > 30 && rl < 200 && (out[0] & 0x80));
+  /* Asking for a Retry with no key to make tokens with is a mistake, not a
+     reason to accept everyone unvalidated.  */
+  CHECK_EQ (gq_quic_admit (NULL, &ac, addr, 4, dg, 1200, 5, out, sizeof out,
+                           &rl, &acc), GQ_ERR_INVAL);
   /* Too short a datagram, a short-header packet, junk: dropped.  */
   CHECK_EQ (gq_quic_admit (&keys, &ac, addr, 4, dg, 1199, 5, out, sizeof out,
                            &rl, &acc), GQ_ADMIT_DROP);

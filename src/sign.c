@@ -427,7 +427,7 @@ gq_privkey_from_pem_file (gq_privkey **out, const char *path)
   r = n ? gq_privkey_from_pem (out, buf, n) : GQ_ERR_INVAL;
   if (buf)
     {
-      memset (buf, 0, cap);	/* Key material.  */
+      gq_wipe (buf, cap);	/* Key material.  */
       free (buf);
     }
   return r;

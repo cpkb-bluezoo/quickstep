@@ -52,6 +52,10 @@ gq_quic_admit (const gq_token_keys *keys, const gq_admit_config *cfg,
   memset (acc, 0, sizeof *acc);
   if (addr_len > sizeof acc->addr)
     return GQ_ERR_INVAL;
+  /* Without a key there are no tokens, so no Retry can be asked for and
+     every client would be taken unvalidated: not what require_retry says.  */
+  if (cfg && cfg->require_retry && keys == NULL)
+    return GQ_ERR_INVAL;
   if (len < GQ_MIN_INITIAL_DATAGRAM || !(data[0] & 0x80))
     return GQ_ADMIT_DROP;
   r = gq_long_header_parse (data, len, &h);
@@ -104,7 +108,7 @@ gq_quic_admit (const gq_token_keys *keys, const gq_admit_config *cfg,
     }
   if (have_token)
     acc->validated = 1;
-  else if (cfg && cfg->require_retry && keys)
+  else if (cfg && cfg->require_retry)
     {
       gq_cid odcid, scid;
       uint8_t token[GQ_TOKEN_MAX], bits = 0;

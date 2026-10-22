@@ -631,6 +631,15 @@ gq_endpoint_new (gq_endpoint **out, const gq_endpoint_config *config,
   ep->cid_len = config->conn.cid_len ? config->conn.cid_len : 8;
   if (ep->cid_len > GQ_MAX_CID_LEN)
     ep->cid_len = GQ_MAX_CID_LEN;
+  /* The ID a Retry makes the client use becomes the connection's first, and
+     the datagrams that follow are routed by IDs of ep->cid_len bytes.  */
+  if (ep->cfg.admit.retry_cid_len == 0)
+    ep->cfg.admit.retry_cid_len = ep->cid_len;
+  else if (ep->cfg.admit.retry_cid_len != ep->cid_len)
+    {
+      free (ep);
+      return GQ_ERR_INVAL;
+    }
   if (!config->have_reset_key)
     gq_random (ep->cfg.reset_key, sizeof ep->cfg.reset_key);
   gq_random (&ep->seed, sizeof ep->seed);

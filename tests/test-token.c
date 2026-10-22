@@ -111,6 +111,26 @@ main (void)
   }
   CHECK_EQ (gq_token_make (&k, GQ_TOKEN_RETRY, addr, 6, NULL, NULL, 1, tok,
                            &len), GQ_ERR_INVAL);
+  /* A connection ID is at most 20 bytes, and a Retry token needs both: a
+     longer length would read past the array and overflow the plaintext, and
+     an empty one makes a token that cannot be parsed back.  */
+  {
+    gq_cid bad = mkcid (20, 7);
+
+    bad.len = 21;
+    CHECK_EQ (gq_token_make (&k, GQ_TOKEN_RETRY, addr, 6, &bad, &sc, 1, tok,
+                             &len), GQ_ERR_INVAL);
+    CHECK_EQ (gq_token_make (&k, GQ_TOKEN_RETRY, addr, 6, &od, &bad, 1, tok,
+                             &len), GQ_ERR_INVAL);
+    bad.len = 255;
+    CHECK_EQ (gq_token_make (&k, GQ_TOKEN_RETRY, addr, 6, &bad, &sc, 1, tok,
+                             &len), GQ_ERR_INVAL);
+    bad.len = 0;
+    CHECK_EQ (gq_token_make (&k, GQ_TOKEN_RETRY, addr, 6, &bad, &sc, 1, tok,
+                             &len), GQ_ERR_INVAL);
+    CHECK_EQ (gq_token_make (&k, GQ_TOKEN_RETRY, addr, 6, &od, &bad, 1, tok,
+                             &len), GQ_ERR_INVAL);
+  }
   gq_token_keys_wipe (&k);
   TST_DONE ();
 }

@@ -214,6 +214,37 @@ test_version_information (void)
       CHECK_EQ (gq_tp_decode (bad, sizeof wire - i, GQ_ROLE_CLIENT, &back),
                 GQ_ERR_ENCODING);
     }
+  /* The list is what the downgrade check of a client compares a Version
+     Negotiation packet against: one cut short, silently, would make a
+     forged packet look right.  So a list longer than we hold is refused, not
+     truncated.  */
+  {
+    uint8_t big[8 + 4 * (GQ_TP_MAX_VERSIONS + 2)];
+    size_t k, v;
+
+    for (v = GQ_TP_MAX_VERSIONS; v <= GQ_TP_MAX_VERSIONS + 1; v++)
+      {
+        size_t body = 4 + 4 * v, h = 0;
+
+        big[h++] = 0x11;
+        if (body < 64)
+          big[h++] = (uint8_t) body;
+        else
+          {
+            big[h++] = (uint8_t) (0x40 | (body >> 8));
+            big[h++] = (uint8_t) body;
+          }
+        memset (big + h, 0, body);
+        big[h] = 0x6b; big[h + 1] = 0x33; big[h + 2] = 0x43;
+        big[h + 3] = 0xcf;
+        for (k = 0; k < v; k++)
+          big[h + 4 + 4 * k + 3] = (uint8_t) (1 + k);
+        CHECK_EQ (gq_tp_decode (big, h + body, GQ_ROLE_SERVER, &back),
+                  v == GQ_TP_MAX_VERSIONS ? GQ_OK : GQ_ERR_ENCODING);
+        if (v == GQ_TP_MAX_VERSIONS)
+          CHECK_EQ (back.n_available_versions, GQ_TP_MAX_VERSIONS);
+      }
+  }
   {
     static const uint8_t zero[] = { 0x11, 4, 0, 0, 0, 0 };
     uint8_t dup[32];
