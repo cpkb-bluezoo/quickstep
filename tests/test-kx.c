@@ -20,7 +20,15 @@
 # include <config.h>
 #endif
 
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <gcrypt.h>
+
 #include <quickstep/status.h>
+#include <quickstep/crypto.h>
 #include <quickstep/policy.h>
 #include <quickstep/kx.h>
 
@@ -540,6 +548,83 @@ test_errors (void)
                            sizeof server, &n, ss, 31, &m), GQ_ERR_BUFSIZE);
 }
 
+/* How many requests for libgcrypt's strongest level of randomness there have
+   been, from the statistics its own generator keeps.  They are logged, so
+   the log is caught.  Only that generator keeps them: with another (FIPS
+   mode, the system one) *KNOWN is 0.  */
+static char g_log[1024];
+
+static void
+log_cb (void *user, int level, const char *fmt, va_list ap)
+{
+  size_t n = strlen (g_log);
+
+  (void) user;
+  (void) level;
+  vsnprintf (g_log + n, sizeof g_log - n, fmt, ap);
+}
+
+static unsigned long
+strongest_requests (int *known)
+{
+  const char *p;
+
+  g_log[0] = 0;
+  gcry_control (GCRYCTL_DUMP_RANDOM_STATS);
+  p = strstr (g_log, "getlvl2=");
+  *known = p != NULL;
+  return p ? strtoul (p + 8, NULL, 10) : 0;
+}
+
+/* A key share is ephemeral: made for one handshake and gone.  Asking
+   libgcrypt's strongest level for the ML-KEM part, as its key generation
+   does by default, makes it gather jitter entropy on every call, which took
+   2.4 milliseconds of a handshake that otherwise took two.  The ordinary
+   strong level is what libgcrypt itself uses for the other ephemeral keys
+   and for encapsulation.  So the groups are made without a request for the
+   strongest level, and each key is different.  */
+static void
+test_ephemeral_keys_not_strongest (void)
+{
+  static const unsigned groups[] = {
+    GQ_GROUP_X25519_MLKEM768, GQ_GROUP_SECP256R1_MLKEM768,
+    GQ_GROUP_SECP384R1_MLKEM1024, GQ_GROUP_MLKEM512, GQ_GROUP_MLKEM768,
+    GQ_GROUP_MLKEM1024, GQ_GROUP_X25519, GQ_GROUP_SECP256R1
+  };
+  size_t i;
+  int known, known2;
+  unsigned long before, after;
+
+  /* Deprecated, and the only way libgcrypt offers to catch what it logs.  */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  gcry_set_log_handler (log_cb, NULL);
+#pragma GCC diagnostic pop
+  CHECK_EQ (gq_crypto_init (), GQ_OK);
+  before = strongest_requests (&known);
+  if (!known)
+    {
+      fprintf (stderr, "note: libgcrypt does not keep random statistics "
+               "here (FIPS mode or another generator); skipped\n");
+      return;
+    }
+  for (i = 0; i < sizeof groups / sizeof groups[0]; i++)
+    {
+      gq_kx_key a, b;
+
+      CHECK_EQ (gq_kx_generate (groups[i], &a), GQ_OK);
+      CHECK_EQ (gq_kx_generate (groups[i], &b), GQ_OK);
+      CHECK_EQ (a.share_len, b.share_len);
+      CHECK (memcmp (a.share, b.share, a.share_len) != 0);
+      CHECK (memcmp (a.secret, b.secret, 32) != 0);
+      gq_kx_key_wipe (&a);
+      gq_kx_key_wipe (&b);
+    }
+  after = strongest_requests (&known2);
+  CHECK (known2);
+  CHECK_EQ (after, before);
+}
+
 int
 main (void)
 {
@@ -553,5 +638,6 @@ main (void)
   test_invalid_points ();
   test_noncanonical_points ();
   test_small_order_points ();
+  test_ephemeral_keys_not_strongest ();
   TST_DONE ();
 }

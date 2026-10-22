@@ -54,6 +54,10 @@ test_mlkem_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
 # contexts a packet or a record opens.
 test_protect_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
 test_protect_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
+# Reads libgcrypt's random statistics to see what level of randomness a key
+# share asks for.
+test_kx_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
+test_kx_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
 test_record_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
 test_record_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
 test_record12_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)

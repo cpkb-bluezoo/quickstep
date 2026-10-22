@@ -130,6 +130,13 @@ the keys it starts from have them.  A record must be initialised with
 gq_record_init or gq_record12_init before gq_record_set_keys, which now lets
 go of the context of the keys it replaces; on memory that was never
 initialised it used to work by luck, and now it does not.
+** Key exchange: an ML-KEM key share, in the hybrid groups and the pure
+ones, is made with coins drawn at libgcrypt's ordinary strong level, not the
+strongest it asks for by default.  The strongest level gathers jitter
+entropy on every call, which took 2.4 milliseconds, more than the rest of a
+client handshake; the share lasts one handshake, like the elliptic curve key
+beside it.  Generating X25519MLKEM768 takes 0.12 milliseconds instead of 2.5,
+and a handshake 1.7 instead of 4.5.
 ** QUIC streams: acknowledging data no longer shifts the rest of the send
 buffer down, which copied a whole buffer for every acknowledged frame (256
 KiB by default) and was most of the time of a transfer.  A chunk that

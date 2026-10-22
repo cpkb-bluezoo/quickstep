@@ -245,8 +245,20 @@ gq_kx_generate (unsigned group, gq_kx_key *key)
       return GQ_ERR_CRYPTO;
     if (g->kem_algo)
       {
-        if (gcry_kem_keypair (g->kem_algo, pq_pub, g->kem_pub,
-                              key->secret + g->ec_sec, g->kem_sec))
+        /* The coins of FIPS 203 (d and z).  Left to itself libgcrypt draws
+           them at its strongest level, for a key that may be long lived,
+           which makes it gather jitter entropy on every call: 2.4
+           milliseconds, more than the rest of a handshake.  This key lasts
+           one handshake, like the elliptic curve key above, which libgcrypt
+           makes at the ordinary strong level, so draw them at that.  */
+        uint8_t coins[2 * GCRY_KEM_MLKEM_RANDOM_LEN];
+        int failed = gq_random (coins, sizeof coins) != GQ_OK
+                     || gcry_kem_genkey (g->kem_algo, pq_pub, g->kem_pub,
+                                         key->secret + g->ec_sec, g->kem_sec,
+                                         coins, sizeof coins);
+
+        gq_wipe (coins, sizeof coins);
+        if (failed)
           {
             gq_kx_key_wipe (key);
             return GQ_ERR_CRYPTO;
