@@ -36,6 +36,7 @@ struct gq_replay_cache
 {
   struct entry *slot;
   size_t n;			/* Power of two.  */
+  size_t used;			/* Slots that are not empty, live or dead.  */
   size_t live;
   size_t limit;			/* Refuse above this many live entries.  */
 };
@@ -93,42 +94,95 @@ home (const gq_replay_cache *c, const uint8_t id[32])
   return h & (c->n - 1);
 }
 
+/* Put the live entries into a fresh table, dropping the dead.  A slot that
+   has held an entry is never empty again, and a search for an ID not in the
+   table only stops at an empty slot, so without this the table fills up with
+   dead entries and every such search walks all of it.  Returns 0 if there is
+   no memory for the new table (the old one is left as it was).  */
+static int
+rebuild (gq_replay_cache *c, uint64_t now_ms)
+{
+  struct entry *fresh = calloc (c->n, sizeof *fresh);
+  size_t i, j, live = 0;
+
+  if (fresh == NULL)
+    return 0;
+  for (i = 0; i < c->n; i++)
+    {
+      const struct entry *e = &c->slot[i];
+
+      if (e->expires <= now_ms)		/* Empty, or dead.  */
+        continue;
+      j = home (c, e->id);
+      while (fresh[j].expires != 0)
+        j = (j + 1) & (c->n - 1);
+      fresh[j] = *e;
+      live++;
+    }
+  free (c->slot);
+  c->slot = fresh;
+  c->used = c->live = live;
+  return 1;
+}
+
 int
 gq_replay_cache_check (void *cache, const uint8_t id_hash[32],
                        uint64_t expires_ms, uint64_t now_ms)
 {
   gq_replay_cache *c = cache;
-  size_t i, idx, first_free = (size_t) -1;
+  size_t i, idx, first_free;
+  int rebuilt = 0;
 
   if (c == NULL || id_hash == NULL || expires_ms <= now_ms)
     return 0;			/* Expired tickets cannot carry early data.  */
 
-  idx = home (c, id_hash);
-  for (i = 0; i < c->n; i++)
+  for (;;)
     {
-      struct entry *e = &c->slot[(idx + i) & (c->n - 1)];
+      struct entry *e;
 
-      if (e->expires == 0)
+      first_free = (size_t) -1;
+      idx = home (c, id_hash);
+      for (i = 0; i < c->n; i++)
         {
-          if (first_free == (size_t) -1)
-            first_free = (idx + i) & (c->n - 1);
-          break;		/* End of the probe chain: not present.  */
+          e = &c->slot[(idx + i) & (c->n - 1)];
+
+          if (e->expires == 0)
+            {
+              if (first_free == (size_t) -1)
+                first_free = (idx + i) & (c->n - 1);
+              break;		/* End of the probe chain: not present.  */
+            }
+          if (e->expires <= now_ms)
+            {
+              /* A dead entry: its ticket can no longer be replayed, so the
+                 slot is reusable, but do not break the chain by clearing.  */
+              if (first_free == (size_t) -1)
+                first_free = (idx + i) & (c->n - 1);
+              continue;
+            }
+          if (memcmp (e->id, id_hash, 32) == 0)
+            return 0;		/* Seen before: a replay.  */
         }
-      if (e->expires <= now_ms)
+
+      /* Taking an empty slot uses it up for good: before the table has too
+         few left to end a search quickly (a quarter of it), start afresh
+         with the live entries.  */
+      if (!rebuilt
+          && (first_free == (size_t) -1
+              || (c->slot[first_free].expires == 0
+                  && c->used + 1 > c->n / 4 * 3)))
         {
-          /* A dead entry: its ticket can no longer be replayed, so the
-             slot is reusable, but do not break the chain by clearing.  */
-          if (first_free == (size_t) -1)
-            first_free = (idx + i) & (c->n - 1);
+          if (!rebuild (c, now_ms))
+            return 0;		/* No memory: not fresh, which is safe.  */
+          rebuilt = 1;
           continue;
         }
-      if (memcmp (e->id, id_hash, 32) == 0)
-        return 0;		/* Seen before: a replay.  */
+      break;
     }
 
   if (first_free == (size_t) -1 || c->live >= c->limit)
     {
-      /* Full of live entries: purge the dead ones once, then retry.  */
+      /* Full of live entries: recount, the count being an upper bound.  */
       size_t k;
 
       c->live = 0;
@@ -144,6 +198,8 @@ gq_replay_cache_check (void *cache, const uint8_t id_hash[32],
        otherwise refuse an entry.  */
     struct entry *e = &c->slot[first_free];
 
+    if (e->expires == 0)
+      c->used++;
     memcpy (e->id, id_hash, 32);
     e->expires = expires_ms;
     c->live++;

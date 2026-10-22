@@ -1751,6 +1751,15 @@ test_config (void)
   c.trust = NULL;
   CHECK_EQ (gq_tls12_client_new (&t, &c, &s), GQ_ERR_INVAL);
   c.trust = fx_trust;
+  /* A trust store and no name to check against validates for any name
+     (see test-tls-client.c): refused unless said in so many words.  */
+  c.server_name = NULL;
+  CHECK_EQ (gq_tls12_client_new (&t, &c, &s), GQ_ERR_INVAL);
+  c.no_name_check = 1;
+  CHECK_EQ (gq_tls12_client_new (&t, &c, &s), GQ_OK);
+  gq_tls12_free (t);
+  c.no_name_check = 0;
+  c.server_name = "example.test";
   /* QUIC and 0-RTT are TLS 1.3 only.  */
   c.quic = 1;
   CHECK_EQ (gq_tls12_client_new (&t, &c, &s), GQ_ERR_INVAL);

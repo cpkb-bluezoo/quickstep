@@ -679,6 +679,7 @@ main (int argc, char **argv)
         }
       memset (&cfg, 0, sizeof cfg);
       cfg.server_name = o.sni;
+      cfg.no_name_check = o.sni == NULL;	/* No --sni: nothing to check.  */
       cfg.trust = trust;
       cfg.alpn = alpn;
       cfg.n_alpn = o.n_alpn;

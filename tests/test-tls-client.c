@@ -1275,8 +1275,24 @@ test_creation_rules (void)
   /* No trust store and no verifier: refuse to run unauthenticated.  */
   CHECK_EQ (gq_tls_client_new (&t, &cfg, &sink), GQ_ERR_INVAL);
   cfg.trust = trust;
+  /* A trust store and no name to check against: the chain would validate
+     for any name, so a certificate bought for another site would do.
+     Forgetting the name (it is also the SNI, which an IP literal must not
+     send) must not silently switch the check off.  */
+  CHECK_EQ (gq_tls_client_new (&t, &cfg, &sink), GQ_ERR_INVAL);
+  cfg.server_name = "example.test";
   CHECK_EQ (gq_tls_client_new (&t, &cfg, &sink), GQ_OK);
   gq_tls_free (t);
+  cfg.server_name = NULL;
+  cfg.no_name_check = 1;	/* Said in so many words.  */
+  CHECK_EQ (gq_tls_client_new (&t, &cfg, &sink), GQ_OK);
+  gq_tls_free (t);
+  cfg.no_name_check = 0;
+  sink.verify_peer = sk_verify;	/* The application authenticates, then.  */
+  CHECK_EQ (gq_tls_client_new (&t, &cfg, &sink), GQ_OK);
+  gq_tls_free (t);
+  sink.verify_peer = NULL;
+  cfg.server_name = "example.test";
   /* QUIC needs transport parameters and ALPN.  */
   cfg.quic = 1;
   CHECK_EQ (gq_tls_client_new (&t, &cfg, &sink), GQ_ERR_INVAL);

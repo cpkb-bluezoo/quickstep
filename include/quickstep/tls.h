@@ -241,9 +241,15 @@ typedef struct gq_tls_hooks
 
 typedef struct gq_tls_config
 {
-  /* Server name for SNI and host name verification.  NULL: no SNI, and no
-     name check (the caller must then authenticate the peer otherwise).  */
+  /* Server name for SNI and host name verification.  Required with a trust
+     store (see no_name_check).  */
   const char *server_name;
+  /* Say, in so many words, that no host name is checked: the chain is only
+     required to lead to a trust anchor, so a certificate for any name from
+     any trusted CA is accepted.  Needed to use a trust store without
+     server_name (for example connecting to an IP literal, which is no SNI),
+     unless the application authenticates the peer in verify_peer.  */
+  int no_name_check;
   /* ALPN protocols in preference order.  Required for QUIC.  */
   const gq_slice *alpn;
   size_t n_alpn;

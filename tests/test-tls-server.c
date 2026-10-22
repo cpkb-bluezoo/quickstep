@@ -871,8 +871,10 @@ test_sni_credentials (void)
   p->cc.trust = NULL;
   p->csink.verify_peer = NULL;
   {
-    /* Without a name the client cannot check host names; trust the CA.  */
+    /* Without a name the client cannot check host names; trust the CA, and
+       say so (it is refused otherwise).  */
     p->cc.trust = client_trust;
+    p->cc.no_name_check = 1;
   }
   pair_create (p);
   CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);

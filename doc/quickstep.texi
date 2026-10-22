@@ -219,6 +219,18 @@ The validation policy is fixed.  SHA-1 and MD5 signature chains fail,
 RSA keys under 2048 bits fail, dates are always checked, and the leaf must
 be usable for the stated purpose (TLS server or client authentication).
 
+@cindex host name check
+The host name checked is @code{gq_tls_config.server_name}, which is also the
+SNI.  A client that uses the trust store must set it: with no name the
+chain would validate for any name, so a certificate that any trusted CA
+issued for another site would be accepted, and a forgotten field must not
+turn the check off.  The constructors refuse such a configuration
+(@code{GQ_ERR_INVAL}) unless @code{no_name_check} is set, which says in so
+many words that only the chain is checked (for example when connecting to an
+IP literal, which is no SNI), or a @code{verify_peer} callback authenticates
+the peer.  The name matching is GnuTLS's, which also accepts the subject
+common name of a certificate with no DNS subject alternative name.
+
 @cindex verify_peer
 @cindex pinning
 An application that needs another rule, such as pinning a certificate or

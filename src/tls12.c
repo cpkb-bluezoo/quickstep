@@ -448,6 +448,12 @@ gq_tls12_client_new (gq_tls12 **out, const gq_tls_config *cfg,
   /* Refuse to run unauthenticated by accident.  */
   if (cfg->trust == NULL && sink->verify_peer == NULL)
     return GQ_ERR_INVAL;
+  /* The built-in check validates the chain for the name given and for no
+     name at all if there is none, which any certificate of any trusted CA
+     passes.  Do not let a forgotten server_name do that.  */
+  if (sink->verify_peer == NULL && cfg->server_name == NULL
+      && !cfg->no_name_check)
+    return GQ_ERR_INVAL;
   if (cfg->server_name && (strlen (cfg->server_name) > 255
                            || cfg->server_name[0] == '\0'))
     return GQ_ERR_INVAL;

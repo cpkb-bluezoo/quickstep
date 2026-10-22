@@ -916,6 +916,7 @@ main (int argc, char **argv)
           return 1;
         }
       g.cc.server_name = sni;
+      g.cc.no_name_check = sni == NULL;	/* No SNI given: nothing to check.  */
       g.cc.trust = g.trust;
       g.cc.alpn = g.alpn;
       g.cc.n_alpn = 1;
