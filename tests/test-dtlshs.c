@@ -297,6 +297,7 @@ test_ordering (void)
   CHECK (d.type[1] == 8 && d.len[1] == 14);
 
   /* A zero-length message and the message_seq wrap.  */
+  gq_dtls_reasm_free (&r);
   gq_dtls_reasm_init (&r, 1000, 0xffff);
   push (&r, &d, 20, 0, 0xffff, 0, b, 0, GQ_DRX_DELIVERED);
   CHECK_EQ (r.next_seq, 0);

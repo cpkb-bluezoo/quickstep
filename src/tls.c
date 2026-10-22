@@ -342,6 +342,7 @@ gq_tls_free (gq_tls *t)
     return;
   gq_transcript_free (t->t256);
   gq_transcript_free (t->t384);
+  gq_transcript_free (t->tr);	/* The one in use, once the hash is chosen.  */
   gq_pubkey_free (t->peer_key);
   if (t->msg)
     {

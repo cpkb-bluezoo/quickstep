@@ -26,6 +26,9 @@
 #include <quickstep/tls.h>
 #include <quickstep/tlsmsg.h>
 
+#ifdef __GLIBC__
+# include <malloc.h>		/* mallinfo2.  */
+#endif
 #include "tst-util.h"
 
 #ifndef HAVE_GNUTLS
@@ -2099,10 +2102,59 @@ test_resumption_mutations (int iterations)
   gq_ticket_keys_free (keys);
 }
 
+#ifdef __GLIBC__
+/* Bytes of heap in use now.  */
+static size_t
+heap_in_use (void)
+{
+  return mallinfo2 ().uordblks;
+}
+
+/* Everything an engine allocates is released by gq_tls_free: a server that
+   leaked a little for every ClientHello, before it had authenticated
+   anything, could be run out of memory by anyone.  Heap use must not grow
+   with the number of handshakes, whether they finish or are abandoned once
+   the server has seen the ClientHello.  */
+static void
+test_no_leak_per_handshake (void)
+{
+  enum { WARM = 5, RUNS = 100 };
+  size_t before = 0, after;
+  int i;
+
+  for (i = 0; i < WARM + RUNS; i++)
+    {
+      struct pair *p = pair_new ();
+
+      if (i == WARM)
+        before = heap_in_use ();
+      pair_create (p);
+      CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+      if (i % 2)
+        CHECK_EQ (pump (p, 0), GQ_OK);
+      else
+        {
+          /* Abandoned: the server sees the ClientHello and no more.  */
+          CHECK_EQ (feed_end (&p->s, GQ_LEVEL_INITIAL,
+                              p->c.sent[GQ_LEVEL_INITIAL],
+                              p->c.sent_len[GQ_LEVEL_INITIAL], 0), GQ_OK);
+        }
+      pair_free (p);
+    }
+  after = heap_in_use ();
+  /* A leaked transcript alone is over 100 bytes a handshake.  Allow for
+     allocator and library caches settling.  */
+  CHECK (after < before + 4096);
+}
+#endif
+
 int
 main (void)
 {
   setup_fixtures ();
+#ifdef __GLIBC__
+  test_no_leak_per_handshake ();
+#endif
   test_basic (0);
   test_basic (1);
   test_basic (17);
