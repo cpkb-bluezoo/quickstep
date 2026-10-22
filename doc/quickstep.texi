@@ -1288,8 +1288,12 @@ own server id.
 @heading Admission
 A long header datagram for an unknown ID goes through
 @code{gq_quic_admit} (@ref{Address validation}): Version Negotiation,
-Retry (always, or once @code{retry_above} connections exist) or a new
-connection, subject to @code{max_connections}.
+Retry (always, or once @code{retry_above} connections exist, by default
+half of @code{max_connections}) or a new connection, subject to
+@code{max_connections}.  Nothing authenticates the sender of a first
+Initial, and its keys are public, so a connection that has not accepted a
+single packet after its first datagram is freed again at once; the
+client's next Initial starts it afresh.
 
 @heading Stateless reset
 A short header datagram for an unknown ID is first checked against the

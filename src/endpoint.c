@@ -601,6 +601,15 @@ gq_endpoint_new (gq_endpoint **out, const gq_endpoint_config *config,
   ep->serving = config->server != NULL;
   if (ep->cfg.max_connections == 0)
     ep->cfg.max_connections = 1024;
+  if (ep->cfg.retry_above == 0)
+    {
+      /* Ask for proof of address once half the table is used, so that a
+         flood from forged addresses cannot fill the rest.  A value above
+         max_connections turns this off.  */
+      ep->cfg.retry_above = ep->cfg.max_connections / 2;
+      if (ep->cfg.retry_above == 0)
+        ep->cfg.retry_above = 1;
+    }
   if (ep->cfg.max_resets_per_second == 0)
     ep->cfg.max_resets_per_second = 100;
   if (ep->cfg.admit.n_versions == 0 && (ep->cfg.conn.n_versions
@@ -1055,6 +1064,22 @@ admit (gq_endpoint *ep, uint64_t now, const gq_path *from, int ecn,
   if (ep->ev.connection)
     ep->ev.connection (ep->ev.user, c);
   conn_recv (c, now, from, ecn, data, len);
+  {
+    /* Nothing authenticated the sender of this datagram, and the packet in
+       it may not even decrypt (anyone can send a 1200-byte "Initial", from
+       any address).  A connection that has not accepted a single packet is
+       not worth keeping, or those would fill the table for as long as the
+       idle timeout and lock real clients out.  The client's own next
+       Initial starts it afresh.  */
+    gq_conn_stats st;
+
+    gq_conn_get_stats (c, &st);
+    if (st.packets_received == 0)
+      {
+        reap (ep, e);
+        return GQ_OK;
+      }
+  }
   if (gq_long_header_parse (data, len, &h) == GQ_OK)
     early_release (ep, now, e, h.dcid.data, h.dcid.len);
   mark_woken (ep, e);

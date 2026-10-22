@@ -1346,6 +1346,95 @@ test_late_initial (void)
   net_free (net);
 }
 
+/* A datagram that looks like a client's first Initial but whose payload is
+   random: it cannot be decrypted.  Anyone can send these, with any source
+   address.  */
+static size_t
+garbage_initial (uint8_t *out, unsigned n)
+{
+  size_t i = 0, hdr;
+
+  out[i++] = 0xc0;
+  out[i++] = 0;
+  out[i++] = 0;
+  out[i++] = 0;
+  out[i++] = 1;			/* Version 1.  */
+  out[i++] = 8;
+  for (hdr = 0; hdr < 8; hdr++)
+    out[i++] = (uint8_t) (0x30 + n + hdr * 7);
+  out[i++] = 0;			/* No source ID.  */
+  out[i++] = 0;			/* No token.  */
+  hdr = i + 2;			/* Two-byte Length follows.  */
+  out[i++] = 0x40 | (uint8_t) ((1200 - hdr) >> 8);
+  out[i++] = (uint8_t) (1200 - hdr);
+  while (i < 1200)
+    {
+      out[i] = (uint8_t) (i * 131 + n * 17 + 5);
+      i++;
+    }
+  return i;
+}
+
+/* An Initial that does not decrypt is not a client: the server must not keep
+   a connection (and a TLS context) for it until the idle timeout, or a
+   stream of them from forged addresses fills the table and locks out real
+   clients.  */
+static void
+test_undecryptable_initial_is_forgotten (void)
+{
+  gq_endpoint_config sc;
+  struct net *net;
+  gq_path from;
+  uint8_t dg[1200];
+  unsigned i;
+  int connected = 0;
+
+  memset (&sc, 0, sizeof sc);
+  sc.max_connections = 3;
+  net = net_new (&sc, 14, NULL);
+  memset (&from, 0, sizeof from);
+  from.local = net->node[0].addr;
+  from.remote = net->node[1].ext;
+  garbage_initial (dg, 0);
+  gq_endpoint_recv (net->node[0].ep, net->now, &from, dg, sizeof dg);
+  CHECK_EQ (gq_endpoint_connections (net->node[0].ep), 0);
+  for (i = 1; i < 20; i++)
+    {
+      garbage_initial (dg, i);
+      gq_endpoint_recv (net->node[0].ep, net->now, &from, dg, sizeof dg);
+    }
+  CHECK_EQ (gq_endpoint_connections (net->node[0].ep), 0);
+  /* A real client is still served.  */
+  client_conn (net, 1, NULL);
+  CHECK (run (net, all_clients_done, 60000000));
+  for (i = 0; i < (unsigned) net->node[1].napp; i++)
+    connected += net->node[1].app[i].connected;
+  CHECK_EQ (connected, 1);
+  net_free (net);
+}
+
+/* Busy servers ask for a Retry without being told to: by default once half
+   of max_connections exist, so that the rest can only be taken up by clients
+   that can receive at their address.  */
+static void
+test_retry_by_default_when_busy (void)
+{
+  gq_endpoint_config sc;
+  struct net *net;
+
+  memset (&sc, 0, sizeof sc);
+  sc.max_connections = 4;
+  net = net_new (&sc, 15, NULL);
+  client_conn (net, 1, NULL);
+  client_conn (net, 1, NULL);
+  CHECK (run (net, all_clients_done, 60000000));
+  CHECK_EQ (net->retries, 0);
+  client_conn (net, 2, NULL);
+  CHECK (run (net, all_clients_done, 60000000));
+  CHECK (net->retries >= 1);
+  net_free (net);
+}
+
 /* The client's address changes (a NAT rebinding): the server endpoint finds
    the connection by ID, not address, and the connection follows.  */
 static void
@@ -1407,6 +1496,8 @@ main (void)
   test_version_negotiation ();
   test_stateless_reset ();
   test_limits_and_refusal ();
+  test_undecryptable_initial_is_forgotten ();
+  test_retry_by_default_when_busy ();
   test_idle_timeouts ();
   test_rebinding_through_endpoint ();
   test_late_initial ();

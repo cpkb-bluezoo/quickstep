@@ -81,8 +81,10 @@ typedef struct gq_endpoint_config
   const gq_tls_server_config *server;
   gq_admit_config admit;
   size_t max_connections;	/* 0: 1024.  Beyond it Initials are dropped.  */
-  /* Ask for a Retry once this many connections exist (0: only if
-     admit.require_retry).  */
+  /* Ask for a Retry once this many connections exist, so that new ones are
+     taken only from clients that can receive at their address (see
+     admit.require_retry to always ask).  0: half of max_connections (at
+     least 1).  A value above max_connections never asks.  */
   size_t retry_above;
   /* Session tickets and 0-RTT for the server.  TICKETS makes the endpoint
      keep a ticket key ring (unless the TLS configuration has one) so
