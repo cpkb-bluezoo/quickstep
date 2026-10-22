@@ -105,13 +105,6 @@ hash_algo (enum gq_hash alg)
        : alg == GQ_HASH_SHA384 ? GCRY_MD_SHA384 : 0;
 }
 
-static int
-mac_algo (enum gq_hash alg)
-{
-  return alg == GQ_HASH_SHA256 ? GCRY_MAC_HMAC_SHA256
-       : alg == GQ_HASH_SHA384 ? GCRY_MAC_HMAC_SHA384 : 0;
-}
-
 int
 gq_hash_compute (enum gq_hash alg, const void *data, size_t len,
                  uint8_t *out, size_t outlen)
@@ -128,12 +121,38 @@ gq_hash_compute (enum gq_hash alg, const void *data, size_t len,
   return GQ_OK;
 }
 
+/* HMAC is done in one call, from a list of buffers of which the first is the
+   key, and not with a MAC context of our own.  libgcrypt opens the context it
+   uses inside that call without polling for entropy, which a context opened
+   through its MAC interface does: with libgcrypt's own random number
+   generator the poll cost a few microseconds, a handshake did dozens of
+   HMACs (every HKDF step is one or more), and the polls came to two fifths
+   of its CPU time.  Nothing is kept between calls, so there is no state to
+   share between threads and no key left behind.  */
+static const uint8_t no_bytes[1];
+
+static void
+iov_set (gcry_buffer_t *b, const void *data, size_t len)
+{
+  memset (b, 0, sizeof *b);
+  /* The field is not const, though libgcrypt only reads it.  An empty
+     buffer still gets a real pointer: libgcrypt adds an offset to it.  */
+  b->data = (void *) (uintptr_t) (len ? data : (const void *) no_bytes);
+  b->len = len;
+}
+
+static int
+hmac_iov (enum gq_hash alg, const gcry_buffer_t *iov, int n, uint8_t *out)
+{
+  return gcry_md_hash_buffers (hash_algo (alg), GCRY_MD_FLAG_HMAC, out, iov,
+                               n) ? GQ_ERR_CRYPTO : GQ_OK;
+}
+
 int
 gq_hmac (enum gq_hash alg, const void *key, size_t keylen,
          const void *data, size_t len, uint8_t *out, size_t outlen)
 {
-  gcry_mac_hd_t h;
-  size_t n = outlen;
+  gcry_buffer_t iov[2];
   int r = gq_crypto_init ();
 
   if (r != GQ_OK)
@@ -143,15 +162,9 @@ gq_hmac (enum gq_hash alg, const void *key, size_t keylen,
   if (outlen != gq_hash_size (alg) || (data == NULL && len > 0))
     return GQ_ERR_INVAL;
 
-  if (gcry_mac_open (&h, mac_algo (alg), 0, NULL))
-    return GQ_ERR_CRYPTO;
-  r = GQ_ERR_CRYPTO;
-  if (!gcry_mac_setkey (h, key, keylen)
-      && !gcry_mac_write (h, data, len)
-      && !gcry_mac_read (h, out, &n) && n == outlen)
-    r = GQ_OK;
-  gcry_mac_close (h);
-  return r;
+  iov_set (&iov[0], key, keylen);
+  iov_set (&iov[1], data, len);
+  return hmac_iov (alg, iov, 2, out);
 }
 
 /* ------------------------------------------------------------------ */
@@ -182,7 +195,6 @@ gq_hkdf_expand (enum gq_hash alg, const void *prk, size_t prklen,
                 const void *info, size_t infolen,
                 uint8_t *out, size_t outlen)
 {
-  gcry_mac_hd_t h;
   uint8_t t[64];
   size_t hl = gq_hash_size (alg);
   size_t done = 0;
@@ -197,36 +209,27 @@ gq_hkdf_expand (enum gq_hash alg, const void *prk, size_t prklen,
       || outlen > 255 * hl || (out == NULL && outlen > 0))
     return GQ_ERR_INVAL;
 
-  if (gcry_mac_open (&h, mac_algo (alg), 0, NULL))
-    return GQ_ERR_CRYPTO;
-  if (gcry_mac_setkey (h, prk, prklen))
-    {
-      gcry_mac_close (h);
-      return GQ_ERR_CRYPTO;
-    }
-
   /* T(n) = HMAC (PRK, T(n-1) | info | n).  */
-  r = GQ_OK;
   while (done < outlen && r == GQ_OK)
     {
-      size_t n = hl;
+      gcry_buffer_t iov[4];
+      int n = 0;
       size_t take = outlen - done < hl ? outlen - done : hl;
 
-      if (done > 0 && gcry_mac_write (h, t, hl))
-        r = GQ_ERR_CRYPTO;
-      else if (gcry_mac_write (h, info, infolen)
-               || gcry_mac_write (h, &counter, 1)
-               || gcry_mac_read (h, t, &n) || n != hl
-               || gcry_mac_reset (h))
-        r = GQ_ERR_CRYPTO;
-      else
+      iov_set (&iov[n++], prk, prklen);
+      if (done > 0)
+        iov_set (&iov[n++], t, hl);
+      if (infolen > 0)
+        iov_set (&iov[n++], info, infolen);
+      iov_set (&iov[n++], &counter, 1);
+      r = hmac_iov (alg, iov, n, t);
+      if (r == GQ_OK)
         {
           memcpy (out + done, t, take);
           done += take;
           counter++;
         }
     }
-  gcry_mac_close (h);
   gq_wipe (t, sizeof t);
   return r;
 }

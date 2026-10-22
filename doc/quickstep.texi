@@ -158,7 +158,11 @@ not change), and used only for the key bytes they were made for, so keys
 that are changed behind their context's back, or that have none, are
 protected by a context made for the call instead: slower, never wrong.
 Keys that protect a handful of packets (Initial, Handshake, 0-RTT) have
-none.  Which random number generator libgcrypt uses is left to the
+none.  HMAC, which the key schedule does dozens of times in a handshake and
+which has no key to keep a context for, is done with libgcrypt's one-call
+interface (@code{gcry_md_hash_buffers} with @code{GCRY_MD_FLAG_HMAC}, the
+key first), which opens its context without the poll that the MAC interface
+makes.  Which random number generator libgcrypt uses is left to the
 application; none of this depends on it.
 
 Findings from probing libgcrypt 1.12.4:

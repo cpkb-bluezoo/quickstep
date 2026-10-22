@@ -54,10 +54,12 @@ test_mlkem_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
 # contexts a packet or a record opens.
 test_protect_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
 test_protect_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
-# Reads libgcrypt's random statistics to see what level of randomness a key
-# share asks for.
+# These read libgcrypt's random statistics (tst-rndstats.h) to see what a key
+# share or an HMAC asks of the generator.
 test_kx_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
 test_kx_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
+test_crypto_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
+test_crypto_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
 test_record_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
 test_record_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
 test_record12_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
@@ -77,4 +79,4 @@ test_qlog_LDFLAGS = -static
 test_replay_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
 test_replay_LDFLAGS = -static
 
-EXTRA_DIST = tst-alloc.h tst-qkv.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h vectors-mlkem.h vectors-mldsa.h tst-mldsa-cert.h tst-qlogcheck.h vectors-pss.h
+EXTRA_DIST = tst-alloc.h tst-rndstats.h tst-qkv.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h vectors-mlkem.h vectors-mldsa.h tst-mldsa-cert.h tst-qlogcheck.h vectors-pss.h

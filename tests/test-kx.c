@@ -20,12 +20,7 @@
 # include <config.h>
 #endif
 
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-
-#include <gcrypt.h>
 
 #include <quickstep/status.h>
 #include <quickstep/crypto.h>
@@ -33,6 +28,7 @@
 #include <quickstep/kx.h>
 
 #include "tst-util.h"
+#include "tst-rndstats.h"
 #include "vectors-mlkem.h"
 
 static const unsigned all_groups[] = {
@@ -548,34 +544,6 @@ test_errors (void)
                            sizeof server, &n, ss, 31, &m), GQ_ERR_BUFSIZE);
 }
 
-/* How many requests for libgcrypt's strongest level of randomness there have
-   been, from the statistics its own generator keeps.  They are logged, so
-   the log is caught.  Only that generator keeps them: with another (FIPS
-   mode, the system one) *KNOWN is 0.  */
-static char g_log[1024];
-
-static void
-log_cb (void *user, int level, const char *fmt, va_list ap)
-{
-  size_t n = strlen (g_log);
-
-  (void) user;
-  (void) level;
-  vsnprintf (g_log + n, sizeof g_log - n, fmt, ap);
-}
-
-static unsigned long
-strongest_requests (int *known)
-{
-  const char *p;
-
-  g_log[0] = 0;
-  gcry_control (GCRYCTL_DUMP_RANDOM_STATS);
-  p = strstr (g_log, "getlvl2=");
-  *known = p != NULL;
-  return p ? strtoul (p + 8, NULL, 10) : 0;
-}
-
 /* A key share is ephemeral: made for one handshake and gone.  Asking
    libgcrypt's strongest level for the ML-KEM part, as its key generation
    does by default, makes it gather jitter entropy on every call, which took
@@ -592,17 +560,11 @@ test_ephemeral_keys_not_strongest (void)
     GQ_GROUP_MLKEM1024, GQ_GROUP_X25519, GQ_GROUP_SECP256R1
   };
   size_t i;
-  int known, known2;
   unsigned long before, after;
 
-  /* Deprecated, and the only way libgcrypt offers to catch what it logs.  */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  gcry_set_log_handler (log_cb, NULL);
-#pragma GCC diagnostic pop
+  tst_catch_gcrypt_log ();
   CHECK_EQ (gq_crypto_init (), GQ_OK);
-  before = strongest_requests (&known);
-  if (!known)
+  if (!tst_rnd_stat ("getlvl2=", 0, &before))
     {
       fprintf (stderr, "note: libgcrypt does not keep random statistics "
                "here (FIPS mode or another generator); skipped\n");
@@ -620,8 +582,7 @@ test_ephemeral_keys_not_strongest (void)
       gq_kx_key_wipe (&a);
       gq_kx_key_wipe (&b);
     }
-  after = strongest_requests (&known2);
-  CHECK (known2);
+  CHECK (tst_rnd_stat ("getlvl2=", 0, &after));
   CHECK_EQ (after, before);
 }
 

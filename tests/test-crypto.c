@@ -24,6 +24,7 @@
 #include <quickstep/crypto.h>
 
 #include "tst-util.h"
+#include "tst-rndstats.h"
 
 /* RFC 5869 appendix A.1.  */
 static void
@@ -198,6 +199,55 @@ test_misc (void)
                           b, 16), GQ_ERR_UNSUPPORTED);
 }
 
+/* HMAC and HKDF are done for every step of a handshake, and a handshake
+   did dozens: each opened a libgcrypt MAC context, and with libgcrypt's own
+   generator every open polls for entropy, a few microseconds that made the
+   key schedule a large part of a handshake.  libgcrypt can do an HMAC in one
+   call that opens its context without the poll.  So none of them polls.  */
+static void
+test_no_entropy_poll_per_hmac (void)
+{
+  uint8_t key[48], salt[16], out[48], prk[48], okm[200];
+  unsigned long before, after;
+  enum gq_hash algs[2] = { GQ_HASH_SHA256, GQ_HASH_SHA384 };
+  int a, i;
+
+  tst_catch_gcrypt_log ();
+  memset (key, 0x0b, sizeof key);
+  memset (salt, 0x5c, sizeof salt);
+  CHECK_EQ (gq_hmac (GQ_HASH_SHA256, key, 32, "abc", 3, out, 32), GQ_OK);
+  if (!tst_rnd_stat ("polls=", 1, &before))
+    {
+      fprintf (stderr, "note: libgcrypt does not keep random statistics "
+               "here (FIPS mode or another generator); skipped\n");
+      return;
+    }
+  for (a = 0; a < 2; a++)
+    {
+      size_t hl = gq_hash_size (algs[a]);
+
+      for (i = 0; i < 100; i++)
+        {
+          CHECK_EQ (gq_hmac (algs[a], key, hl, "abc", 3, out, hl), GQ_OK);
+          CHECK_EQ (gq_hkdf_extract (algs[a], salt, sizeof salt, key, hl, prk,
+                                     hl), GQ_OK);
+          CHECK_EQ (gq_hkdf_extract (algs[a], NULL, 0, key, hl, prk, hl),
+                    GQ_OK);
+          /* A few blocks, and none.  */
+          CHECK_EQ (gq_hkdf_expand (algs[a], prk, hl, "info", 4, okm, 150),
+                    GQ_OK);
+          CHECK_EQ (gq_hkdf_expand (algs[a], prk, hl, NULL, 0, okm, 0),
+                    GQ_OK);
+          CHECK_EQ (gq_hkdf_expand_label (algs[a], prk, hl, "key", NULL, 0,
+                                          okm, 16), GQ_OK);
+          CHECK_EQ (gq_hkdf_expand_label (algs[a], prk, hl, "derived", okm,
+                                          hl, out, hl), GQ_OK);
+        }
+    }
+  CHECK (tst_rnd_stat ("polls=", 1, &after));
+  CHECK_EQ (after, before);
+}
+
 int
 main (void)
 {
@@ -209,5 +259,6 @@ main (void)
   test_aead (GQ_AEAD_AES_256_GCM);
   test_aead (GQ_AEAD_CHACHA20_POLY1305);
   test_misc ();
+  test_no_entropy_poll_per_hmac ();
   TST_DONE ();
 }
