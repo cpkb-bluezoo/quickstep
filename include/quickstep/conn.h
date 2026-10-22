@@ -594,9 +594,14 @@ typedef struct gq_conn_router
                       const uint8_t token[GQ_RESET_TOKEN_LEN]);
 } gq_conn_router;
 
-/* The peer sent a stateless reset that the endpoint matched to this
-   connection: it ends (draining), reported through the closed event.  */
-void gq_conn_stateless_reset (gq_conn *c, uint64_t now_us);
+/* A datagram ending in TOKEN arrived for no connection, and the endpoint
+   found that TOKEN was given for an ID of this one.  If the ID is one in use
+   (RFC 9000 section 10.3.1: the tokens of IDs not used, or retired, are not
+   looked for) it is a stateless reset: the connection ends (draining),
+   reported through the closed event, and 1 is returned.  Otherwise nothing
+   happens and 0 is returned.  */
+int gq_conn_stateless_reset (gq_conn *c, uint64_t now_us,
+                             const uint8_t token[GQ_RESET_TOKEN_LEN]);
 
 void gq_conn_set_router (gq_conn *c, const gq_conn_router *router);
 

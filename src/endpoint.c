@@ -1168,9 +1168,10 @@ endpoint_recv (gq_endpoint *ep, uint64_t now_us, const gq_path *from, int ecn,
                                                           - GQ_RESET_TOKEN_LEN,
                                          GQ_RESET_TOKEN_LEN);
 
-              if (t)
+              if (t && gq_conn_stateless_reset (t->e->c, now_us,
+                                                data + len
+                                                - GQ_RESET_TOKEN_LEN))
                 {
-                  gq_conn_stateless_reset (t->e->c, now_us);
                   mark_woken (ep, t->e);
                   reschedule (ep, t->e);
                   return GQ_OK;

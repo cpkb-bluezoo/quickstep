@@ -154,15 +154,46 @@ conn_peer_token (gq_conn *c, const uint8_t *token)
     c->router.peer_token (c->router.user, c, token);
 }
 
-void
-gq_conn_stateless_reset (gq_conn *c, uint64_t now_us)
+/* Is TOKEN the stateless reset token of a peer connection ID we are using?
+   RFC 9000 section 10.3.1: an endpoint MUST NOT check for tokens of IDs it
+   has not used, or has retired.  Used: the one in use, and those assigned to
+   paths.  */
+int
+conn_reset_token_live (const gq_conn *c, const uint8_t *token)
+{
+  size_t i;
+  int k;
+
+  for (i = 0; i < MAX_PCID; i++)
+    {
+      const pcid *q = &c->p[i];
+      int in_use;
+
+      if (!q->used || !q->has_token || q->retire)
+        continue;
+      in_use = q->seq == c->dcid_seq;
+      for (k = 0; k < MAX_PATHS && !in_use; k++)
+        in_use = c->paths[k].used && c->paths[k].dcid.len
+                 && c->paths[k].dcid_seq == q->seq;
+      if (in_use && gq_ct_equal (q->token, token, GQ_RESET_TOKEN_LEN))
+        return 1;
+    }
+  return 0;
+}
+
+int
+gq_conn_stateless_reset (gq_conn *c, uint64_t now_us,
+                         const uint8_t token[GQ_RESET_TOKEN_LEN])
 {
   gq_conn_close_info info;
 
+  if (token == NULL || !conn_reset_token_live (c, token))
+    return 0;
   c->now = now_us;
   memset (&info, 0, sizeof info);
   info.source = GQ_CLOSE_RESET;
   conn_enter_closing (c, &info, 1);
+  return 1;
 }
 
 void
@@ -1521,6 +1552,7 @@ recv_datagram (gq_conn *c, uint64_t now_us, const gq_path *from, int ecn,
                uint8_t *data, size_t len)
 {
   int r;
+  uint64_t accepted;
 
   c->now = now_us;
   if (c->state == GQ_CONN_DONE || c->state == GQ_CONN_DRAINING)
@@ -1532,8 +1564,10 @@ recv_datagram (gq_conn *c, uint64_t now_us, const gq_path *from, int ecn,
       return GQ_OK;
     }
   c->rx_ecn = (int8_t) ecn;
+  accepted = c->st.packets_received;
   r = conn_receive_datagram (c, now_us, data, len);
   c->rx_ecn = -1;
+  conn_path_rx_done (c, c->st.packets_received != accepted);
   conn_path_rx_end (c);
   /* The keys this datagram brought open what came ahead of them.  */
   conn_replay_held (c);

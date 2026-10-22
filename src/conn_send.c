@@ -559,11 +559,14 @@ add_app_frames (gq_conn *c, pk *p)
       {
         memset (&f, 0, sizeof f);
         f.type = GQ_FRAME_PATH_CHALLENGE;
-        conn_path_challenge_data (c, c->cur_path, f.u.path_challenge.data);
-        memset (&e, 0, sizeof e);
-        e.type = SF_PATH_CHALLENGE;
-        add (p, &f, 1, &e);
-        p->challenge = 1;
+        if (conn_path_challenge_data (c, c->cur_path,
+                                      f.u.path_challenge.data) == GQ_OK)
+          {
+            memset (&e, 0, sizeof e);
+            e.type = SF_PATH_CHALLENGE;
+            add (p, &f, 1, &e);
+            p->challenge = 1;
+          }
       }
   }
   for (i = 0; i < MAX_LCID; i++)
@@ -1135,11 +1138,13 @@ build_probe (gq_conn *c, uint64_t now, uint8_t *out, size_t cap, size_t *len,
 
       memset (&f, 0, sizeof f);
       f.type = GQ_FRAME_PATH_CHALLENGE;
-      conn_path_challenge_data (c, idx, f.u.path_challenge.data);
-      memset (&sf, 0, sizeof sf);
-      sf.type = SF_PATH_CHALLENGE;
-      add (p, &f, 1, &sf);
-      p->challenge = 1;
+      if (conn_path_challenge_data (c, idx, f.u.path_challenge.data) == GQ_OK)
+        {
+          memset (&sf, 0, sizeof sf);
+          sf.type = SF_PATH_CHALLENGE;
+          add (p, &f, 1, &sf);
+          p->challenge = 1;
+        }
     }
   else
     {

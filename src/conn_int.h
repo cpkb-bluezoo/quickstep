@@ -403,6 +403,7 @@ struct gq_conn
   unsigned bad_next;
   gq_path rx;			/* Where the datagram being processed came from.  */
   int rx_known;
+  int rx_pinned;		/* This datagram set the (empty) current path.  */
   uint64_t path_validations, path_failures, migrations;
 
   /* Closing.  */
@@ -465,6 +466,7 @@ void conn_spin_reset (gq_conn *c);
 void conn_spin_received (gq_conn *c, int bit, int highest);
 int conn_spin_value (gq_conn *c);
 void conn_enter_closing (gq_conn *c, gq_conn_close_info *info, int draining);
+int conn_reset_token_live (const gq_conn *c, const uint8_t *token);
 int conn_server_start (gq_conn *c, const uint8_t *odcid, size_t odcid_len,
                        const uint8_t *client_scid, size_t client_scid_len);
 void conn_recompute_idle (gq_conn *c, uint64_t now);
@@ -594,6 +596,7 @@ void datagram_pop (gq_conn *c);
 void conn_path_init (gq_conn *c, const gq_path *initial);
 void conn_path_rx_begin (gq_conn *c, const gq_path *from);
 void conn_path_rx_end (gq_conn *c);
+void conn_path_rx_done (gq_conn *c, int accepted);
 int conn_path_accept_rx (const gq_conn *c);
 void conn_path_after_packet (gq_conn *c, uint64_t now, int nonprobing,
                              int highest);
@@ -603,7 +606,7 @@ void conn_path_on_response (gq_conn *c, const uint8_t *data, uint64_t now);
 int conn_path_probe_pending (gq_conn *c, uint64_t now);
 void conn_path_commit (gq_conn *c, int idx);
 int conn_path_rx_changed (const gq_conn *c);
-void conn_path_challenge_data (gq_conn *c, int idx, uint8_t out[8]);
+int conn_path_challenge_data (gq_conn *c, int idx, uint8_t out[8]);
 uint64_t conn_path_deadline (const gq_conn *c);
 void conn_path_on_timeout (gq_conn *c, uint64_t now);
 int conn_path_budget (const gq_conn *c, int idx, uint64_t *budget);

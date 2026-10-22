@@ -573,6 +573,324 @@ test_stream_frames_after_the_end (void)
   pair_free (p);
 }
 
+/* A datagram that looks like a stateless reset for TO: it carries one of
+   TO's connection IDs (so that it is looked at at all), unpredictable bytes
+   and the TOKEN at its end.  */
+static size_t
+reset_looking (uint8_t *out, const gq_conn *to, const uint8_t *token)
+{
+  size_t i, n = 0;
+
+  for (i = 0; i < MAX_LCID; i++)
+    if (to->l[i].used)
+      break;
+  out[n++] = 0x40 | 0x15;
+  memcpy (out + n, to->l[i].cid.data, to->l[i].cid.len);
+  n += to->l[i].cid.len;
+  while (n < 60 - GQ_RESET_TOKEN_LEN)
+    {
+      out[n] = (uint8_t) (0x77 + n);
+      n++;
+    }
+  memcpy (out + n, token, GQ_RESET_TOKEN_LEN);
+  return n + GQ_RESET_TOKEN_LEN;
+}
+
+/* The peer connection ID in C that is not the one in use and is on no
+   path: given to us, never used.  */
+static pcid *
+spare_pcid (gq_conn *c)
+{
+  size_t i;
+  int k;
+
+  for (i = 0; i < MAX_PCID; i++)
+    {
+      int on_path = 0;
+
+      if (!c->p[i].used || !c->p[i].has_token || c->p[i].retire
+          || c->p[i].seq == c->dcid_seq)
+        continue;
+      for (k = 0; k < MAX_PATHS; k++)
+        if (c->paths[k].used && c->paths[k].dcid.len
+            && c->paths[k].dcid_seq == c->p[i].seq)
+          on_path = 1;
+      if (!on_path)
+        return &c->p[i];
+    }
+  return NULL;
+}
+
+/* RFC 9000 section 10.3.1: a datagram that ends in the token of an ID we use
+   is a stateless reset; the tokens of IDs we have not used, or have retired,
+   are not looked for.  Only the peer knows them, but a token that leaks (a
+   server deriving them from a key, say) should be good for as little as the
+   RFC allows.  */
+static void
+test_reset_tokens_of_unused_ids (void)
+{
+  struct pair *p;
+  gq_conn *c;
+  pcid *sp;
+  uint8_t dg[128], token[GQ_RESET_TOKEN_LEN];
+  size_t n, i;
+
+  /* The ID in use: a reset.  */
+  p = settled_pair (NULL, NULL);
+  c = p->cli.c;
+  for (i = 0; i < MAX_PCID; i++)
+    if (c->p[i].used && c->p[i].seq == c->dcid_seq)
+      break;
+  CHECK (i < MAX_PCID && c->p[i].has_token);
+  n = reset_looking (dg, c, c->p[i].token);
+  gq_conn_recv (c, p->net.now, dg, n);
+  CHECK (c->state >= GQ_CONN_CLOSING);
+  CHECK_EQ (p->cli.ci.source, GQ_CLOSE_RESET);
+  pair_free (p);
+
+  /* One we were given and have not used: not looked for.  */
+  p = settled_pair (NULL, NULL);
+  c = p->cli.c;
+  sp = spare_pcid (c);
+  CHECK (sp != NULL);
+  memcpy (token, sp->token, sizeof token);
+  n = reset_looking (dg, c, token);
+  gq_conn_recv (c, p->net.now, dg, n);
+  CHECK (c->state < GQ_CONN_CLOSING);
+  /* One we retired: neither.  */
+  sp->retire = 2;
+  gq_conn_recv (c, p->net.now, dg, n);
+  CHECK (c->state < GQ_CONN_CLOSING);
+  /* The endpoint's route to the same decision: it names the token it found
+     and the connection says whether that is a reset.  */
+  CHECK_EQ (gq_conn_stateless_reset (c, p->net.now, token), 0);
+  CHECK (c->state < GQ_CONN_CLOSING);
+  for (i = 0; i < MAX_PCID; i++)
+    if (c->p[i].used && c->p[i].seq == c->dcid_seq)
+      break;
+  CHECK_EQ (gq_conn_stateless_reset (c, p->net.now, c->p[i].token), 1);
+  CHECK (c->state >= GQ_CONN_CLOSING);
+  pair_free (p);
+}
+
+/* A server Initial for client C, sealed with the Initial keys (which anyone
+   can derive), carrying TOKEN_LEN bytes of token (RFC 9000 section 17.2.2: a
+   server sends none).  Returns the datagram length.  */
+static size_t
+server_initial (gq_conn *c, uint8_t *out, size_t cap, size_t token_len)
+{
+  gq_packet_keys ck, sk;
+  gq_cid cc[2];
+  uint8_t token[16], scid[8] = { 9, 8, 7, 6, 5, 4, 3, 2 };
+  size_t hdr, n, pn_off, len;
+
+  CHECK_EQ (gq_conn_local_cids (c, cc, 2), 1);
+  memset (token, 0x42, sizeof token);
+  CHECK_EQ (gq_packet_keys_initial (c->version, c->initial_dcid.data,
+                                    c->initial_dcid.len, &ck, &sk), GQ_OK);
+  CHECK_EQ (gq_long_header_build (GQ_PKT_INITIAL, c->version, cc[0].data,
+                                  cc[0].len, scid, sizeof scid,
+                                  token_len ? token : NULL, token_len, 0, 1,
+                                  40, out, cap, &hdr), GQ_OK);
+  pn_off = hdr - 1;
+  n = hdr;
+  out[n++] = 0x01;			/* PING, then PADDING.  */
+  memset (out + n, 0, 39);
+  n += 39;
+  CHECK_EQ (gq_packet_seal (&sk, 0, out, pn_off, 1, 40, cap, &len), GQ_OK);
+  return len;
+}
+
+/* A client discards what a server may not send it (RFC 9000 section 17.2.2:
+   an Initial carrying a token; section 17.2.5.2: a Retry whose source ID is
+   the destination ID of the Initial it answers), however well made.  */
+static void
+test_client_discards_bad_server_packets (void)
+{
+  struct pair *p;
+  gq_conn *c;
+  uint8_t pkt[1500], tok[16];
+  gq_cid cc[2];
+  size_t n, w;
+
+  /* Control: the same Initial without a token is taken.  */
+  p = pair_new (NULL, NULL, 0, 1);
+  c = p->cli.c;
+  n = server_initial (c, pkt, sizeof pkt, 0);
+  gq_conn_recv (c, p->net.now, pkt, n);
+  CHECK_EQ (c->st.packets_received, 1);
+  CHECK (c->state < GQ_CONN_CLOSING);
+  pair_free (p);
+
+  /* With a token it is not.  */
+  p = pair_new (NULL, NULL, 0, 1);
+  c = p->cli.c;
+  n = server_initial (c, pkt, sizeof pkt, 16);
+  gq_conn_recv (c, p->net.now, pkt, n);
+  CHECK_EQ (c->st.packets_received, 0);
+  CHECK (c->state < GQ_CONN_CLOSING);
+  pair_free (p);
+
+  /* Retry: a proper one is taken (control).  */
+  p = pair_new (NULL, NULL, 0, 1);
+  c = p->cli.c;
+  CHECK_EQ (gq_conn_local_cids (c, cc, 2), 1);
+  memset (tok, 0x33, sizeof tok);
+  {
+    uint8_t scid[8] = { 1, 1, 2, 2, 3, 3, 4, 4 };
+
+    CHECK_EQ (gq_retry_build (c->version, cc[0].data, cc[0].len, scid, 8, tok,
+                              sizeof tok, c->initial_dcid.data,
+                              c->initial_dcid.len, 0, pkt, sizeof pkt, &w),
+              GQ_OK);
+    gq_conn_recv (c, p->net.now, pkt, w);
+    CHECK_EQ (c->retried, 1);
+  }
+  pair_free (p);
+
+  /* One naming the client's own destination ID as its source is not.  */
+  p = pair_new (NULL, NULL, 0, 1);
+  c = p->cli.c;
+  CHECK_EQ (gq_conn_local_cids (c, cc, 2), 1);
+  CHECK_EQ (gq_retry_build (c->version, cc[0].data, cc[0].len,
+                            c->initial_dcid.data, c->initial_dcid.len, tok,
+                            sizeof tok, c->initial_dcid.data,
+                            c->initial_dcid.len, 0, pkt, sizeof pkt, &w),
+            GQ_OK);
+  gq_conn_recv (c, p->net.now, pkt, w);
+  CHECK_EQ (c->retried, 0);
+  pair_free (p);
+}
+
+/* RFC 9000 section 19.15: an endpoint whose packets go to a zero-length
+   connection ID has no ID to retire or switch, so a NEW_CONNECTION_ID from
+   that peer is a PROTOCOL_VIOLATION.  */
+static void
+test_new_cid_to_zero_length_peer (void)
+{
+  struct pair *p = settled_pair (NULL, NULL);
+  gq_conn *c = p->cli.c, *s = p->srv.c;
+  gq_frame f;
+
+  /* Ordinary, with an ID to send to: taken.  */
+  memset (&f, 0, sizeof f);
+  f.type = GQ_FRAME_NEW_CONNECTION_ID;
+  f.u.new_connection_id.seq = 40;
+  f.u.new_connection_id.retire_prior_to = 40;	/* Room for it.  */
+  f.u.new_connection_id.cid_len = 8;
+  memset (f.u.new_connection_id.cid, 0x44, 8);
+  memset (f.u.new_connection_id.reset_token, 0x45, GQ_RESET_TOKEN_LEN);
+  forge (s, c, p->net.now, NULL, &f, 1, 0);
+  CHECK (c->state < GQ_CONN_CLOSING);
+  /* The peer is one with a zero-length ID.  */
+  c->dcid.len = 0;
+  f.u.new_connection_id.seq = 41;
+  f.u.new_connection_id.retire_prior_to = 41;
+  forge (s, c, p->net.now, NULL, &f, 1, 0);
+  CHECK (c->state >= GQ_CONN_CLOSING);
+  pair_free (p);
+}
+
+/* A client given no path takes the server's address from the first
+   datagram it receives.  One datagram from anywhere, which no packet in it
+   could be unprotected, must not decide that: the server's own first packet
+   would then come from the wrong address and be ignored.  */
+static void
+test_client_path_not_set_by_garbage (void)
+{
+  struct pair *p = pair_new (NULL, NULL, 0, 1);
+  gq_conn *c = p->cli.c;
+  gq_path forged, server;
+  uint8_t junk[200], pkt[1500];
+  size_t n;
+
+  memset (&forged, 0, sizeof forged);
+  memset (&server, 0, sizeof server);
+  forged.local.len = server.local.len = 6;
+  memcpy (forged.local.data, "\x0a\x00\x00\x01\x1f\x90", 6);
+  memcpy (server.local.data, "\x0a\x00\x00\x01\x1f\x90", 6);
+  forged.remote.len = server.remote.len = 6;
+  memcpy (forged.remote.data, "\xc6\x33\x64\x09\x00\x50", 6);
+  memcpy (server.remote.data, "\x0a\x00\x00\x02\x01\xbb", 6);
+  memset (junk, 0x5a, sizeof junk);
+  junk[0] = 0xc0;			/* Looks long-headed, and is nothing.  */
+  gq_conn_recv_path (c, p->net.now, &forged, junk, sizeof junk);
+  CHECK_EQ (c->st.packets_received, 0);
+  n = server_initial (c, pkt, sizeof pkt, 0);
+  gq_conn_recv_path (c, p->net.now, &server, pkt, n);
+  CHECK_EQ (c->st.packets_received, 1);
+  pair_free (p);
+}
+
+/* RFC 9001 section 6.6: packets that fail authentication are counted
+   against the integrity limit across all keys, 0-RTT ones included.  */
+static void
+test_early_failures_are_counted (void)
+{
+  gq_conn_config cc, sc;
+  struct saved sv;
+  struct pair *p;
+  uint8_t d[4][2048];
+  size_t dl[4], n = 0, k;
+  int idx = -1;
+
+  CHECK_EQ (gq_ticket_keys_new (&g_ring), GQ_OK);
+  CHECK_EQ (gq_replay_cache_new (&g_replay, 100), GQ_OK);
+  g_early_server = 1;
+  memset (&cc, 0, sizeof cc);
+  memset (&sc, 0, sizeof sc);
+  cc.version = GQ_VERSION_1;
+  sc.version = GQ_VERSION_1;
+  get_session (&cc, &sc, 130, &sv);
+  p = early_pair (&cc, &sc, 0, 131, &sv);
+  start_transfer (p, 100);
+  pump (&p->cli);
+  while (n < 4)
+    {
+      size_t l = 0;
+
+      CHECK_EQ (gq_conn_send (p->cli.c, p->net.now, d[n], sizeof d[n], &l),
+                GQ_OK);
+      if (l == 0)
+        break;
+      dl[n++] = l;
+    }
+  /* The datagram whose last packet is 0-RTT.  */
+  for (k = 0; k < n; k++)
+    {
+      size_t off = 0;
+      enum gq_packet_type last = 0;
+
+      while (off < dl[k] && (d[k][off] & 0x80))
+        {
+          gq_long_header h;
+
+          if (gq_long_header_parse (d[k] + off, dl[k] - off, &h) != GQ_OK)
+            break;
+          last = h.type;
+          off += h.packet_len;
+        }
+      if (last == GQ_PKT_ZERO_RTT)
+        idx = (int) k;
+    }
+  CHECK (idx >= 0);
+  if (idx >= 0)
+    {
+      for (k = 0; k < (size_t) idx; k++)
+        gq_conn_recv (p->srv.c, p->net.now, d[k], dl[k]);
+      CHECK_EQ (p->srv.c->aead_failed, 0);
+      d[idx][dl[idx] - 1] ^= 1;		/* The tag of the 0-RTT packet.  */
+      gq_conn_recv (p->srv.c, p->net.now, d[idx], dl[idx]);
+      CHECK_EQ (p->srv.c->aead_failed, 1);
+    }
+  pair_free (p);
+  g_early_server = 0;
+  gq_ticket_keys_free (g_ring);
+  g_ring = NULL;
+  gq_replay_cache_free (g_replay);
+  g_replay = NULL;
+}
+
 /* RFC 9000 section 19.16: RETIRE_CONNECTION_ID for a sequence number we have
    not sent is a PROTOCOL_VIOLATION.  An ID is minted (and counted) when its
    predecessor is retired, before its NEW_CONNECTION_ID is on the wire, so
@@ -3291,6 +3609,11 @@ main (void)
   test_acked_acks_are_retired ();
   test_persistent_congestion_over_several_rounds ();
   test_stream_frames_after_the_end ();
+  test_reset_tokens_of_unused_ids ();
+  test_client_discards_bad_server_packets ();
+  test_new_cid_to_zero_length_peer ();
+  test_client_path_not_set_by_garbage ();
+  test_early_failures_are_counted ();
   test_retire_of_unsent_cid ();
   test_tiny_long_packets_are_dropped ();
   test_server_first_flight_padded ();

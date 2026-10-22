@@ -392,8 +392,23 @@ conn_path_rx_begin (gq_conn *c, const gq_path *from)
     {
       c->rx = *from;
       if (c->paths[c->cur_path].p.remote.len == 0)
-        c->paths[c->cur_path].p = *from;	/* The first datagram.  */
+        {
+          c->paths[c->cur_path].p = *from;	/* The first datagram.  */
+          c->rx_pinned = 1;
+        }
     }
+}
+
+/* The datagram begun with conn_path_rx_begin is processed.  If it set the
+   path and no packet in it was accepted, take that back: anyone can send one
+   datagram, from anywhere, before the peer's own, and it must not decide
+   where the peer is.  */
+void
+conn_path_rx_done (gq_conn *c, int accepted)
+{
+  if (c->rx_pinned && !accepted)
+    memset (&c->paths[c->cur_path].p, 0, sizeof c->paths[c->cur_path].p);
+  c->rx_pinned = 0;
 }
 
 void
@@ -630,12 +645,15 @@ conn_path_probe_pending (gq_conn *c, uint64_t now)
   return -1;
 }
 
-void
+int
 conn_path_challenge_data (gq_conn *c, int idx, uint8_t out[8])
 {
   pathinfo *e = &c->paths[idx];
 
-  gq_random (out, 8);
+  /* Unpredictable, or a peer that cannot receive on the path could still
+     answer: without randomness there is no challenge, and it stays owed.  */
+  if (gq_random (out, 8) != GQ_OK)
+    return GQ_ERR_CRYPTO;
   if (e->n_chal == MAX_CHALLENGES)
     {
       memmove (e->chal[0], e->chal[1], (MAX_CHALLENGES - 1) * 8);
@@ -644,6 +662,7 @@ conn_path_challenge_data (gq_conn *c, int idx, uint8_t out[8])
   memcpy (e->chal[e->n_chal++], out, 8);
   e->chal_sent++;
   e->need_challenge = 0;
+  return GQ_OK;
 }
 
 uint64_t

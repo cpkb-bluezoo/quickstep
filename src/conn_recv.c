@@ -300,6 +300,14 @@ cid_store (gq_conn *c, const gq_frame *f)
   size_t i, active = 0;
   pcid *slot = NULL;
 
+  /* RFC 9000 section 19.15: packets sent to a zero-length ID leave nothing
+     to switch to or retire.  */
+  if (c->dcid.len == 0)
+    {
+      conn_fail (c, GQ_QERR_PROTOCOL_VIOLATION,
+                 "NEW_CONNECTION_ID with a zero-length ID in use");
+      return 1;
+    }
   if (NC->retire_prior_to > NC->seq || NC->cid_len == 0)
     {
       conn_fail (c, GQ_QERR_FRAME_ENCODING, "bad NEW_CONNECTION_ID");
@@ -678,21 +686,17 @@ is_our_cid (const gq_conn *c, const uint8_t *cid, size_t len)
 static int
 stateless_reset_check (gq_conn *c, const uint8_t *data, size_t len)
 {
-  size_t i;
-
   if (len < GQ_STATELESS_RESET_MIN_LEN)
     return 0;
-  for (i = 0; i < MAX_PCID; i++)
-    if (c->p[i].used && c->p[i].has_token
-        && gq_stateless_reset_match (data, len, c->p[i].token))
-      {
-        gq_conn_close_info info;
+  if (conn_reset_token_live (c, data + len - GQ_RESET_TOKEN_LEN))
+    {
+      gq_conn_close_info info;
 
-        memset (&info, 0, sizeof info);
-        info.source = GQ_CLOSE_RESET;
-        conn_enter_closing (c, &info, 1);
-        return 1;
-      }
+      memset (&info, 0, sizeof info);
+      info.source = GQ_CLOSE_RESET;
+      conn_enter_closing (c, &info, 1);
+      return 1;
+    }
   return 0;
 }
 
@@ -810,6 +814,11 @@ recv_retry (gq_conn *c, const gq_long_header *h, const uint8_t *pkt, size_t len)
       || !is_our_cid (c, h->dcid.data, h->dcid.len)
       || s->discarded)
     return 0;
+  /* RFC 9000 section 17.2.5.2: a Retry must name another ID than the one the
+     Initial it answers was sent to.  */
+  if (h->scid.len == c->initial_dcid.len
+      && memcmp (h->scid.data, c->initial_dcid.data, h->scid.len) == 0)
+    return 0;
   if (gq_retry_verify (h, pkt, len, c->initial_dcid.data,
                        c->initial_dcid.len) != GQ_OK)
     return 0;
@@ -875,6 +884,8 @@ recv_vn (gq_conn *c, const gq_long_header *h)
   return 1;
 }
 
+static int count_failed (gq_conn *c);
+
 /* Server: a 0-RTT packet (RFC 9001 section 4.6).  It is a packet of the
    application data space, protected with the early keys the handshake
    engine derived from the resumption ticket.  */
@@ -922,7 +933,8 @@ recv_early (gq_conn *c, uint64_t now, uint8_t *pkt, const gq_long_header *h)
   if (r != GQ_OK)
     {
       drop_long (c, h, "decryption_failure");
-      return 0;
+      /* RFC 9001 section 6.6: counted across all keys, like the others.  */
+      return r == GQ_ERR_CRYPTO && count_failed (c);
     }
   if (pn < s->recv_floor || gq_ranges_contains (&s->recv, pn))
     {
@@ -1096,6 +1108,13 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
       return recv_early (c, now, pkt, &h);
     }
   if (h.type != GQ_PKT_INITIAL && h.type != GQ_PKT_HANDSHAKE)
+    {
+      drop_long (c, &h, "invalid");
+      return 0;
+    }
+  /* RFC 9000 section 17.2.2: a server sends no token in an Initial, and a
+     client that receives one discards the packet.  */
+  if (c->role == GQ_ROLE_CLIENT && h.type == GQ_PKT_INITIAL && h.token.len)
     {
       drop_long (c, &h, "invalid");
       return 0;
