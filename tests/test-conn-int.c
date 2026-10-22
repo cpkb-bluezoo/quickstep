@@ -891,6 +891,49 @@ test_early_failures_are_counted (void)
   g_replay = NULL;
 }
 
+/* Events of K that mention a stateless reset token anywhere.  */
+static size_t
+token_mentions (const struct qsink *k)
+{
+  size_t j, n = 0;
+
+  for (j = 0; j < k->n; j++)
+    if (strstr (k->e[j].fields, "stateless_reset_token"))
+      n++;
+  return n;
+}
+
+/* RFC 9000 section 10.3.2: reset tokens are secrets, and the log of a
+   connection (the transport parameters, NEW_CONNECTION_ID frames, the
+   preferred address) is shipped and pasted into bug reports.  Not logged,
+   unless the bytes of frames are asked for, as for the other secrets.  */
+static void
+test_qlog_reset_tokens_are_opt_in (void)
+{
+  gq_conn_config cc;
+  struct pair *p;
+  size_t seen;
+
+  memset (&cc, 0, sizeof cc);
+  p = pair_new (&cc, &cc, 0, 1);
+  p->qlog_sink[0].keep = p->qlog_sink[1].keep = 1;
+  CHECK (run (&p->net, both_connected, 30000000));
+  run (&p->net, NULL, 3000000);
+  CHECK (p->qlog_sink[0].n > 10 && p->qlog_sink[1].n > 10);
+  CHECK_EQ (token_mentions (&p->qlog_sink[0]), 0);
+  CHECK_EQ (token_mentions (&p->qlog_sink[1]), 0);
+  pair_free (p);
+
+  cc.qlog_raw = 16;
+  p = pair_new (&cc, &cc, 0, 1);
+  p->qlog_sink[0].keep = p->qlog_sink[1].keep = 1;
+  CHECK (run (&p->net, both_connected, 30000000));
+  run (&p->net, NULL, 3000000);
+  seen = token_mentions (&p->qlog_sink[0]) + token_mentions (&p->qlog_sink[1]);
+  CHECK (seen > 0);
+  pair_free (p);
+}
+
 /* RFC 9000 section 19.16: RETIRE_CONNECTION_ID for a sequence number we have
    not sent is a PROTOCOL_VIOLATION.  An ID is minted (and counted) when its
    predecessor is retired, before its NEW_CONNECTION_ID is on the wire, so
@@ -3614,6 +3657,7 @@ main (void)
   test_new_cid_to_zero_length_peer ();
   test_client_path_not_set_by_garbage ();
   test_early_failures_are_counted ();
+  test_qlog_reset_tokens_are_opt_in ();
   test_retire_of_unsent_cid ();
   test_tiny_long_packets_are_dropped ();
   test_server_first_flight_padded ();

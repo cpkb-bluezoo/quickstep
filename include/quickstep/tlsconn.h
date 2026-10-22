@@ -130,6 +130,17 @@ int gq_tlsconn_key_update (gq_tlsconn *c, int request_peer);
    close_notify arrives.  */
 int gq_tlsconn_close (gq_tlsconn *c);
 
+/* The transport reached end of file: the peer will send nothing more.  If
+   its close_notify came the connection is closed already and this returns
+   GQ_OK.  Otherwise the data may have been cut short by whoever sits on the
+   path (a FIN or a reset can be forged, and nothing in the TLS stream says
+   it was meant), which RFC 8446 section 6.1 says must not be taken for the
+   end: the connection is closed with GQ_ERR_PROTOCOL, reported through the
+   closed event, and that is returned.  An application that sees end of file
+   on its socket must call this before treating what it has read as
+   complete.  */
+int gq_tlsconn_eof (gq_tlsconn *c);
+
 int gq_tlsconn_is_connected (const gq_tlsconn *c);
 int gq_tlsconn_is_closed (const gq_tlsconn *c);
 

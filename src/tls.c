@@ -1053,6 +1053,18 @@ on_encrypted_extensions (gq_tls *t, gq_slice msg, gq_slice body)
       default:
         return gqi_fail (t, GQ_ALERT_UNSUPPORTED_EXTENSION, GQ_ERR_PROTOCOL);
       }
+  /* RFC 8446 section 4.2.10: accepting early data means the connection
+     keeps the cipher suite and the ALPN protocol of the ticket.  What went
+     early was written for them; refuse a server that says otherwise.  */
+  if (t->early_accepted)
+    {
+      const gq_tls_session *o = t->offered;
+
+      if (o == NULL || t->suite != o->cipher_suite
+          || t->info.alpn_len != o->alpn_len
+          || memcmp (t->info.alpn, o->alpn, o->alpn_len) != 0)
+        return gqi_fail (t, GQ_ALERT_ILLEGAL_PARAMETER, GQ_ERR_PROTOCOL);
+    }
   if (t->quic)
     {
       if (!have_tp)

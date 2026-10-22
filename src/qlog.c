@@ -632,8 +632,10 @@ qlog_frame (qkv *w, const gq_frame *f, unsigned ack_delay_exp, size_t raw_max)
       qkv_u64 (w, "connection_id_length", f->u.new_connection_id.cid_len);
       qkv_hex (w, "connection_id", f->u.new_connection_id.cid,
                f->u.new_connection_id.cid_len);
-      qkv_hex (w, "stateless_reset_token", f->u.new_connection_id.reset_token,
-               GQ_RESET_TOKEN_LEN);
+      /* A secret (RFC 9000 section 10.3.2): with the data of frames.  */
+      if (raw_max > 0)
+        qkv_hex (w, "stateless_reset_token",
+                 f->u.new_connection_id.reset_token, GQ_RESET_TOKEN_LEN);
       break;
     case GQ_FRAME_RETIRE_CONNECTION_ID:
       qkv_str (w, "frame_type", "retire_connection_id");

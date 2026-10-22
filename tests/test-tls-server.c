@@ -1792,6 +1792,230 @@ test_resumption_basic (void)
   gq_ticket_keys_free (keys);
 }
 
+static int g_lookups;
+
+static int
+counting_lookup (void *u, const uint8_t *id, size_t n, gq_session_state *st)
+{
+  (void) u;
+  (void) id;
+  (void) n;
+  (void) st;
+  g_lookups++;
+  return 1;			/* Not one of ours.  */
+}
+
+/* A ClientHello is up to 64 KB, which holds more than a thousand PSK
+   identities.  Each is looked up (the ticket opened or the application's
+   callback, often a database) before anything about the client has been
+   shown to be true, so a bounded number are tried.  Rewrites the
+   pre_shared_key extension of the hello in CH (LEN bytes, a handshake
+   message) to carry N bogus identities and their binders; returns the new
+   length.  */
+static size_t
+many_identities (uint8_t *ch, size_t len, size_t cap, unsigned n)
+{
+  size_t pos = 4 + 2 + 32, ext_off, ext_end, psk_off = 0, i;
+  unsigned k;
+  size_t ids_len = n * (2 + 16 + 4), bind_len = n * (1 + 32), ext_len;
+
+  pos += 1 + ch[pos];				/* Session ID.  */
+  pos += 2 + (((size_t) ch[pos] << 8) | ch[pos + 1]);	/* Suites.  */
+  pos += 1 + ch[pos];				/* Compression.  */
+  ext_off = pos;
+  ext_end = pos + 2 + (((size_t) ch[pos] << 8) | ch[pos + 1]);
+  CHECK_EQ (ext_end, len);
+  for (i = ext_off + 2; i < ext_end;)
+    {
+      size_t l = ((size_t) ch[i + 2] << 8) | ch[i + 3];
+
+      if (ch[i] == 0x00 && ch[i + 1] == 0x29)
+        psk_off = i;
+      i += 4 + l;
+    }
+  CHECK (psk_off != 0);
+  ext_len = 2 + ids_len + 2 + bind_len;
+  CHECK (psk_off + 4 + ext_len <= cap);
+  ch[psk_off + 2] = (uint8_t) (ext_len >> 8);
+  ch[psk_off + 3] = (uint8_t) ext_len;
+  i = psk_off + 4;
+  ch[i++] = (uint8_t) (ids_len >> 8);
+  ch[i++] = (uint8_t) ids_len;
+  for (k = 0; k < n; k++)
+    {
+      ch[i++] = 0;
+      ch[i++] = 16;
+      memset (ch + i, (int) (0x10 + k), 16);
+      i += 16;
+      memset (ch + i, 0, 4);		/* Obfuscated age.  */
+      i += 4;
+    }
+  ch[i++] = (uint8_t) (bind_len >> 8);
+  ch[i++] = (uint8_t) bind_len;
+  for (k = 0; k < n; k++)
+    {
+      ch[i++] = 32;
+      memset (ch + i, 0x77, 32);
+      i += 32;
+    }
+  /* Extensions block and handshake message lengths.  */
+  ch[ext_off] = (uint8_t) ((i - ext_off - 2) >> 8);
+  ch[ext_off + 1] = (uint8_t) (i - ext_off - 2);
+  ch[1] = (uint8_t) ((i - 4) >> 16);
+  ch[2] = (uint8_t) ((i - 4) >> 8);
+  ch[3] = (uint8_t) (i - 4);
+  return i;
+}
+
+static void
+test_psk_identities_are_capped (void)
+{
+  gq_ticket_keys *keys;
+  static gq_tls_session sess;
+  struct pair *p;
+  uint8_t ch[16384];
+  size_t n;
+
+  CHECK_EQ (gq_ticket_keys_new (&keys), GQ_OK);
+  first_connection (keys, &sess, NULL);
+  p = pair_new ();
+  p->cc.resume = &sess;
+  p->sc.psk_lookup = counting_lookup;
+  p->cnow = p->snow += 5000;
+  pair_create (p);
+  CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+  n = p->c.sent_len[GQ_LEVEL_INITIAL];
+  CHECK (n > 4 && n < sizeof ch);
+  memcpy (ch, p->c.sent[GQ_LEVEL_INITIAL], n);
+  /* Control: the hello as the client made it is looked up once.  */
+  g_lookups = 0;
+  CHECK_EQ (feed_end (&p->s, GQ_LEVEL_INITIAL, ch, n, 0), GQ_OK);
+  CHECK_EQ (g_lookups, 1);
+  pair_free (p);
+
+  p = pair_new ();
+  p->cc.resume = &sess;
+  p->sc.psk_lookup = counting_lookup;
+  p->cnow = p->snow += 5000;
+  pair_create (p);
+  CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+  n = p->c.sent_len[GQ_LEVEL_INITIAL];
+  memcpy (ch, p->c.sent[GQ_LEVEL_INITIAL], n);
+  n = many_identities (ch, n, sizeof ch, 150);
+  g_lookups = 0;
+  feed_end (&p->s, GQ_LEVEL_INITIAL, ch, n, 0);
+  CHECK (g_lookups >= 1 && g_lookups <= 8);
+  pair_free (p);
+  gq_ticket_keys_free (keys);
+}
+
+static int
+always_fresh (void *u, const uint8_t id[32], uint64_t expires_ms,
+              uint64_t now_ms)
+{
+  (void) u;
+  (void) id;
+  (void) expires_ms;
+  (void) now_ms;
+  return 1;
+}
+
+/* RFC 8446 section 4.2.10: a client that sent early data and is told it was
+   accepted must abort if the server chose another ALPN protocol than the
+   one the ticket came with: what went early was meant for that protocol.
+   The server never does this itself; it is checked against one that does.  */
+static void
+test_client_checks_early_data_acceptance (void)
+{
+  gq_ticket_keys *keys;
+  static gq_tls_session sess;
+  struct pair *p;
+  int mutate;
+
+  CHECK_EQ (gq_ticket_keys_new (&keys), GQ_OK);
+
+  /* A session whose connection used h2, from a server allowing early data.  */
+  p = pair_new ();
+  p->calpn[0] = (gq_slice) { (const uint8_t *) "h2", 2 };
+  p->cc.alpn = p->calpn;
+  p->cc.n_alpn = 1;
+  p->salpn[0] = (gq_slice) { (const uint8_t *) "h2", 2 };
+  p->salpn[1] = (gq_slice) { (const uint8_t *) "h3", 2 };
+  p->sc.alpn = p->salpn;
+  p->sc.n_alpn = 2;
+  p->sc.ticket_keys = keys;
+  p->sc.max_early_data = 16384;
+  p->sc.replay_check = always_fresh;
+  pair_create (p);
+  CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+  CHECK_EQ (pump (p, 0), GQ_OK);
+  check_success (p);
+  CHECK (p->c.session.max_early_data > 0);
+  sess = p->c.session;
+  pair_free (p);
+
+  for (mutate = 0; mutate < 2; mutate++)
+    {
+      size_t i, n;
+      int r;
+
+      p = pair_new ();
+      p->calpn[0] = (gq_slice) { (const uint8_t *) "h2", 2 };
+      p->calpn[1] = (gq_slice) { (const uint8_t *) "h3", 2 };
+      p->cc.alpn = p->calpn;
+      p->cc.n_alpn = 2;
+      p->cc.resume = &sess;
+      p->cc.early_data = 1;
+      p->salpn[0] = (gq_slice) { (const uint8_t *) "h2", 2 };
+      p->salpn[1] = (gq_slice) { (const uint8_t *) "h3", 2 };
+      p->sc.alpn = p->salpn;
+      p->sc.n_alpn = 2;
+      p->sc.ticket_keys = keys;
+      p->sc.max_early_data = 16384;
+      p->sc.replay_check = always_fresh;
+      p->cnow = p->snow += 5000;
+      pair_create (p);
+      CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+      if (!mutate)
+        {
+          /* Control: honestly accepted.  */
+          CHECK_EQ (pump (p, 0), GQ_OK);
+          check_success (p);
+          CHECK_EQ (p->c.info.early_data_accepted, 1);
+          pair_free (p);
+          continue;
+        }
+      /* The server's first flight, with the protocol it names changed to
+         another the client offered.  */
+      CHECK_EQ (feed_end (&p->s, GQ_LEVEL_INITIAL,
+                          p->c.sent[GQ_LEVEL_INITIAL],
+                          p->c.sent_len[GQ_LEVEL_INITIAL], 0), GQ_OK);
+      p->c.sent_len[GQ_LEVEL_INITIAL] = 0;
+      CHECK_EQ (feed_end (&p->c, GQ_LEVEL_INITIAL,
+                          p->s.sent[GQ_LEVEL_INITIAL],
+                          p->s.sent_len[GQ_LEVEL_INITIAL], 0), GQ_OK);
+      p->s.sent_len[GQ_LEVEL_INITIAL] = 0;
+      n = p->s.sent_len[GQ_LEVEL_HANDSHAKE];
+      for (i = 0; i + 3 < n; i++)
+        if (p->s.sent[GQ_LEVEL_HANDSHAKE][i] == 2
+            && p->s.sent[GQ_LEVEL_HANDSHAKE][i + 1] == 'h'
+            && p->s.sent[GQ_LEVEL_HANDSHAKE][i + 2] == '2')
+          {
+            p->s.sent[GQ_LEVEL_HANDSHAKE][i + 2] = '3';
+            break;
+          }
+      CHECK (i + 3 < n);
+      r = feed_end (&p->c, GQ_LEVEL_HANDSHAKE, p->s.sent[GQ_LEVEL_HANDSHAKE],
+                    n, 0);
+      CHECK (r != GQ_OK);
+      /* Refused for what it is, not for the transcript that no longer
+         matches (decrypt_error, 51, at Finished).  */
+      CHECK_EQ (p->c.alert, GQ_ALERT_ILLEGAL_PARAMETER);
+      pair_free (p);
+    }
+  gq_ticket_keys_free (keys);
+}
+
 /* Whatever makes the server (or client) decline the ticket, the
    handshake still succeeds as a full one.  */
 static void
@@ -2180,6 +2404,8 @@ main (void)
   test_finished_failures ();
   test_mutations (1200);
   test_resumption_basic ();
+  test_client_checks_early_data_acceptance ();
+  test_psk_identities_are_capped ();
   test_resumption_fallbacks ();
   test_resumption_policy ();
   test_resumption_client_auth ();

@@ -390,7 +390,7 @@ ql_alpn_information (gq_conn *c, const gq_slice *client, size_t nclient,
 /* The transport parameters TP carries (those on the wire, not defaults),
    under the draft's names.  */
 static void
-params_out (qkv *w, const gq_transport_params *tp)
+params_out (qkv *w, const gq_transport_params *tp, int secrets)
 {
   if (gq_tp_has (tp, GQ_TP_ORIGINAL_DESTINATION_CONNECTION_ID))
     qkv_hex (w, "original_destination_connection_id",
@@ -404,7 +404,7 @@ params_out (qkv *w, const gq_transport_params *tp)
     qkv_hex (w, "retry_source_connection_id",
              tp->retry_source_connection_id.data,
              tp->retry_source_connection_id.len);
-  if (gq_tp_has (tp, GQ_TP_STATELESS_RESET_TOKEN))
+  if (secrets && gq_tp_has (tp, GQ_TP_STATELESS_RESET_TOKEN))
     qkv_hex (w, "stateless_reset_token", tp->stateless_reset_token,
              GQ_RESET_TOKEN_LEN);
   if (gq_tp_has (tp, GQ_TP_DISABLE_ACTIVE_MIGRATION))
@@ -451,7 +451,9 @@ params_out (qkv *w, const gq_transport_params *tp)
           qkv_u64 (w, "port_v6", pa->ipv6_port);
         }
       qkv_hex (w, "connection_id", pa->cid.data, pa->cid.len);
-      qkv_hex (w, "stateless_reset_token", pa->reset_token, GQ_RESET_TOKEN_LEN);
+      if (secrets)
+        qkv_hex (w, "stateless_reset_token", pa->reset_token,
+                 GQ_RESET_TOKEN_LEN);
       qkv_pop (w);
     }
   if (gq_tp_has (tp, GQ_TP_MAX_DATAGRAM_FRAME_SIZE))
@@ -489,7 +491,7 @@ ql_parameters_set (gq_conn *c, int remote, const gq_transport_params *tp)
   if ((w = qlog_begin (c, QE_PARAMETERS_SET, NULL)) == NULL)
     return;
   qkv_str (w, "initiator", remote ? "remote" : "local");
-  params_out (w, tp);
+  params_out (w, tp, c->ql.raw_max > 0);
   if (remote && c->peer_tp_raw_len)
     {
       unknown_ctx u;
@@ -834,7 +836,7 @@ ql_packet_received (gq_conn *c, const qlog_hdr *h, size_t raw_len,
     return;
   qlog_header (w, h, c->ql.raw_max);
   qkv_append (w, c->ql.rx_frames, x.len);
-  if (reset_token)
+  if (reset_token && c->ql.raw_max > 0)
     qkv_hex (w, "stateless_reset_token", reset_token, GQ_RESET_TOKEN_LEN);
   if (vn)
     versions_out (w, "supported_versions", vn, n_vn);

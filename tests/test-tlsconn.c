@@ -683,6 +683,50 @@ test_coalesced_key_updates (void)
   side_free (s);
 }
 
+/* End of file on the transport is not the end of the data unless the peer
+   said so with close_notify (RFC 8446 section 6.1): whoever can inject a FIN
+   or a reset would otherwise cut what is read off, undetected.  */
+static void
+test_transport_eof (void)
+{
+  struct side *s;
+  static const uint8_t cn[2] = { 1, 0 };
+
+  /* Data, then a FIN with no close_notify: truncation.  */
+  s = side_new ();
+  handshake (s, 0, 1);
+  peer_write (s, GQ_CT_APPLICATION_DATA, (const uint8_t *) "part", 4);
+  CHECK_EQ (deliver (s, 0), GQ_OK);
+  CHECK_EQ (s->ev.app.n, 4);
+  CHECK_EQ (gq_tlsconn_eof (s->conn), GQ_ERR_PROTOCOL);
+  CHECK_EQ (s->ev.closed, 1);
+  CHECK_EQ (s->ev.close_error, GQ_ERR_PROTOCOL);
+  CHECK (gq_tlsconn_is_closed (s->conn));
+  /* Said once.  */
+  CHECK_EQ (gq_tlsconn_eof (s->conn), GQ_ERR_PROTOCOL);
+  CHECK_EQ (s->ev.closed, 1);
+  side_free (s);
+
+  /* After the peer's close_notify it is the end.  */
+  s = side_new ();
+  handshake (s, 0, 1);
+  peer_write (s, GQ_CT_ALERT, cn, 2);
+  CHECK_EQ (deliver (s, 0), GQ_OK);
+  CHECK_EQ (s->ev.closed, 1);
+  CHECK_EQ (s->ev.close_error, 0);
+  CHECK_EQ (gq_tlsconn_eof (s->conn), GQ_OK);
+  CHECK_EQ (s->ev.closed, 1);
+  side_free (s);
+
+  /* Before the handshake is done.  */
+  s = side_new ();
+  CHECK_EQ (gq_tlsconn_client_new (&s->conn, &s->cfg, &s->events), GQ_OK);
+  CHECK_EQ (gq_tlsconn_start (s->conn), GQ_OK);
+  CHECK_EQ (gq_tlsconn_eof (s->conn), GQ_ERR_PROTOCOL);
+  CHECK_EQ (s->ev.closed, 1);
+  side_free (s);
+}
+
 static void
 test_failures (void)
 {
@@ -835,6 +879,7 @@ main (void)
   test_rekey_by_count ();
   test_flights_over_tcp ();
   test_coalesced_key_updates ();
+  test_transport_eof ();
   test_failures ();
   TST_DONE ();
 }

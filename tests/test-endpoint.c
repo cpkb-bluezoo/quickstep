@@ -27,6 +27,9 @@
 #include <quickstep/status.h>
 #include <quickstep/endpoint.h>
 
+#ifdef __GLIBC__
+# include <malloc.h>		/* mallinfo2.  */
+#endif
 #include "tst-util.h"
 #include "tst-qlogcheck.h"
 
@@ -1199,8 +1202,9 @@ test_stateless_reset (void)
      connection it does not have.  */
   CHECK (esink_null (&net->qs[0], "quic:packet_sent",
                      "header.packet_type=stateless_reset") >= 1);
-  CHECK (esink_null (&net->qs[0], "quic:packet_sent",
-                     "stateless_reset_token=") >= 1);
+  /* Its token is a secret and is not in the log.  */
+  CHECK_EQ (esink_null (&net->qs[0], "quic:packet_sent",
+                        "stateless_reset_token="), 0);
   CHECK (esink_null (&net->qs[0], "quic:packet_dropped",
                      "trigger=connection_unknown") >= 1);
   /* The client's side of it: the connection closed by the reset.  */
@@ -1439,6 +1443,65 @@ test_retry_with_other_cid_length (void)
   net_free (net);
 }
 
+#ifdef __GLIBC__
+/* Carry whatever FROM has to send to TO, once round, at the time NOW.  */
+static void
+hand_over (gq_endpoint *from, gq_endpoint *to, uint64_t now)
+{
+  uint8_t d[2048];
+  size_t l;
+  gq_path via, back;
+
+  for (;;)
+    {
+      if (gq_endpoint_send (from, now, d, sizeof d, &l, &via) != GQ_OK
+          || l == 0)
+        break;
+      back.local = via.remote;
+      back.remote = via.local;
+      gq_endpoint_recv (to, now, &back, d, l);
+    }
+}
+
+/* Every packet moves a connection's deadlines, and the endpoint puts the new
+   deadline in a heap and leaves the old one there until it comes to the top.
+   A peer that sends small packets fast, with the next deadline always a
+   little later, would make the heap grow by a record a packet for as long as
+   those deadlines are in the future (30 seconds, the idle timeout): 300,000
+   of them at 10,000 packets a second.  The heap is cleaned out when it holds
+   many times more records than there are connections.  */
+static void
+test_timer_heap_is_bounded (void)
+{
+  struct net *net = net_new (NULL, 17, NULL);
+  struct capp *a;
+  uint64_t id, now;
+  size_t before, after;
+  int i;
+  uint8_t byte;
+
+  a = client_conn (net, 1, NULL);
+  CHECK (run (net, all_clients_done, 60000000));
+  CHECK (a->connected);
+  CHECK_EQ (gq_conn_stream_open (a->c, 1, &id), GQ_OK);
+  now = net->now;
+  before = mallinfo2 ().uordblks;
+  for (i = 0; i < 6000; i++)
+    {
+      now += 200;		/* Microseconds: 5,000 packets a second.  */
+      byte = pat (id, (uint64_t) i);	/* What the other end expects.  */
+      CHECK (gq_conn_stream_write (a->c, id, &byte, 1) >= 0);
+      hand_over (net->node[1].ep, net->node[0].ep, now);
+      hand_over (net->node[0].ep, net->node[1].ep, now);
+    }
+  after = mallinfo2 ().uordblks;
+  CHECK_EQ (gq_endpoint_connections (net->node[0].ep), 1);
+  /* One connection each: a record or two per packet would be 300 KB.  */
+  CHECK (after < before + 100000);
+  net_free (net);
+}
+#endif
+
 /* Busy servers ask for a Retry without being told to: by default once half
    of max_connections exist, so that the rest can only be taken up by clients
    that can receive at their address.  */
@@ -1524,6 +1587,9 @@ main (void)
   test_limits_and_refusal ();
   test_undecryptable_initial_is_forgotten ();
   test_retry_by_default_when_busy ();
+#ifdef __GLIBC__
+  test_timer_heap_is_bounded ();
+#endif
   test_retry_with_other_cid_length ();
   test_idle_timeouts ();
   test_rebinding_through_endpoint ();

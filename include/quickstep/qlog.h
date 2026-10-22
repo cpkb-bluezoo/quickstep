@@ -38,8 +38,11 @@
 
    gq_conn_config.qlog_importance chooses how much is logged, by the draft's
    importance levels, and qlog_raw how many bytes of the data in frames are
-   included.  Secrets are never logged: key_updated names the key and its
-   phase but carries no key bytes.
+   included.  Secrets are not logged by default: key_updated names the key
+   and its phase but carries no key bytes, and stateless reset tokens (whoever
+   has one can end the connection, RFC 9000 section 10.3.2) are left out of
+   the transport parameters, NEW_CONNECTION_ID frames and reset events unless
+   qlog_raw is nonzero, as the data of frames is.
 
    Every event of the draft is produced but frames_created, frames_parsed and
    frames_processed, which repeat what packet_sent and packet_received carry,

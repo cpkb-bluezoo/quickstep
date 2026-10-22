@@ -60,6 +60,12 @@ gq_crypto_init (void)
     return GQ_OK;
   if (!gcry_check_version (GQ_MIN_GCRYPT))
     return GQ_ERR_CRYPTO;
+  /* libgcrypt prints "using insecure memory" to stderr when it cannot lock
+     its secure memory (a container, an exhausted RLIMIT_MEMLOCK), the first
+     time key material is made.  This library never writes to stderr
+     (status.h).  An application that wants secure memory, or the warning,
+     initialises libgcrypt itself before the first call here.  */
+  gcry_control (GCRYCTL_DISABLE_SECMEM_WARN);
   gcry_control (GCRYCTL_INITIALIZATION_FINISHED, 0);
   return GQ_OK;
 }

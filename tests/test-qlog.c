@@ -550,6 +550,11 @@ test_frames_reset_and_cids (void)
   CHECK (qline_is_u (&q, "frames.0.retire_prior_to", 1));
   CHECK (qline_is_u (&q, "frames.0.connection_id_length", 4));
   CHECK (qline_is (&q, "frames.0.connection_id", "aabbccdd"));
+  /* The token is a secret (RFC 9000 section 10.3.2: whoever has it can end
+     the connection): not logged unless the bytes of frames are asked for.  */
+  CHECK (qline_get (&q, "frames.0.stateless_reset_token") == NULL);
+  qline_free (&q);
+  CHECK (frame_line (&f, 3, 16, &q));
   CHECK (qline_is (&q, "frames.0.stateless_reset_token",
                    "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"));
   qline_free (&q);

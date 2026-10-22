@@ -501,3 +501,12 @@ gq_tls12conn_read_seq (const gq_tls12conn *c)
 {
   return gq_record12_read_seq (&c->rec);
 }
+
+int
+gq_tls12conn_eof (gq_tls12conn *c)
+{
+  if (c == NULL)
+    return GQ_ERR_INVAL;
+  finish (c, GQ_ERR_PROTOCOL, -1);
+  return c->status;
+}

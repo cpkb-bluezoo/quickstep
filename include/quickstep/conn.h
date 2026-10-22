@@ -357,7 +357,8 @@ typedef struct gq_conn_config
      is how many bytes of the data of each CRYPTO, STREAM, DATAGRAM and
      NEW_TOKEN frame to include, as hex, in the events that carry frames; 0,
      the default, logs their lengths and none of the bytes, which can be
-     secret or personal.  */
+     secret or personal.  Nonzero also logs stateless reset tokens, which
+     are secrets (whoever has one can end the connection).  */
   gq_qlog_fn qlog;
   void *qlog_user;
   int qlog_importance;

@@ -29,7 +29,10 @@
 
    All functions return a gq_status.  Output buffers are exact-size; no
    function allocates.  Call gq_crypto_init once, before creating
-   threads, or let the first use do it.  */
+   threads.  Every constructor in the library calls it too, but libgcrypt's
+   own initialisation cannot be run by two threads at once, so a program
+   whose threads may create the first connection or listener concurrently
+   must have called it, or initialised libgcrypt itself, beforehand.  */
 
 #ifndef QUICKSTEP_CRYPTO_H
 #define QUICKSTEP_CRYPTO_H
@@ -42,7 +45,11 @@ extern "C" {
 #endif
 
 /* Initialize libgcrypt if the application has not already done so.
-   Idempotent.  Returns GQ_OK or GQ_ERR_CRYPTO (library too old).  */
+   Idempotent, but not safe to run from two threads at once the first time.
+   When it does the initialising it turns off libgcrypt's warning about
+   insecure memory, since the library never writes to stderr; initialise
+   libgcrypt yourself first to configure its secure memory or keep the
+   warning.  Returns GQ_OK or GQ_ERR_CRYPTO (library too old).  */
 int gq_crypto_init (void);
 
 /* Fill BUF with LEN cryptographically strong random bytes.  */

@@ -519,6 +519,9 @@ gq_tls_server_set_ticket_keys (gq_tls *t, gq_ticket_keys *keys)
 }
 
 /* Find the first identity that opens and is acceptable.  */
+/* Identities of a ClientHello's pre_shared_key that are looked at.  */
+#define MAX_PSK_TRIED 8
+
 static int
 choose_psk (gq_tls *t, const gq_client_hello *ch, const struct choice *c)
 {
@@ -528,7 +531,11 @@ choose_psk (gq_tls *t, const gq_client_hello *ch, const struct choice *c)
   gq_session_state s;
   int ok;
 
-  while (gq_psk_identity_next (&ids, &id, &age) == 1)
+  /* A ClientHello of 64 KB holds over a thousand identities, each a ticket
+     to open or a lookup in whatever the application keeps, before the client
+     has shown anything.  A client has one or two; the rest are not tried
+     (the handshake then simply is not a resumption).  */
+  while (index < MAX_PSK_TRIED && gq_psk_identity_next (&ids, &id, &age) == 1)
     {
       ok = 0;
       if (t->scfg.ticket_keys

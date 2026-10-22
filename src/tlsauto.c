@@ -507,3 +507,22 @@ gq_tlsauto_version (const gq_tlsauto *c)
 {
   return c->c13 ? 0x0304 : c->c12 ? 0x0303 : 0;
 }
+
+int
+gq_tlsauto_eof (gq_tlsauto *c)
+{
+  if (c == NULL)
+    return GQ_ERR_INVAL;
+  if (c->c13)
+    return gq_tlsconn_eof (c->c13);
+  if (c->c12)
+    return gq_tls12conn_eof (c->c12);
+  /* The hello of the peer has not been seen: no engine yet.  */
+  if (!c->failed)
+    {
+      c->failed = 1;
+      if (c->ev.closed)
+        c->ev.closed (c->ev.user, GQ_ERR_PROTOCOL, -1);
+    }
+  return GQ_ERR_PROTOCOL;
+}

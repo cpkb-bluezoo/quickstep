@@ -76,6 +76,9 @@ int gq_tls12conn_send (gq_tls12conn *c, const uint8_t *data, size_t len);
 /* Send close_notify.  The connection closes when the peer's arrives.  */
 int gq_tls12conn_close (gq_tls12conn *c);
 
+/* The transport reached end of file; as gq_tlsconn_eof.  */
+int gq_tls12conn_eof (gq_tls12conn *c);
+
 int gq_tls12conn_is_connected (const gq_tls12conn *c);
 int gq_tls12conn_is_closed (const gq_tls12conn *c);
 

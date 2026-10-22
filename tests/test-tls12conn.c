@@ -276,6 +276,40 @@ test_data (struct ident *id, const uint16_t *suite, size_t chunk)
   link_free (l);
 }
 
+/* End of file without the peer's close_notify is truncation, not the end
+   (RFC 5246 section 7.2.1: the receiver must not take it for the end of the
+   data).  */
+static void
+test_transport_eof (void)
+{
+  struct link *l = link_new (&fx_ec, NULL, NULL, NULL, NULL,
+                             GQ_CLIENT_AUTH_NONE);
+
+  CHECK_EQ (gq_tls12conn_start (l->c), GQ_OK);
+  pump (l, 0);
+  CHECK (l->ce.connected && l->se.connected);
+  CHECK_EQ (gq_tls12conn_send (l->s, (const uint8_t *) "part", 4), GQ_OK);
+  pump (l, 0);
+  CHECK_EQ (l->ce.app.n, 4);
+  CHECK_EQ (gq_tls12conn_eof (l->c), GQ_ERR_PROTOCOL);
+  CHECK_EQ (l->ce.closed, 1);
+  CHECK_EQ (l->ce.close_error, GQ_ERR_PROTOCOL);
+  CHECK_EQ (gq_tls12conn_eof (l->c), GQ_ERR_PROTOCOL);
+  CHECK_EQ (l->ce.closed, 1);
+  link_free (l);
+
+  /* After close_notify it is the end.  */
+  l = link_new (&fx_ec, NULL, NULL, NULL, NULL, GQ_CLIENT_AUTH_NONE);
+  CHECK_EQ (gq_tls12conn_start (l->c), GQ_OK);
+  pump (l, 0);
+  CHECK_EQ (gq_tls12conn_close (l->s), GQ_OK);
+  pump (l, 0);
+  CHECK (l->ce.closed == 1 && l->ce.close_error == 0);
+  CHECK_EQ (gq_tls12conn_eof (l->c), GQ_OK);
+  CHECK_EQ (l->ce.closed, 1);
+  link_free (l);
+}
+
 static void
 test_resume_conn (void)
 {
@@ -673,6 +707,7 @@ main (void)
   test_data (&fx_ec, s_ecdsachacha, 13);
   test_data (&fx_rsa, s_rsa256, 0);
   test_data (&fx_ec, NULL, 5000);
+  test_transport_eof ();
   test_resume_conn ();
   test_client_auth_conn ();
   test_wire_errors ();

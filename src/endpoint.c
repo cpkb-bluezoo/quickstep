@@ -283,11 +283,70 @@ unregister_cid (gq_endpoint *ep, struct entry *e, const uint8_t *cid,
 
 /* ---- Timers and the wake list ---- */
 
+/* Restore the heap property below I.  */
+static void
+heap_down (gq_endpoint *ep, size_t i)
+{
+  struct timer v = ep->heap[i];
+
+  while (1)
+    {
+      size_t l = 2 * i + 1, r = l + 1, m = i;
+      uint64_t best = v.at;
+
+      if (l < ep->heap_n && ep->heap[l].at < best)
+        {
+          m = l;
+          best = ep->heap[l].at;
+        }
+      if (r < ep->heap_n && ep->heap[r].at < best)
+        m = r;
+      if (m == i)
+        break;
+      ep->heap[i] = ep->heap[m];
+      i = m;
+    }
+  ep->heap[i] = v;
+}
+
+/* Drop the records that no longer stand for a deadline.  Each change of a
+   connection's deadline leaves its old record where it is until it reaches
+   the top, and packets move deadlines (the idle timeout, 30 seconds ahead,
+   with every one): a peer that sends small packets fast would grow the heap
+   by a record a packet, without bound short of the deadlines passing.  */
+static void
+heap_compact (gq_endpoint *ep)
+{
+  size_t i, k = 0;
+
+  for (i = 0; i < ep->heap_n; i++)
+    {
+      struct timer t = ep->heap[i];
+      struct entry *e = t.e;
+
+      if (e->dead || t.gen != e->gen || e->deadline != t.at)
+        {
+          if (--e->timers == 0 && e->dead)
+            free (e);
+        }
+      else
+        ep->heap[k++] = t;
+    }
+  ep->heap_n = k;
+  for (i = k / 2; i-- > 0;)
+    heap_down (ep, i);
+}
+
 static void
 heap_push (gq_endpoint *ep, uint64_t at, struct entry *e, unsigned gen)
 {
   size_t i;
 
+  /* At most one record per connection is current: clean out the rest before
+     there are several times as many of them as connections.  What is left
+     is below the limit, so the cost of this is a few operations a push.  */
+  if (ep->heap_n >= 4 * ep->n_conns + 64)
+    heap_compact (ep);
   if (ep->heap_n == ep->heap_cap)
     {
       size_t cap = ep->heap_cap ? ep->heap_cap * 2 : 64;
@@ -861,7 +920,8 @@ ep_ql_reply_sent (gq_endpoint *ep, const uint8_t *d, size_t len)
       else
         h.type = "stateless_reset";
       qlog_header (&w, &h, 0);
-      if (!strcmp (h.type, "stateless_reset") && len >= GQ_RESET_TOKEN_LEN)
+      if (!strcmp (h.type, "stateless_reset") && len >= GQ_RESET_TOKEN_LEN
+          && ep->cfg.conn.qlog_raw > 0)
         qkv_hex (&w, "stateless_reset_token", d + len - GQ_RESET_TOKEN_LEN,
                  GQ_RESET_TOKEN_LEN);
       if (nvn)

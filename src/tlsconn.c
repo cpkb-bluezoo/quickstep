@@ -606,3 +606,14 @@ gq_tlsconn_read_seq (const gq_tlsconn *c)
 {
   return gq_record_read_seq (&c->rec);
 }
+
+int
+gq_tlsconn_eof (gq_tlsconn *c)
+{
+  if (c == NULL)
+    return GQ_ERR_INVAL;
+  /* Closed by the peer's close_notify (status 0) or by an error already;
+     if neither, this is the cut-off.  */
+  finish (c, GQ_ERR_PROTOCOL, -1);
+  return c->status;
+}

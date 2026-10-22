@@ -71,6 +71,8 @@ int gq_tlsauto_start (gq_tlsauto *c);
 int gq_tlsauto_receive (gq_tlsauto *c, const uint8_t *data, size_t len);
 int gq_tlsauto_send (gq_tlsauto *c, const uint8_t *data, size_t len);
 int gq_tlsauto_close (gq_tlsauto *c);
+/* The transport reached end of file; as gq_tlsconn_eof.  */
+int gq_tlsauto_eof (gq_tlsauto *c);
 int gq_tlsauto_is_connected (const gq_tlsauto *c);
 int gq_tlsauto_is_closed (const gq_tlsauto *c);
 /* Ask for a key update of our sending keys (TLS 1.3 only: GQ_ERR_UNSUPPORTED

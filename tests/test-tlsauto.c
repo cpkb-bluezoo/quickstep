@@ -554,6 +554,34 @@ test_garbage (void)
   peer_free (&s);
 }
 
+/* End of file without close_notify is truncation, in whichever protocol the
+   connection turned out to speak, or before it did.  */
+static void
+test_transport_eof (void)
+{
+  struct peer c, s;
+
+  make_client (&c, KAUTO, 0);
+  make_auto_server (&s, 0);
+  pump (&c, &s, 100000);
+  CHECK (c.connected && s.connected);
+  CHECK_EQ (gq_tlsauto_eof (c.ca), GQ_ERR_PROTOCOL);
+  CHECK_EQ (c.closed, 1);
+  CHECK_EQ (c.error, GQ_ERR_PROTOCOL);
+  CHECK_EQ (gq_tlsauto_eof (c.ca), GQ_ERR_PROTOCOL);
+  peer_free (&c);
+  peer_free (&s);
+
+  /* A server that has not yet decided which protocol the client speaks.  */
+  make_auto_server (&s, 0);
+  CHECK_EQ (gq_tlsauto_eof (s.ca), GQ_ERR_PROTOCOL);
+  CHECK_EQ (s.closed, 1);
+  CHECK_EQ (s.error, GQ_ERR_PROTOCOL);
+  CHECK_EQ (gq_tlsauto_eof (s.ca), GQ_ERR_PROTOCOL);
+  CHECK_EQ (s.closed, 1);
+  peer_free (&s);
+}
+
 /* ---- verify_peer replaces the trust store ---- */
 
 static int
@@ -669,6 +697,7 @@ main (void)
   test_client ();
   test_fragmented_hello ();
   test_garbage ();
+  test_transport_eof ();
   test_verify_peer ();
   TST_DONE ();
 }
