@@ -116,6 +116,29 @@ test_aead (enum gq_aead alg)
                           sizeof ct, back, sizeof back), GQ_ERR_CRYPTO);
   aad[0] ^= 1;
 
+  /* The same in place, as packets are opened: a forgery leaves no
+     plaintext in the buffer it would have been written to.  */
+  {
+    uint8_t buf[100 + 16];
+
+    memcpy (buf, pt, sizeof pt);
+    CHECK_EQ (gq_aead_seal (alg, key, kl, nonce, aad, sizeof aad, buf,
+                            sizeof pt, buf, sizeof buf), GQ_OK);
+    CHECK (memcmp (buf, pt, sizeof pt) != 0);
+    buf[sizeof buf - 3] ^= 0x10;		/* The tag.  */
+    CHECK_EQ (gq_aead_open (alg, key, kl, nonce, aad, sizeof aad, buf,
+                            sizeof buf, buf, sizeof pt), GQ_ERR_CRYPTO);
+    for (i = 0; i < sizeof pt; i++)
+      CHECK (buf[i] == 0);
+    buf[sizeof buf - 3] ^= 0x10;
+    memcpy (buf, pt, sizeof pt);
+    CHECK_EQ (gq_aead_seal (alg, key, kl, nonce, aad, sizeof aad, buf,
+                            sizeof pt, buf, sizeof buf), GQ_OK);
+    CHECK_EQ (gq_aead_open (alg, key, kl, nonce, aad, sizeof aad, buf,
+                            sizeof buf, buf, sizeof pt), GQ_OK);
+    CHECK (memcmp (buf, pt, sizeof pt) == 0);
+  }
+
   /* Empty plaintext, no AAD: tag only.  */
   CHECK_EQ (gq_aead_seal (alg, key, kl, nonce, NULL, 0, NULL, 0, ct, 16),
             GQ_OK);

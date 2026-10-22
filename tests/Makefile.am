@@ -61,4 +61,4 @@ test_qlog_LDFLAGS = -static
 test_replay_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
 test_replay_LDFLAGS = -static
 
-EXTRA_DIST = tst-qkv.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h vectors-mlkem.h vectors-mldsa.h tst-mldsa-cert.h tst-qlogcheck.h
+EXTRA_DIST = tst-qkv.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h vectors-mlkem.h vectors-mldsa.h tst-mldsa-cert.h tst-qlogcheck.h vectors-pss.h

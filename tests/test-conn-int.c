@@ -1049,6 +1049,228 @@ test_idle_timeout_does_not_wrap (void)
   CHECK (c.idle_deadline >= UINT64_C (1) << 63);
 }
 
+/* As forge, with the payload given as bytes.  */
+static void
+forge_raw (gq_conn *from, gq_conn *to, uint64_t now, const uint8_t *payload,
+           size_t plen)
+{
+  uint8_t pl[1100], pkt[1400];
+  size_t len = plen, hdr = 0, out = 0;
+  space *s = &from->sp[SP_APP];
+  uint64_t pn = s->next_pn++;
+
+  memcpy (pl, payload, plen);
+  while (len < 8)
+    pl[len++] = 0;
+  CHECK_EQ (gq_short_header_build (from->dcid.data, from->dcid.len, 0,
+                                   from->w_phase, pn, 4, pkt, sizeof pkt,
+                                   &hdr), GQ_OK);
+  memcpy (pkt + hdr, pl, len);
+  CHECK_EQ (gq_packet_seal (&s->wk, pn, pkt, hdr - 4, 4, len, sizeof pkt,
+                            &out), GQ_OK);
+  gq_conn_recv (to, now, pkt, out);
+}
+
+/* A STREAM frame of LEN bytes of what the test applications expect on
+   stream ID at OFF (they check what they are given).  */
+static gq_frame
+f_stream (uint64_t id, uint64_t off, size_t len, int fin)
+{
+  static uint8_t data[8][64];
+  static unsigned next;
+  uint8_t *d = data[next++ % 8];
+  size_t i;
+  gq_frame f;
+
+  for (i = 0; i < len && i < 64; i++)
+    d[i] = pat (id, off + i);
+  memset (&f, 0, sizeof f);
+  f.type = GQ_FRAME_STREAM;
+  f.u.stream.id = id;
+  f.u.stream.offset = off;
+  f.u.stream.data.data = d;
+  f.u.stream.data.len = len;
+  f.u.stream.fin = fin;
+  return f;
+}
+
+static gq_frame
+f_reset (uint64_t id, uint64_t final_size)
+{
+  gq_frame f;
+
+  memset (&f, 0, sizeof f);
+  f.type = GQ_FRAME_RESET_STREAM;
+  f.u.reset_stream.id = id;
+  f.u.reset_stream.error = 1;
+  f.u.reset_stream.final_size = final_size;
+  return f;
+}
+
+/* Send FR (N frames) from a settled client to a settled server.  EXPECT is
+   the transport error code the client then learns the server closed with,
+   or -1 if the server is to carry on.  */
+static void
+violation_cfg (const gq_frame *fr, size_t n, int expect,
+               const gq_conn_config *scfg)
+{
+  struct pair *p = settled_pair (NULL, scfg);
+
+  forge (p->cli.c, p->srv.c, p->net.now, NULL, fr, n, 0);
+  if (expect < 0)
+    {
+      CHECK (p->srv.c->state < GQ_CONN_CLOSING);
+    }
+  else
+    {
+      CHECK (p->srv.c->state >= GQ_CONN_CLOSING);
+      run (&p->net, NULL, 3000000);
+      CHECK_EQ (p->cli.closed, 1);
+      CHECK_EQ (p->cli.ci.source, GQ_CLOSE_PEER);
+      CHECK_EQ (p->cli.ci.application, 0);
+      CHECK_EQ ((int) p->cli.ci.error, expect);
+    }
+  pair_free (p);
+}
+
+static void
+violation (const gq_frame *fr, size_t n, int expect)
+{
+  violation_cfg (fr, n, expect, NULL);
+}
+
+static void
+violation_raw (const char *hex, int expect)
+{
+  struct pair *p = settled_pair (NULL, NULL);
+  uint8_t pl[64];
+  size_t n = tst_unhex (hex, pl, sizeof pl);
+
+  forge_raw (p->cli.c, p->srv.c, p->net.now, pl, n);
+  CHECK (p->srv.c->state >= GQ_CONN_CLOSING);
+  run (&p->net, NULL, 3000000);
+  CHECK_EQ (p->cli.closed, 1);
+  CHECK_EQ ((int) p->cli.ci.error, expect);
+  pair_free (p);
+}
+
+/* What a peer may not do with streams and credit (RFC 9000 sections 4 and
+   19), as the wire says it, each ending the connection with the right
+   error and nothing else.  The defaults are 100 streams of each kind,
+   256 KiB per stream and 1 MiB in all.  */
+static void
+test_stream_and_credit_violations (void)
+{
+  gq_frame f[5];
+
+  /* Streams: the last one of the limit is fine, the next is not.  The
+     server here allows three of each kind (ids 0, 4, 8 and 2, 6, 10); the
+     test applications look at every stream the server opens, so a limit of
+     a hundred is checked only beyond it.  */
+  {
+    gq_conn_config sc;
+
+    memset (&sc, 0, sizeof sc);
+    sc.initial_max_streams_bidi = 3;
+    sc.initial_max_streams_uni = 3;
+    f[0] = f_stream (8, 0, 5, 0);
+    f[1] = f_stream (10, 0, 5, 0);
+    violation_cfg (f, 2, -1, &sc);
+    f[0] = f_stream (12, 0, 5, 0);
+    violation_cfg (f, 1, GQ_QERR_STREAM_LIMIT, &sc);
+    f[0] = f_stream (14, 0, 5, 0);
+    violation_cfg (f, 1, GQ_QERR_STREAM_LIMIT, &sc);
+  }
+  f[0] = f_stream (400, 0, 5, 0);
+  violation (f, 1, GQ_QERR_STREAM_LIMIT);
+  f[0] = f_stream (402, 0, 5, 0);
+  violation (f, 1, GQ_QERR_STREAM_LIMIT);
+
+  /* Frames a stream's direction does not allow.  Stream 3 is the server's
+     unidirectional: the client cannot send on it.  Stream 2 is the
+     client's own: the server never sends on it.  Stream 1 is the server's,
+     never opened.  */
+  f[0] = f_stream (3, 0, 5, 0);
+  violation (f, 1, GQ_QERR_STREAM_STATE);
+  f[0] = f_reset (3, 0);
+  violation (f, 1, GQ_QERR_STREAM_STATE);
+  memset (&f[0], 0, sizeof f[0]);
+  f[0].type = GQ_FRAME_STREAM_DATA_BLOCKED;
+  f[0].u.stream_data_blocked.id = 3;
+  f[0].u.stream_data_blocked.limit = 5;
+  violation (f, 1, GQ_QERR_STREAM_STATE);
+  memset (&f[0], 0, sizeof f[0]);
+  f[0].type = GQ_FRAME_STOP_SENDING;
+  f[0].u.stop_sending.id = 2;
+  violation (f, 1, GQ_QERR_STREAM_STATE);
+  memset (&f[0], 0, sizeof f[0]);
+  f[0].type = GQ_FRAME_MAX_STREAM_DATA;
+  f[0].u.max_stream_data.id = 2;
+  f[0].u.max_stream_data.max = 1000;
+  violation (f, 1, GQ_QERR_STREAM_STATE);
+  f[0] = f_stream (1, 0, 5, 0);
+  violation (f, 1, GQ_QERR_STREAM_STATE);
+
+  /* Credit.  The last byte of a stream's 256 KiB is fine, the next is not.  */
+  f[0] = f_stream (0, 262143, 1, 0);
+  violation (f, 1, -1);
+  f[0] = f_stream (0, 262144, 1, 0);
+  violation (f, 1, GQ_QERR_FLOW_CONTROL);
+  /* Four streams at their limit use the connection's 1 MiB; a fifth byte,
+     on any stream, is past it.  */
+  f[0] = f_stream (0, 262143, 1, 0);
+  f[1] = f_stream (4, 262143, 1, 0);
+  f[2] = f_stream (8, 262143, 1, 0);
+  f[3] = f_stream (12, 262143, 1, 0);
+  violation (f, 4, -1);
+  f[4] = f_stream (16, 0, 1, 0);
+  violation (f, 5, GQ_QERR_FLOW_CONTROL);
+  /* A reset counts the final size against the credit as well.  */
+  f[0] = f_reset (0, 262145);
+  violation (f, 1, GQ_QERR_FLOW_CONTROL);
+
+  /* Final sizes (RFC 9000 section 4.5).  */
+  f[0] = f_stream (0, 0, 10, 1);
+  f[1] = f_stream (0, 10, 1, 0);		/* Data past the end.  */
+  violation (f, 2, GQ_QERR_FINAL_SIZE);
+  f[0] = f_stream (0, 0, 10, 0);
+  f[1] = f_stream (0, 0, 5, 1);			/* An end before data seen.  */
+  violation (f, 2, GQ_QERR_FINAL_SIZE);
+  f[0] = f_stream (0, 0, 10, 1);
+  f[1] = f_reset (0, 5);			/* Another final size.  */
+  violation (f, 2, GQ_QERR_FINAL_SIZE);
+  f[0] = f_reset (0, 10);
+  f[1] = f_reset (0, 11);
+  violation (f, 2, GQ_QERR_FINAL_SIZE);
+  f[0] = f_stream (0, 0, 10, 1);
+  f[1] = f_stream (0, 0, 10, 1);		/* The same, again: fine.  */
+  violation (f, 2, -1);
+
+  /* Frames that are not valid, or not allowed here.  */
+  violation_raw ("12""d000000000000001", GQ_QERR_FRAME_ENCODING);	/* 2^60+1 */
+  violation_raw ("1f", GQ_QERR_FRAME_ENCODING);			/* Unknown.  */
+  violation_raw ("0600""40ff", GQ_QERR_FRAME_ENCODING);	/* Cut off.  */
+  violation_raw ("0e0000""ff", GQ_QERR_FRAME_ENCODING);
+  violation_raw ("4001", GQ_QERR_FRAME_ENCODING);	/* Non-minimal PING.  */
+  /* A DATAGRAM when the server asked for none.  */
+  memset (&f[0], 0, sizeof f[0]);
+  f[0].type = GQ_FRAME_DATAGRAM;
+  f[0].u.datagram.data.data = (const uint8_t *) "abc";
+  f[0].u.datagram.data.len = 3;
+  violation (f, 1, GQ_QERR_PROTOCOL_VIOLATION);
+  /* An ACK for a packet the server has not sent.  */
+  {
+    static const uint8_t first_range[1] = { 0 };
+
+    memset (&f[0], 0, sizeof f[0]);
+    f[0].type = GQ_FRAME_ACK;
+    f[0].u.ack.largest = 1000000;
+    f[0].u.ack.ranges.data = first_range;
+    f[0].u.ack.ranges.len = 1;
+    violation (f, 1, GQ_QERR_PROTOCOL_VIOLATION);
+  }
+}
+
 /* RFC 9000 section 19.16: RETIRE_CONNECTION_ID for a sequence number we have
    not sent is a PROTOCOL_VIOLATION.  An ID is minted (and counted) when its
    predecessor is retired, before its NEW_CONNECTION_ID is on the wire, so
@@ -3769,6 +3991,7 @@ main (void)
   test_stream_frames_after_the_end ();
   test_flow_windows_are_clamped ();
   test_idle_timeout_does_not_wrap ();
+  test_stream_and_credit_violations ();
   test_reset_tokens_of_unused_ids ();
   test_client_discards_bad_server_packets ();
   test_application_close_in_initial ();

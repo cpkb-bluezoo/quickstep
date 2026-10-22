@@ -48,6 +48,8 @@ CONNECTION_CLOSE 0x1d in an Initial or Handshake packet, are
 PROTOCOL_VIOLATIONs.  Failed 0-RTT packets
 count towards the AEAD integrity limit.  The first datagram a client
 receives, if nothing in it is accepted, does not set the server's address.
+** QUIC: a frame type in a longer encoding than it needs (a PING as 0x4001)
+is refused, as RFC 9000 section 12.4 says; it was taken for the frame.
 ** QUIC endpoint: a connection whose first datagram held no packet that
 decrypts is dropped at once rather than kept for the idle timeout, and the
 timer heap no longer grows with every packet.

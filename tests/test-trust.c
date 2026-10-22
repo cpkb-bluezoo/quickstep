@@ -318,6 +318,126 @@ test_mldsa_chains (void)
 
 #endif
 
+/* A leaf with a subject common name and no subjectAltName at all.  */
+static int
+make_cn_only (struct tst_cert *out, const char *cn, const struct tst_cert *ca)
+{
+  unsigned char serial[4] = { 9, 8, 7, 6 };
+  time_t now = time (NULL);
+
+  gnutls_x509_privkey_init (&out->key);
+  if (gnutls_x509_privkey_generate (out->key, GNUTLS_PK_ECDSA,
+                                    GNUTLS_CURVE_TO_BITS
+                                    (GNUTLS_ECC_CURVE_SECP256R1), 0) < 0)
+    return -1;
+  gnutls_x509_crt_init (&out->crt);
+  gnutls_x509_crt_set_version (out->crt, 3);
+  gnutls_x509_crt_set_key (out->crt, out->key);
+  gnutls_x509_crt_set_serial (out->crt, serial, sizeof serial);
+  gnutls_x509_crt_set_activation_time (out->crt, now - 3600);
+  gnutls_x509_crt_set_expiration_time (out->crt, now + 86400);
+  gnutls_x509_crt_set_dn_by_oid (out->crt, GNUTLS_OID_X520_COMMON_NAME, 0, cn,
+                                 (unsigned) strlen (cn));
+  gnutls_x509_crt_set_key_purpose_oid (out->crt, GNUTLS_KP_TLS_WWW_SERVER, 0);
+  return gnutls_x509_crt_sign2 (out->crt, ca->crt, ca->key, GNUTLS_DIG_SHA256,
+                                0);
+}
+
+/* Which names a certificate stands for, and which certificates may stand
+   between it and the anchor.  */
+static void
+test_names_and_paths (void)
+{
+  struct tst_cert ca, wild, plain, cnonly, midok, midbad, under_ok, under_bad;
+  gq_trust *t;
+  enum gq_cert_error why;
+  gnutls_datum_t d[3];
+  gq_slice chain[3];
+
+  CHECK_EQ (make_cert (&ca, "Test CA", NULL, NULL, -3600, 86400,
+                       GNUTLS_DIG_SHA256), 0);
+  t = trust_for (&ca);
+
+  /* A wildcard covers one label, and not the domain itself.  */
+  CHECK_EQ (make_cert (&wild, "w", "*.example.test", &ca, -3600, 86400,
+                       GNUTLS_DIG_SHA256), 0);
+  CHECK_EQ (verify (t, &wild, "a.example.test", &why), GQ_OK);
+  CHECK_EQ (verify (t, &wild, "a.b.example.test", &why), GQ_ERR_CERT);
+  CHECK_EQ (why, GQ_CERT_HOSTNAME);
+  CHECK_EQ (verify (t, &wild, "example.test", &why), GQ_ERR_CERT);
+  CHECK_EQ (verify (t, &wild, "a.example.other", &why), GQ_ERR_CERT);
+  CHECK_EQ (verify (t, &wild, "", &why) == GQ_OK, 0);
+
+  /* A DNS name is not an address, and an address is not a DNS name.  */
+  CHECK_EQ (make_cert (&plain, "p", "example.test", &ca, -3600, 86400,
+                       GNUTLS_DIG_SHA256), 0);
+  CHECK_EQ (verify (t, &plain, "192.0.2.1", &why), GQ_ERR_CERT);
+  CHECK_EQ (verify (t, &plain, "example.test.evil.test", &why), GQ_ERR_CERT);
+  CHECK_EQ (verify (t, &plain, "xexample.test", &why), GQ_ERR_CERT);
+
+  /* No subjectAltName: GnuTLS falls back to the common name, which RFC 9525
+     does not do.  trust.h says so; this pins what is said.  */
+  CHECK_EQ (make_cn_only (&cnonly, "cn-only.test", &ca), 0);
+  CHECK_EQ (verify (t, &cnonly, "cn-only.test", &why), GQ_OK);
+  CHECK_EQ (verify (t, &cnonly, "other.test", &why), GQ_ERR_CERT);
+
+  /* An intermediate must be a CA: a CA one passes, an end-entity
+     certificate that signed another does not.  */
+  CHECK_EQ (make_cert (&midok, "mid-ca", NULL, &ca, -3600, 86400,
+                       GNUTLS_DIG_SHA256), 0);
+  CHECK_EQ (make_cert (&midbad, "mid-leaf", "mid.test", &ca, -3600, 86400,
+                       GNUTLS_DIG_SHA256), 0);
+  CHECK_EQ (make_cert (&under_ok, "u1", "under.test", &midok, -3600, 86400,
+                       GNUTLS_DIG_SHA256), 0);
+  CHECK_EQ (make_cert (&under_bad, "u2", "under.test", &midbad, -3600, 86400,
+                       GNUTLS_DIG_SHA256), 0);
+  chain[0] = der (&under_ok, &d[0]);
+  chain[1] = der (&midok, &d[1]);
+  CHECK_EQ (gq_trust_verify_chain (t, chain, 2, "under.test", &why), GQ_OK);
+  gnutls_free (d[0].data);
+  gnutls_free (d[1].data);
+  chain[0] = der (&under_bad, &d[0]);
+  chain[1] = der (&midbad, &d[1]);
+  CHECK_EQ (gq_trust_verify_chain (t, chain, 2, "under.test", &why),
+            GQ_ERR_CERT);
+  gnutls_free (d[0].data);
+  gnutls_free (d[1].data);
+  tst_free_cert (&midok);
+  tst_free_cert (&midbad);
+  tst_free_cert (&under_ok);
+  tst_free_cert (&under_bad);
+  tst_free_cert (&wild);
+  tst_free_cert (&plain);
+  tst_free_cert (&cnonly);
+
+  /* A chain of 40 is refused, however well formed, without anything
+     running out.  */
+  {
+    enum { N = 40 };
+    static struct tst_cert c[N + 1];
+    static gnutls_datum_t dd[N + 1];
+    static gq_slice ch[N + 1];
+    int i;
+
+    for (i = 0; i <= N; i++)
+      CHECK_EQ (make_cert (&c[i], "link", i < N ? NULL : "deep.test",
+                           i ? &c[i - 1] : &ca, -3600, 86400,
+                           GNUTLS_DIG_SHA256), 0);
+    /* Leaf first.  */
+    for (i = 0; i <= N; i++)
+      ch[i] = der (&c[N - i], &dd[i]);
+    CHECK (gq_trust_verify_chain (t, ch, N + 1, "deep.test", &why) != GQ_OK);
+    CHECK (gq_trust_verify_chain (t, ch, 3, "deep.test", &why) != GQ_OK);
+    for (i = 0; i <= N; i++)
+      {
+        gnutls_free (dd[i].data);
+        tst_free_cert (&c[i]);
+      }
+  }
+  gq_trust_free (t);
+  tst_free_cert (&ca);
+}
+
 int
 main (void)
 {
@@ -385,6 +505,7 @@ main (void)
 
   test_mldsa_hybrid_chains ();
   test_mldsa_chains ();
+  test_names_and_paths ();
 
   gq_trust_free (t);
   gq_trust_free (empty);

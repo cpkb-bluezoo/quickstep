@@ -173,6 +173,26 @@ test_rejects (void)
   CHECK_EQ (decode_hex ("0408ffff", GQ_ROLE_CLIENT), GQ_ERR_ENCODING);
   /* Unknown and GREASE parameters are skipped, even duplicated.  */
   CHECK_EQ (decode_hex ("4a0a03aabbcc4a0a01ff", GQ_ROLE_CLIENT), GQ_OK);
+  /* max_udp_payload_size: at most 65527 (RFC 9000 section 18.2).  */
+  CHECK_EQ (decode_hex ("0304""8000fff7", GQ_ROLE_CLIENT), GQ_OK);
+  CHECK_EQ (decode_hex ("0304""8000fff8", GQ_ROLE_CLIENT), GQ_ERR_ENCODING);
+  CHECK_EQ (decode_hex ("0304""bfffffff", GQ_ROLE_CLIENT), GQ_ERR_ENCODING);
+  /* Preferred address: 4 + 2 + 16 + 2 + 1 + the ID + 16 bytes, exactly.  */
+  CHECK_EQ (decode_hex ("0d31"
+                        "00000000" "0000" "00000000000000000000000000000000" "0000"
+                        "08" "aaaaaaaaaaaaaaaa"
+                        "00000000000000000000000000000000", GQ_ROLE_SERVER),
+            GQ_OK);
+  CHECK_EQ (decode_hex ("0d30"
+                        "00000000" "0000" "00000000000000000000000000000000" "0000"
+                        "08" "aaaaaaaaaaaaaaaa"
+                        "000000000000000000000000000000", GQ_ROLE_SERVER),
+            GQ_ERR_ENCODING);
+  CHECK_EQ (decode_hex ("0d32"
+                        "00000000" "0000" "00000000000000000000000000000000" "0000"
+                        "08" "aaaaaaaaaaaaaaaa"
+                        "0000000000000000000000000000000000", GQ_ROLE_SERVER),
+            GQ_ERR_ENCODING);
   /* Preferred address with a zero-length CID.  */
   CHECK_EQ (decode_hex ("0d29"
                         "00000000" "0000" "00000000000000000000000000000000" "0000"

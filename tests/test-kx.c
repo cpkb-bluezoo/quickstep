@@ -394,6 +394,101 @@ test_invalid_points (void)
     }
 }
 
+/* A coordinate is a number below the field's prime, written once (RFC 8446
+   section 4.2.8.2, SEC 1 section 2.3.4): a share whose x is the right number
+   plus p is not that point.  The points are real ones (x = 5 on P-256, x = 2
+   on P-384, found with a square root), so what separates them from the
+   accepted share is only that one coordinate is not reduced.  */
+static void
+test_noncanonical_points (void)
+{
+  static const char p256_good[] =
+    "04" "0000000000000000000000000000000000000000000000000000000000000005"
+    "459243b9aa581806fe913bce99817ade11ca503c64d9a3c533415c083248fbcc";
+  static const char p256_bigx[] =
+    "04" "ffffffff00000001000000000000000000000001000000000000000000000004"
+    "459243b9aa581806fe913bce99817ade11ca503c64d9a3c533415c083248fbcc";
+  static const char p384_good[] =
+    "04" "0000000000000000000000000000000000000000000000000000000000000000"
+    "00000000000000000000000000000002"
+    "8cdeadbbd04911a3c1931e26df3fa6439dca9c7eb286fbd46fc319f0e2bb7802"
+    "32baf57825fc0c1912ada2fefe84024c";
+  static const char p384_bigx[] =
+    "04" "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe"
+    "ffffffff000000000000000100000001"
+    "8cdeadbbd04911a3c1931e26df3fa6439dca9c7eb286fbd46fc319f0e2bb7802"
+    "32baf57825fc0c1912ada2fefe84024c";
+  static const struct
+  {
+    unsigned group;
+    size_t point;
+    const char *good, *bigx;
+  } v[] = {
+    { GQ_GROUP_SECP256R1, 65, p256_good, p256_bigx },
+    { GQ_GROUP_SECP384R1, 97, p384_good, p384_bigx },
+    { GQ_GROUP_SECP256R1_MLKEM768, 65, p256_good, p256_bigx },
+    { GQ_GROUP_SECP384R1_MLKEM1024, 97, p384_good, p384_bigx }
+  };
+  size_t i;
+
+  for (i = 0; i < sizeof v / sizeof v[0]; i++)
+    {
+      static gq_kx_key key;
+      static uint8_t share[GQ_KX_SHARE_MAX], server[GQ_KX_SHARE_MAX];
+      uint8_t ss[GQ_KX_SHARED_MAX];
+      size_t cl = v[i].point, n, m;
+
+      /* The hybrids carry the rest of a real share after the point.  */
+      if (v[i].group == GQ_GROUP_SECP256R1_MLKEM768
+          || v[i].group == GQ_GROUP_SECP384R1_MLKEM1024)
+        {
+          CHECK_EQ (gq_kx_generate (v[i].group, &key), GQ_OK);
+          cl = key.share_len;
+          memcpy (share, key.share, cl);
+        }
+      CHECK_EQ (tst_unhex (v[i].good, share, v[i].point), v[i].point);
+      CHECK_EQ (gq_kx_respond (v[i].group, share, cl, server, sizeof server,
+                               &n, ss, sizeof ss, &m), GQ_OK);
+      CHECK_EQ (tst_unhex (v[i].bigx, share, v[i].point), v[i].point);
+      CHECK (gq_kx_respond (v[i].group, share, cl, server, sizeof server, &n,
+                            ss, sizeof ss, &m) != GQ_OK);
+    }
+}
+
+/* X25519 points of small order (RFC 7748 section 6.1, RFC 8446 section
+   7.4.2): they make the shared secret zero whatever our key, so the share
+   is refused.  The list is the eight values below the prime that give
+   it, and the three above the prime that reduce to them.  */
+static void
+test_small_order_points (void)
+{
+  static const char *const bad[] = {
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0100000000000000000000000000000000000000000000000000000000000000",
+    "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+    "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    /* The same with the top bit set, which X25519 ignores.  */
+    "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b880",
+    "0000000000000000000000000000000000000000000000000000000000000080"
+  };
+  size_t i;
+
+  for (i = 0; i < sizeof bad / sizeof bad[0]; i++)
+    {
+      uint8_t share[32], server[GQ_KX_SHARE_MAX], ss[GQ_KX_SHARED_MAX];
+      size_t n, m;
+      int r;
+
+      CHECK_EQ (tst_unhex (bad[i], share, 32), 32);
+      r = gq_kx_respond (GQ_GROUP_X25519, share, 32, server, sizeof server,
+                         &n, ss, sizeof ss, &m);
+      CHECK (r != GQ_OK);
+    }
+}
+
 static void
 test_errors (void)
 {
@@ -456,5 +551,7 @@ main (void)
   test_pure_lengths ();
   test_errors ();
   test_invalid_points ();
+  test_noncanonical_points ();
+  test_small_order_points ();
   TST_DONE ();
 }

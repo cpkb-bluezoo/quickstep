@@ -143,6 +143,83 @@ test_long_errors (void)
   CHECK_EQ (gq_long_header_parse (pkt, 0, &h), GQ_NEED_MORE);
 }
 
+/* The Length field and the lengths before it are checked against the
+   datagram: a packet that claims more than there is, or nothing at all, is
+   not a packet.  */
+static void
+test_length_fields (void)
+{
+  uint8_t pkt[128];
+  gq_long_header h;
+  size_t hdr;
+  static const uint8_t d[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+
+  /* Handshake packet: 15 bytes up to the two-byte Length.  */
+  CHECK_EQ (gq_long_header_build (GQ_PKT_HANDSHAKE, GQ_VERSION_1, d, 8, d, 0,
+                                  NULL, 0, 1, 1, 20, pkt, sizeof pkt, &hdr),
+            GQ_OK);
+  memset (pkt + hdr, 0, 60);
+  /* Exactly as long as it says: taken, and the next packet starts there.  */
+  CHECK_EQ (gq_long_header_parse (pkt, hdr + 20 + 16, &h), GQ_OK);
+  CHECK_EQ (h.packet_len, hdr + 20 + 16);
+  CHECK_EQ (gq_long_header_parse (pkt, hdr + 20 + 16 + 30, &h), GQ_OK);
+  CHECK_EQ (h.packet_len, hdr + 20 + 16);
+  /* More than the datagram holds.  */
+  CHECK_EQ (gq_long_header_parse (pkt, hdr + 20 + 15, &h), GQ_ERR_ENCODING);
+  CHECK_EQ (gq_long_header_parse (pkt, hdr, &h), GQ_ERR_ENCODING);
+  /* A Length of nothing.  */
+  pkt[15] = 0x40;
+  pkt[16] = 0;
+  CHECK_EQ (gq_long_header_parse (pkt, hdr + 40, &h), GQ_ERR_ENCODING);
+
+  /* Initial: an empty token, then one that claims more than the datagram.  */
+  CHECK_EQ (gq_long_header_build (GQ_PKT_INITIAL, GQ_VERSION_1, d, 8, d, 0,
+                                  (const uint8_t *) "tok", 3, 1, 1, 20, pkt,
+                                  sizeof pkt, &hdr), GQ_OK);
+  memset (pkt + hdr, 0, 60);
+  CHECK_EQ (gq_long_header_parse (pkt, hdr + 20 + 16, &h), GQ_OK);
+  CHECK_EQ (h.token.len, 3);
+  pkt[15] = 0x3f;			/* 63 bytes of token that are not there.  */
+  {
+    int r = gq_long_header_parse (pkt, hdr + 20 + 16, &h);
+
+    CHECK (r == GQ_ERR_ENCODING || r == GQ_NEED_MORE);
+  }
+
+  /* A short header with an ID length beyond what exists.  */
+  {
+    gq_short_header sh;
+
+    memset (pkt, 0x41, sizeof pkt);
+    CHECK_EQ (gq_short_header_parse (pkt, sizeof pkt, 20, &sh), GQ_OK);
+    CHECK_EQ (gq_short_header_parse (pkt, sizeof pkt, 21, &sh),
+              GQ_ERR_ENCODING);
+  }
+}
+
+/* The packet number recovered is a packet number: below 2^62, and agreeing
+   with the bytes sent, whatever the largest received (RFC 9000 appendix
+   A.3).  */
+static void
+test_pn_top_of_range (void)
+{
+  const uint64_t top = UINT64_C (1) << 62;
+  uint64_t largest, t;
+  size_t len;
+
+  for (len = 1; len <= 4; len++)
+    for (largest = top - 70000; largest < top; largest += 997)
+      for (t = 0; t < 256; t += 5)
+        {
+          uint64_t mask = (UINT64_C (1) << (8 * len)) - 1;
+          uint64_t full = gq_pn_decode (1, largest, t & mask, len);
+
+          CHECK (full < top);
+          CHECK_EQ (full & mask, t & mask);
+        }
+  CHECK_EQ (gq_pn_decode (1, top - 2, 0xff, 1), top - 1);
+}
+
 static void
 test_rfc_client_initial_header (void)
 {
@@ -299,6 +376,8 @@ main (void)
   test_long_roundtrip (GQ_VERSION_2, GQ_PKT_HANDSHAKE, 3);
   test_long_errors ();
   test_rfc_client_initial_header ();
+  test_length_fields ();
+  test_pn_top_of_range ();
   test_short ();
   test_version_negotiation ();
   test_retry ();

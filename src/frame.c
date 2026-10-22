@@ -136,9 +136,15 @@ parse_one (struct cur *c, gq_frame *f)
 {
   uint64_t t, a, b;
   uint8_t byte;
+  size_t before = c->n;
 
   memset (f, 0, sizeof *f);
   TRY (get_vi (c, &t));
+  /* RFC 9000 section 12.4: a frame type takes the shortest encoding it can,
+     and a longer one is a connection error (it keeps frame parsing simple,
+     and keeps one frame from having several spellings).  */
+  if (before - c->n > gq_varint_size (t))
+    return GQ_ERR_ENCODING;
 
   switch (t)
     {

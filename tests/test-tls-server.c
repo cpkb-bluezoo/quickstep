@@ -1935,11 +1935,12 @@ counting_lookup (void *u, const uint8_t *id, size_t n, gq_session_state *st)
    message) to carry N bogus identities and their binders; returns the new
    length.  */
 static size_t
-many_identities (uint8_t *ch, size_t len, size_t cap, unsigned n)
+many_identities (uint8_t *ch, size_t len, size_t cap, unsigned n,
+                 unsigned n_bind)
 {
   size_t pos = 4 + 2 + 32, ext_off, ext_end, psk_off = 0, i;
   unsigned k;
-  size_t ids_len = n * (2 + 16 + 4), bind_len = n * (1 + 32), ext_len;
+  size_t ids_len = n * (2 + 16 + 4), bind_len = n_bind * (1 + 32), ext_len;
 
   pos += 1 + ch[pos];				/* Session ID.  */
   pos += 2 + (((size_t) ch[pos] << 8) | ch[pos + 1]);	/* Suites.  */
@@ -1974,7 +1975,7 @@ many_identities (uint8_t *ch, size_t len, size_t cap, unsigned n)
     }
   ch[i++] = (uint8_t) (bind_len >> 8);
   ch[i++] = (uint8_t) bind_len;
-  for (k = 0; k < n; k++)
+  for (k = 0; k < n_bind; k++)
     {
       ch[i++] = 32;
       memset (ch + i, 0x77, 32);
@@ -1987,6 +1988,101 @@ many_identities (uint8_t *ch, size_t len, size_t cap, unsigned n)
   ch[2] = (uint8_t) ((i - 4) >> 8);
   ch[3] = (uint8_t) (i - 4);
   return i;
+}
+
+/* The pre_shared_key extension is held to its rules (RFC 8446 section
+   4.2.11): last in the hello, one binder for each identity, and only with
+   psk_key_exchange_modes; with psk_ke alone (which is not supported) the
+   ticket is not looked at and the handshake is a full one.  */
+static void
+test_psk_extension_rules (void)
+{
+  gq_ticket_keys *keys;
+  static gq_tls_session sess;
+  int variant;
+
+  CHECK_EQ (gq_ticket_keys_new (&keys), GQ_OK);
+  first_connection (keys, &sess, NULL);
+  for (variant = 0; variant < 5; variant++)
+    {
+      struct pair *p = pair_new ();
+      uint8_t ch[16384];
+      size_t n;
+      int r;
+
+      p->cc.resume = &sess;
+      p->sc.psk_lookup = counting_lookup;
+      p->cnow = p->snow += 5000;
+      pair_create (p);
+      CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+      n = p->c.sent_len[GQ_LEVEL_INITIAL];
+      memcpy (ch, p->c.sent[GQ_LEVEL_INITIAL], n);
+      switch (variant)
+        {
+        case 1:			/* Another extension after it.  */
+          CHECK (n + 4 <= sizeof ch);
+          {
+            size_t ext_off = 4 + 2 + 32, e;
+
+            ext_off += 1 + ch[ext_off];
+            ext_off += 2 + (((size_t) ch[ext_off] << 8) | ch[ext_off + 1]);
+            ext_off += 1 + ch[ext_off];
+            e = ((size_t) ch[ext_off] << 8 | ch[ext_off + 1]) + 4;
+            ch[ext_off] = (uint8_t) (e >> 8);
+            ch[ext_off + 1] = (uint8_t) e;
+            ch[n] = 0x0a;		/* A GREASE extension, empty.  */
+            ch[n + 1] = 0x0a;
+            ch[n + 2] = 0;
+            ch[n + 3] = 0;
+            n += 4;
+            ch[1] = (uint8_t) ((n - 4) >> 16);
+            ch[2] = (uint8_t) ((n - 4) >> 8);
+            ch[3] = (uint8_t) (n - 4);
+          }
+          break;
+        case 2:			/* Two identities, one binder.  */
+          n = many_identities (ch, n, sizeof ch, 2, 1);
+          break;
+        case 3:			/* No psk_key_exchange_modes.  */
+          CHECK (rename_ext (ch, n, GQ_EXT_PSK_KEY_EXCHANGE_MODES, 0x0fff));
+          break;
+        case 4:			/* psk_ke only.  */
+          {
+            gq_client_hello c;
+            gq_slice v;
+
+            CHECK_EQ (gq_client_hello_parse ((gq_slice) { ch + 4, n - 4 }, &c),
+                      GQ_OK);
+            CHECK (gq_ext_find (c.extensions, GQ_EXT_PSK_KEY_EXCHANGE_MODES,
+                                &v));
+            CHECK (v.len == 2 && v.data[0] == 1);
+            ch[(size_t) (v.data - ch) + 1] = 0;
+          }
+          break;
+        default:
+          break;
+        }
+      g_lookups = 0;
+      r = feed_end (&p->s, GQ_LEVEL_INITIAL, ch, n, 0);
+      if (variant == 0 || variant == 4)
+        {
+          CHECK_EQ (r, GQ_OK);
+          /* The control looks the ticket up; without psk_dhe_ke it is not
+             used at all.  */
+          CHECK_EQ (g_lookups, variant == 0 ? 1 : 0);
+          CHECK_EQ (p->s.alert, -1);
+        }
+      else
+        {
+          CHECK (r != GQ_OK);
+          CHECK (p->s.alert == GQ_ALERT_ILLEGAL_PARAMETER
+                 || p->s.alert == GQ_ALERT_MISSING_EXTENSION
+                 || p->s.alert == GQ_ALERT_DECODE_ERROR);
+          CHECK_EQ (g_lookups, 0);
+        }
+      pair_free (p);
+    }
+  gq_ticket_keys_free (keys);
 }
 
 static void
@@ -2023,7 +2119,7 @@ test_psk_identities_are_capped (void)
   CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
   n = p->c.sent_len[GQ_LEVEL_INITIAL];
   memcpy (ch, p->c.sent[GQ_LEVEL_INITIAL], n);
-  n = many_identities (ch, n, sizeof ch, 150);
+  n = many_identities (ch, n, sizeof ch, 150, 150);
   g_lookups = 0;
   feed_end (&p->s, GQ_LEVEL_INITIAL, ch, n, 0);
   CHECK (g_lookups >= 1 && g_lookups <= 8);
@@ -2528,6 +2624,7 @@ main (void)
   test_resumption_basic ();
   test_client_checks_early_data_acceptance ();
   test_ticket_from_a_clock_slightly_ahead ();
+  test_psk_extension_rules ();
   test_psk_identities_are_capped ();
   test_quic_server_refuses_session_id ();
   test_hrr_legacy_version ();

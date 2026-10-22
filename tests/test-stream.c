@@ -123,7 +123,8 @@ transfer (size_t total, unsigned loss, size_t chunk, uint64_t credit,
               q[nq].off = off;
               q[nq].len = n;
               q[nq].fin = fin;
-              memcpy (q[nq].data, d, n);
+              if (n)			/* A bare FIN has no data (and d is NULL).  */
+                memcpy (q[nq].data, d, n);
               nq++;
             }
         }

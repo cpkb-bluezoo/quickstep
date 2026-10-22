@@ -27,6 +27,7 @@
 #include "../src/mldsa.h"
 #include "tst-util.h"
 #include "vectors-mldsa.h"
+#include "vectors-pss.h"
 
 #ifndef HAVE_GNUTLS
 
@@ -184,6 +185,48 @@ test_policy_and_errors (void)
   gq_privkey_free (priv);
   gq_pubkey_free (pub);
   tst_free_cert (&c);
+}
+
+/* RSA-PSS in TLS 1.3 uses a salt as long as the hash (RFC 8446 section
+   4.2.3): signatures made with the same key and message but another salt
+   length are not signatures under rsa_pss_rsae_sha256.  The vectors were
+   made with the openssl command line, once.  */
+static void
+test_rsa_pss_salt_length (void)
+{
+  static const char cert_hex[] = PSS_CERT;
+  static const char *const sig_hex[] = { PSS_SIG_32, PSS_SIG_0, PSS_SIG_20,
+                                         PSS_SIG_222 };
+  static const uint8_t msg[] = "quickstep PSS salt length";
+  uint8_t cert[1024], sig[256];
+  size_t cl, i;
+  gq_pubkey *pub;
+
+  cl = tst_unhex (cert_hex, cert, sizeof cert);
+  CHECK (cl > 500);
+  CHECK_EQ (gq_pubkey_from_cert (&pub, cert, cl), GQ_OK);
+  for (i = 0; i < 4; i++)
+    {
+      CHECK_EQ (tst_unhex (sig_hex[i], sig, sizeof sig), 256);
+      if (i == 0)
+        {
+          CHECK_EQ (gq_pubkey_verify (pub, GQ_SIG_RSA_PSS_RSAE_SHA256, msg,
+                                      sizeof msg - 1, sig, sizeof sig),
+                    GQ_OK);
+          /* Not under another hash, nor as PKCS#1.  */
+          CHECK (gq_pubkey_verify (pub, GQ_SIG_RSA_PSS_RSAE_SHA384, msg,
+                                   sizeof msg - 1, sig, sizeof sig)
+                 != GQ_OK);
+          CHECK (gq_pubkey_verify (pub, GQ_SIG_RSA_PKCS1_SHA256, msg,
+                                   sizeof msg - 1, sig, sizeof sig)
+                 != GQ_OK);
+        }
+      else
+        CHECK (gq_pubkey_verify (pub, GQ_SIG_RSA_PSS_RSAE_SHA256, msg,
+                                 sizeof msg - 1, sig, sizeof sig)
+               != GQ_OK);
+    }
+  gq_pubkey_free (pub);
 }
 
 static void
@@ -553,6 +596,7 @@ main (void)
   test_key (TST_RSA2048, rsa, 6);
   test_policy_and_errors ();
   test_weak_rsa ();
+  test_rsa_pss_salt_length ();
   test_mldsa_size ();
   test_mldsa_gnutls ();
   test_mldsa_libgcrypt ();

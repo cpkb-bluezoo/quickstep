@@ -377,6 +377,50 @@ test_errors (void)
   CHECK_EQ (left, 2);
 }
 
+/* Offsets and lengths that add up to more than a stream can hold, IDs that
+   cannot be, and lengths that run past the end of what has arrived.  */
+static void
+test_boundaries (void)
+{
+  static struct log l;
+  size_t left;
+
+  /* STREAM: the last byte at offset 2^62 - 2 is the last that fits (the
+     final size is 2^62 - 1); one more is past it (RFC 9000 section 4.5).  */
+  CHECK_EQ (parse_all ("0e00""fffffffffffffffe""01""aa", &left, &l), GQ_OK);
+  CHECK_EQ (parse_all ("0e00""ffffffffffffffff""01""aa", &left, &l),
+            GQ_ERR_ENCODING);
+  CHECK_EQ (parse_all ("0e00""fffffffffffffffe""02""aabb", &left, &l),
+            GQ_ERR_ENCODING);
+
+  /* NEW_CONNECTION_ID: IDs of 1 to 20 bytes; 21 is too long, and the
+     sequence number cannot be below Retire Prior To.  */
+  CHECK_EQ (parse_all ("18""01""00""14""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", &left, &l), GQ_OK);
+  CHECK_EQ (parse_all ("18""01""00""15""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", &left, &l),
+            GQ_ERR_ENCODING);
+  CHECK_EQ (parse_all ("18""01""02""08""cccccccccccccccc"
+                       "dddddddddddddddddddddddddddddddd", &left, &l),
+            GQ_ERR_ENCODING);
+
+  /* A length that runs past the end of what is there is an incomplete
+     frame, which a connection (the packet is whole) turns into an error.  */
+  CHECK_EQ (parse_all ("1c""00""00""05""aabb", &left, &l), GQ_NEED_MORE);
+  CHECK_EQ (parse_all ("31""05""aabb", &left, &l), GQ_NEED_MORE);
+  CHECK_EQ (parse_all ("06""00""05""aabb", &left, &l), GQ_NEED_MORE);
+  CHECK_EQ (parse_all ("07""05""aabb", &left, &l), GQ_NEED_MORE);
+  /* ACK with ECN counts, cut in the counts.  */
+  CHECK_EQ (parse_all ("03""00""00""00""00""01", &left, &l), GQ_NEED_MORE);
+  CHECK_EQ (parse_all ("03""00""00""00""00""01""02""03", &left, &l), GQ_OK);
+
+  /* A frame type takes the shortest encoding (RFC 9000 section 12.4): a
+     PING as 0x4001 is a connection error, not a PING.  */
+  CHECK_EQ (parse_all ("4001", &left, &l), GQ_ERR_ENCODING);
+  CHECK_EQ (parse_all ("400800aa", &left, &l), GQ_ERR_ENCODING);
+  CHECK_EQ (parse_all ("8000000100", &left, &l), GQ_ERR_ENCODING);
+}
+
 static void
 test_ack_encode_validation (void)
 {
@@ -398,6 +442,7 @@ main (void)
 {
   test_chunk_splits ();
   test_errors ();
+  test_boundaries ();
   test_ack_encode_validation ();
   TST_DONE ();
 }
