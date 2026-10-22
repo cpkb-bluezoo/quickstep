@@ -157,6 +157,8 @@ typedef struct lcid
   uint8_t token[GQ_RESET_TOKEN_LEN];
   uint8_t used;			/* Slot in use.  */
   uint8_t announced;		/* NEW_CONNECTION_ID acked or seq 0.  */
+  uint8_t sent;			/* The peer can know it: announced, or its
+				   NEW_CONNECTION_ID has been in a packet.  */
   uint8_t need_send;		/* NEW_CONNECTION_ID must be (re)sent.  */
 } lcid;
 

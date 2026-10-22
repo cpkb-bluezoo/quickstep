@@ -581,7 +581,10 @@ add_app_frames (gq_conn *c, pk *p)
         e.type = SF_NEW_CID;
         e.a = c->l[i].seq;
         if (add (p, &f, 1, &e) == 0)
-          c->l[i].need_send = 0;
+          {
+            c->l[i].need_send = 0;
+            c->l[i].sent = 1;
+          }
       }
   for (i = 0; i < MAX_PCID; i++)
     if (c->p[i].used && c->p[i].retire == 1 && room (p) >= 12)

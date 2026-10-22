@@ -125,6 +125,7 @@ new_lcid (gq_conn *c, int announced, const gq_cid *fixed)
   if (c->cfg.reset_token)
     c->cfg.reset_token (c->cfg.reset_user, l->cid.data, l->cid.len, l->token);
   l->announced = (uint8_t) announced;
+  l->sent = (uint8_t) announced;
   l->need_send = !announced;
   if (c->ev.cid_issued)
     c->ev.cid_issued (c->ev.user, l->cid.data, l->cid.len, l->token);

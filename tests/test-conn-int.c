@@ -573,6 +573,61 @@ test_stream_frames_after_the_end (void)
   pair_free (p);
 }
 
+/* RFC 9000 section 19.16: RETIRE_CONNECTION_ID for a sequence number we have
+   not sent is a PROTOCOL_VIOLATION.  An ID is minted (and counted) when its
+   predecessor is retired, before its NEW_CONNECTION_ID is on the wire, so
+   accepting a retirement of that one lets a peer chain retirements through
+   IDs it was never given, each mint costing us random bytes and callbacks.  */
+static void
+test_retire_of_unsent_cid (void)
+{
+  struct pair *p = settled_pair (NULL, NULL);
+  gq_conn *c = p->cli.c, *s = p->srv.c;
+  gq_frame f;
+  uint64_t unsent;
+
+  memset (&f, 0, sizeof f);
+  f.type = GQ_FRAME_RETIRE_CONNECTION_ID;
+  /* An ID we gave out and the client is not using (it addresses us by the
+     first): retiring it is fine, and mints a replacement that has not been
+     sent yet.  */
+  f.u.retire_connection_id.seq = 3;
+  forge (c, s, p->net.now, NULL, &f, 1, 0);
+  CHECK (s->state < GQ_CONN_CLOSING);
+  unsent = s->next_lseq - 1;
+  CHECK (unsent > 0);
+  /* Retiring the one nobody has been told of is an error.  */
+  f.u.retire_connection_id.seq = unsent;
+  forge (c, s, p->net.now, NULL, &f, 1, 0);
+  CHECK (s->state >= GQ_CONN_CLOSING);
+  run (&p->net, NULL, 3000000);
+  CHECK_EQ (p->cli.closed, 1);
+  CHECK_EQ (p->cli.ci.error, GQ_QERR_PROTOCOL_VIOLATION);
+  pair_free (p);
+
+  /* A chain of them in one packet stops at the first.  */
+  p = settled_pair (NULL, NULL);
+  c = p->cli.c;
+  s = p->srv.c;
+  {
+    gq_frame fr[8];
+    uint64_t first = s->next_lseq;
+    size_t k;
+
+    memset (fr, 0, sizeof fr);
+    for (k = 0; k < 8; k++)
+      {
+        fr[k].type = GQ_FRAME_RETIRE_CONNECTION_ID;
+        fr[k].u.retire_connection_id.seq = k == 0 ? 0 : first + k - 1;
+      }
+    forge (c, s, p->net.now, NULL, fr, 8, 0);
+    CHECK (s->state >= GQ_CONN_CLOSING);
+    /* Only the replacement for the one legitimate retirement was minted.  */
+    CHECK_EQ (s->next_lseq, first + 1);
+  }
+  pair_free (p);
+}
+
 /* An Initial whose Length field is too small to hold a header protection
    sample cannot be unprotected, and anyone who has seen the connection IDs
    (they are in the clear) can send one.  RFC 9000 section 12.2 and RFC 9001
@@ -3236,6 +3291,7 @@ main (void)
   test_acked_acks_are_retired ();
   test_persistent_congestion_over_several_rounds ();
   test_stream_frames_after_the_end ();
+  test_retire_of_unsent_cid ();
   test_tiny_long_packets_are_dropped ();
   test_server_first_flight_padded ();
   test_padding_not_in_1rtt ();

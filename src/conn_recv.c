@@ -383,6 +383,15 @@ cid_retire (gq_conn *c, uint64_t seq)
   for (i = 0; i < MAX_LCID; i++)
     if (c->l[i].used && c->l[i].seq == seq)
       {
+        /* RFC 9000 section 19.16: one we have not sent is as unissued as
+           one never made.  Replacements are made as IDs are retired, so
+           without this a peer could retire them in a chain, each costing a
+           mint, though it has been told of none of them.  */
+        if (!c->l[i].sent)
+          {
+            conn_fail (c, GQ_QERR_PROTOCOL_VIOLATION, "retired unsent ID");
+            return 1;
+          }
         c->l[i].used = 0;
         conn_cid_retired (c, &c->l[i].cid);
         break;
