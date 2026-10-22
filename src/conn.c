@@ -963,6 +963,14 @@ sink_alert (void *user, unsigned code)
   return 0;
 }
 
+static int
+sink_verify (void *user, const gq_slice *chain, size_t n, const char *name)
+{
+  gq_conn *c = user;
+
+  return c->ev.verify_peer (c->ev.user, chain, n, name);
+}
+
 static void
 make_sink (gq_conn *c, gq_tls_sink *k)
 {
@@ -975,6 +983,9 @@ make_sink (gq_conn *c, gq_tls_sink *k)
   k->early_data = sink_early_data;
   k->complete = sink_complete;
   k->alert = sink_alert;
+  /* Only a client verifies a certificate chain here.  */
+  if (c->role == GQ_ROLE_CLIENT && c->ev.verify_peer)
+    k->verify_peer = sink_verify;
 }
 
 /* ---- Creation ---- */

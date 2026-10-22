@@ -97,6 +97,8 @@ struct app
   uint8_t dg_seen[1024];	/* By the id in the payload.  */
   uint8_t dg_fate[1024];
   gq_path last_mig;
+  int vcalls, vresult, vok;	/* verify_peer: calls, answer, args as expected.  */
+  size_t vn;
 };
 
 struct pkt
@@ -972,6 +974,24 @@ struct pair
   struct qsink qlog_sink[2];	/* What each end logged (unless a test did).  */
 };
 
+/* A client trust store of its own (NULL: fx_trust) and a verify_peer
+   callback (0 none, 1 accepts, 2 refuses), for pair_new.  */
+static gq_trust *g_ctrust;
+static int g_cverify;
+
+static int
+ev_verify (void *u, const gq_slice *chain, size_t n, const char *name)
+{
+  struct app *a = u;
+
+  a->vcalls++;
+  a->vn = n;
+  a->vok = n == 1 && chain[0].len == fx_ec.der_len
+           && memcmp (chain[0].data, fx_ec.der, fx_ec.der_len) == 0
+           && name != NULL && strcmp (name, "example.test") == 0;
+  return a->vresult;
+}
+
 static void
 fill_events (gq_conn_events *e, struct app *a)
 {
@@ -1049,6 +1069,14 @@ pair_new (const gq_conn_config *ccfg, const gq_conn_config *scfg,
     }
   fill_events (&p->cev, &p->cli);
   fill_events (&p->sev, &p->srv);
+  if (g_cverify)
+    {
+      p->ccfg.trust = g_cverify == 1 ? NULL : g_ctrust;
+      p->cev.verify_peer = ev_verify;
+      p->cli.vresult = g_cverify == 2;
+    }
+  else if (g_ctrust)
+    p->ccfg.trust = g_ctrust;
   {
     gq_conn_config cc = ccfg ? *ccfg : (gq_conn_config) { 0 };
 
@@ -1210,6 +1238,48 @@ test_handshake (uint32_t version, unsigned loss, uint32_t seed)
   if (!loss)
     CHECK (st.srtt_us < 100000 && st.srtt_us > 10000);
   pair_free (p);
+}
+
+/* verify_peer replaces the trust store: with an empty store a callback that
+   accepts completes the handshake (and gets the chain and the name), one that
+   refuses fails it with bad_certificate, and with none the handshake fails.  */
+static void
+test_verify_peer (void)
+{
+  gq_trust *empty;
+  int mode;
+
+  CHECK_EQ (gq_trust_new (&empty), GQ_OK);
+  g_ctrust = empty;
+  for (mode = 0; mode <= 2; mode++)
+    {
+      struct pair *p;
+
+      g_cverify = mode;
+      p = pair_new (NULL, NULL, 0, 7);
+      if (mode == 1)
+        {
+          CHECK (run (&p->net, both_connected, 30000000));
+          CHECK (p->cli.connected && p->srv.connected);
+          CHECK_EQ (p->cli.vcalls, 1);
+          CHECK_EQ (p->cli.vn, 1);
+          CHECK (p->cli.vok);
+        }
+      else
+        {
+          run (&p->net, both_connected, 30000000);
+          CHECK (!p->cli.connected);
+          CHECK (p->cli.closed);
+          /* A TLS alert as a CRYPTO_ERROR: bad_certificate (42) from the
+             callback, unknown_ca (48) from the empty store.  */
+          CHECK_EQ (p->cli.ci.error, mode == 2 ? 0x100 + 42 : 0x100 + 48);
+          CHECK_EQ (p->cli.vcalls, mode == 2 ? 1 : 0);
+        }
+      pair_free (p);
+    }
+  g_cverify = 0;
+  g_ctrust = NULL;
+  gq_trust_free (empty);
 }
 
 /* glibc can fill every allocation with a fixed pattern before it is handed
@@ -3673,6 +3743,7 @@ main (void)
   test_handshake (GQ_VERSION_1, 0, 4);
   test_handshake (GQ_VERSION_2, 0, 2);
   test_handshake (0, 20, 3);
+  test_verify_peer ();
   test_flights ();
   test_lost_handshake_datagram ();
   test_mldsa_handshake ();

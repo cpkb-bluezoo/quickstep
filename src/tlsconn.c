@@ -203,6 +203,14 @@ sink_ticket (void *u, const gq_tls_ticket *t)
 }
 
 static int
+sink_verify (void *u, const gq_slice *chain, size_t n, const char *name)
+{
+  gq_tlsconn *c = u;
+
+  return c->ev.verify_peer (c->ev.user, chain, n, name);
+}
+
+static int
 sink_alert (void *u, unsigned code)
 {
   gq_tlsconn *c = u;
@@ -259,6 +267,8 @@ gq_tlsconn_client_new (gq_tlsconn **out, const gq_tls_config *config,
   c = conn_alloc (events, 0);
   if (c == NULL)
     return GQ_ERR_NOMEM;
+  if (events->verify_peer)
+    c->sink.verify_peer = sink_verify;
   c->early_max = config->resume ? config->resume->max_early_data : 0;
   r = gq_tls_client_new (&c->tls, config, &c->sink);
   if (r != GQ_OK)

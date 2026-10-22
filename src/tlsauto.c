@@ -263,6 +263,14 @@ w_ticket (void *u, const gq_tls_ticket *t)
   return c->ev.ticket ? c->ev.ticket (c->ev.user, t) : 0;
 }
 
+static int
+w_verify (void *u, const gq_slice *chain, size_t n, const char *name)
+{
+  gq_tlsauto *c = u;
+
+  return c->ev.verify_peer (c->ev.user, chain, n, name);
+}
+
 static void
 w_early_result (void *u, int accepted)
 {
@@ -318,6 +326,7 @@ gq_tlsauto_client_new (gq_tlsauto **out, const gq_tls_config *config,
       c->wev.early_data_result = events->early_data_result ? w_early_result
                                                           : NULL;
       c->wev.closed = w_closed;
+      c->wev.verify_peer = events->verify_peer ? w_verify : NULL;
       c->undecided = 1;
       r = gq_tlsconn_client_new (&c->c13, &c->ccfg, &c->wev);
     }

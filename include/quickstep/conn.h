@@ -214,6 +214,18 @@ typedef struct gq_conn_events
      on a connection that starts in that version; a server refuses it
      otherwise and the handshake runs in full.  */
   void (*ticket) (void *user, const gq_tls_ticket *ticket, uint32_t version);
+  /* Client: certificate validation.  Optional.  If set it is called in
+     place of the check against gq_tls_config.trust (which may then be
+     NULL), with the server's chain (leaf first, N certificates) and the
+     name the connection was configured with, NULL when no SNI was given.
+     Return 0 to accept the chain; nonzero refuses it and closes the
+     connection with a bad_certificate crypto error.  It runs during the
+     handshake and must not call back into the connection.  The chain is
+     valid only for the duration of the call.  Accepting everything defeats
+     the authentication of the server: use it for pinning, debugging and
+     tests.  Not used by servers.  */
+  int (*verify_peer) (void *user, const gq_slice *chain, size_t n,
+                      const char *server_name);
 } gq_conn_events;
 
 /* The congestion controller (gq_conn_config.congestion_control).  Both run

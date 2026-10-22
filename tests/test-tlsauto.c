@@ -72,6 +72,8 @@ struct peer
   gq_tlsconn_events ev;
   struct bytes out, app;
   int connected, closed, error;
+  int vcalls, vresult, vok;	/* verify_peer: calls, answer, args as expected.  */
+  size_t vn;
 };
 
 static int
@@ -552,6 +554,111 @@ test_garbage (void)
   peer_free (&s);
 }
 
+/* ---- verify_peer replaces the trust store ---- */
+
+static int
+ev_verify (void *u, const gq_slice *chain, size_t n, const char *name)
+{
+  struct peer *p = u;
+
+  p->vcalls++;
+  p->vn = n;
+  p->vok = n == 1 && chain[0].len == fx_ec.der_len
+           && memcmp (chain[0].data, fx_ec.der, fx_ec.der_len) == 0
+           && name != NULL && strcmp (name, "example.test") == 0;
+  return p->vresult;
+}
+
+/* A client whose trust store is EMPTY, or absent when a callback is given
+   (VERIFY: 0 none, 1 accepts, 2 refuses).  */
+static void
+make_vp_client (struct peer *p, enum kind k, unsigned auto_versions,
+                int verify, gq_trust *empty)
+{
+  gq_tls_config cfg = client_cfg ();
+
+  cfg.trust = verify == 1 ? NULL : empty;
+  peer_init (p, k);
+  if (verify)
+    {
+      p->ev.verify_peer = ev_verify;
+      p->vresult = verify == 2;
+    }
+  switch (k)
+    {
+    case K13:
+      CHECK_EQ (gq_tlsconn_client_new (&p->c13, &cfg, &p->ev), GQ_OK);
+      CHECK_EQ (gq_tlsconn_start (p->c13), GQ_OK);
+      break;
+    case K12:
+      CHECK_EQ (gq_tls12conn_client_new (&p->c12, &cfg, &p->ev), GQ_OK);
+      CHECK_EQ (gq_tls12conn_start (p->c12), GQ_OK);
+      break;
+    default:
+      CHECK_EQ (gq_tlsauto_client_new (&p->ca, &cfg, &p->ev, auto_versions),
+                GQ_OK);
+      CHECK_EQ (gq_tlsauto_start (p->ca), GQ_OK);
+      break;
+    }
+}
+
+static void
+verify_run (enum kind ck, unsigned versions, enum srvkind sk, unsigned want,
+            gq_trust *empty)
+{
+  int verify;
+
+  for (verify = 0; verify <= 2; verify++)
+    {
+      struct peer c, s;
+      static const uint8_t hello[] = "hello, server";
+
+      make_vp_client (&c, ck, versions, verify, empty);
+      make_server (&s, sk);
+      pump (&c, &s, 100000);
+      if (verify == 1)
+        {
+          CHECK (c.connected && s.connected);
+          CHECK_EQ (c.vcalls, 1);
+          CHECK_EQ (c.vn, 1);
+          CHECK (c.vok);
+          if (ck == KAUTO)
+            CHECK_EQ (gq_tlsauto_version (c.ca), want);
+          CHECK_EQ (peer_send (&c, hello, sizeof hello), GQ_OK);
+          pump (&c, &s, 100000);
+          CHECK (s.app.n == sizeof hello);
+        }
+      else
+        {
+          /* Refused by the callback, or by the empty store.  */
+          CHECK (!c.connected && !s.connected);
+          CHECK (c.closed);
+          CHECK_EQ (c.error, GQ_ERR_CERT);
+          CHECK_EQ (c.vcalls, verify == 2 ? 1 : 0);
+        }
+      peer_free (&c);
+      peer_free (&s);
+    }
+}
+
+static void
+test_verify_peer (void)
+{
+  gq_trust *empty;
+
+  CHECK_EQ (gq_trust_new (&empty), GQ_OK);
+  verify_run (K13, 0, S_BARE13, 0x0304, empty);
+  verify_run (K12, 0, S_BARE12, 0x0303, empty);
+  verify_run (KAUTO, 0, S_AUTO, 0x0304, empty);
+  verify_run (KAUTO, 0, S_AUTO13, 0x0304, empty);
+  /* A server that selects TLS 1.2 is verified the same way.  */
+  verify_run (KAUTO, 0, S_AUTO12, 0x0303, empty);
+  verify_run (KAUTO, 0, S_BARE12, 0x0303, empty);
+  verify_run (KAUTO, GQ_TLSAUTO_TLS12, S_AUTO, 0x0303, empty);
+  verify_run (KAUTO, GQ_TLSAUTO_TLS13, S_AUTO, 0x0304, empty);
+  gq_trust_free (empty);
+}
+
 int
 main (void)
 {
@@ -562,6 +669,7 @@ main (void)
   test_client ();
   test_fragmented_hello ();
   test_garbage ();
+  test_verify_peer ();
   TST_DONE ();
 }
 

@@ -219,6 +219,27 @@ The validation policy is fixed.  SHA-1 and MD5 signature chains fail,
 RSA keys under 2048 bits fail, dates are always checked, and the leaf must
 be usable for the stated purpose (TLS server or client authentication).
 
+@cindex verify_peer
+@cindex pinning
+An application that needs another rule, such as pinning a certificate or
+a fingerprint, accepting a self-signed certificate while debugging, or
+turning the check off in a test, replaces the check with a
+@code{verify_peer} callback.  It is a member of @code{gq_tls_sink}, of
+@code{gq_dtls_events}, and of @code{gq_tlsconn_events} (which
+@code{gq_tlsconn_client_new}, @code{gq_tls12conn_client_new} and
+@code{gq_tlsauto_client_new} take, and which @code{gq_tlsauto} applies to
+TLS 1.2 and TLS 1.3 alike) and of @code{gq_conn_events} for a QUIC client
+(also through @code{gq_endpoint_connect}).  When it is set it is called in
+place of @code{gq_trust_verify_chain} with the chain (leaf first), its
+length and the server name (@code{NULL} if no SNI was given), and
+@code{gq_tls_config.trust} may then be @code{NULL}.  It returns 0 to
+accept; anything else fails the handshake with @code{bad_certificate} and
+@code{GQ_ERR_CERT}.  It runs during the handshake and must not call back
+into the connection.  Accepting every chain defeats the authentication of
+the server, so that is for debugging and tests only.  The check of a
+client's certificate by a server is not replaceable through the connection
+events.
+
 @node Key exchange and signatures
 @section Key exchange and signatures
 

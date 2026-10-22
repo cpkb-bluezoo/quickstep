@@ -75,6 +75,20 @@ typedef struct gq_tlsconn_events
   void (*closed) (void *user, int error, int alert);
   /* Rekey our sending keys after this many records (0: 2^22).  */
   uint64_t rekey_records;
+  /* Client: certificate validation.  Optional.  If set it is called in
+     place of the check against gq_tls_config.trust (which may then be
+     NULL), with the server's chain (leaf first, N certificates) and the
+     name the connection was configured with, NULL when no SNI was given.
+     Return 0 to accept the chain; nonzero refuses it and fails the
+     handshake with bad_certificate and GQ_ERR_CERT.  gq_tlsauto applies it
+     to whichever protocol version the server selects.  It runs during the
+     handshake and must not call back into the connection.  The chain is
+     valid only for the duration of the call.  Accepting everything defeats
+     the authentication of the server: use it for pinning, debugging and
+     tests.  Not used by servers (the client certificate check is not
+     replaceable here).  */
+  int (*verify_peer) (void *user, const gq_slice *chain, size_t n,
+                      const char *server_name);
 } gq_tlsconn_events;
 
 typedef struct gq_tlsconn gq_tlsconn;

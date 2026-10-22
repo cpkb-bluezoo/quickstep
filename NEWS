@@ -2,6 +2,15 @@ quickstep NEWS - history of user-visible changes.
 
 * Noteworthy changes in release ?.? (????-??-??) [?]
 
+** gq_tlsconn_events and gq_conn_events gain an optional verify_peer
+callback, as gq_dtls_events already had, so that the application can replace
+the check of the server's certificate chain against the trust store on TCP
+TLS (gq_tlsconn, gq_tls12conn and gq_tlsauto, for TLS 1.3 and 1.2) and on
+QUIC (also through gq_endpoint_connect), to pin a certificate, to accept an
+untrusted one when asked to, or in tests.  It receives the chain, its length
+and the server name; 0 accepts, anything else fails the handshake with
+bad_certificate (GQ_ERR_CERT).  With it set, gq_tls_config.trust may be
+NULL.  Without it nothing changes.
 ** The peer's point on a NIST curve is checked to be on the curve, in
 uncompressed form, before ECDH, in secp256r1, secp384r1 and the hybrid
 groups that use them, on both the server and the client side.  libgcrypt
