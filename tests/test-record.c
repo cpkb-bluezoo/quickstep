@@ -24,6 +24,7 @@
 #include <quickstep/record.h>
 
 #include "tst-util.h"
+#include "tst-alloc.h"
 #include "vectors-tls.h"
 
 struct got
@@ -155,6 +156,7 @@ test_rfc_chunking (void)
       CHECK_EQ (g.n, 1);
       CHECK_EQ (g.lens[0], 657);
       CHECK_EQ (r.read.seq, 1);
+      gq_record_wipe (&r);
     }
 }
 
@@ -300,6 +302,8 @@ test_protected_rules (void)
   w.write.seq = GQ_REC_SEQ_LIMIT;
   CHECK_EQ (gq_record_protect (&w, GQ_CT_APPLICATION_DATA, data, 1, 0, out,
                                sizeof out, &n), GQ_ERR_RANGE);
+  gq_record_wipe (&w);
+  gq_record_wipe (&r);
 }
 
 static void
@@ -343,6 +347,7 @@ test_receive_failures (void)
         CHECK (g.n == 0);
         if (off >= 5 || off == 0)
           CHECK (rc == GQ_ERR_CRYPTO || rc == GQ_ERR_PROTOCOL);
+        gq_record_wipe (&r);
       }
   }
 
@@ -356,6 +361,7 @@ test_receive_failures (void)
   p = out; l = n;
   CHECK_EQ (gq_record_receive (&r, &p, &l, collect, &g), GQ_ERR_PROTOCOL);
   CHECK_EQ (gq_record_alert (&r), 10);
+  gq_record_wipe (&r);
 
   /* Wrong record sequence (replay/reorder) fails authentication.  */
   memcpy (out, keep, n);
@@ -366,6 +372,7 @@ test_receive_failures (void)
   p = out; l = n;
   CHECK_EQ (gq_record_receive (&r, &p, &l, collect, &g), GQ_ERR_CRYPTO);
   CHECK_EQ (gq_record_alert (&r), 20);
+  gq_record_wipe (&r);
 
   /* Oversize declared length, and a non-TLS header.  */
   {
@@ -388,6 +395,7 @@ test_receive_failures (void)
   {
     static const uint8_t zero[10] = { 0 };
 
+    gq_record_wipe (&w);
     gq_record_init (&w);
     CHECK_EQ (gq_record_set_keys (&w, GQ_DIR_WRITE, GQ_AEAD_AES_128_GCM,
                                   (const uint8_t[32]) { 8 }, 32), GQ_OK);
@@ -403,7 +411,9 @@ test_receive_failures (void)
     memset (&g, 0, sizeof g);
     CHECK_EQ (gq_record_receive (&r, &p, &l, collect, &g), GQ_OK);
     CHECK (g.n == 1 && g.lens[0] == 0 && g.types[0] == GQ_CT_APPLICATION_DATA);
+    gq_record_wipe (&r);
   }
+  gq_record_wipe (&w);
 }
 
 /* The server's first record says 0x0303, never the client's 0x0301.  */
@@ -467,6 +477,7 @@ test_skip_budget (void)
     CHECK_EQ (gq_record_receive (&r, &p, &l, collect, &g), GQ_ERR_CRYPTO);
     CHECK_EQ (gq_record_alert (&r), 20);
   }
+  gq_record_wipe (&r);
 
   /* With a budget both are skipped and the real record is delivered.  */
   gq_record_init (&r);
@@ -483,6 +494,7 @@ test_skip_budget (void)
          && memcmp (g.data[0], "real", 4) == 0);
   CHECK_EQ (gq_record_skip_budget (&r), 0);
   CHECK_EQ (gq_record_read_seq (&r), 1);	/* Skips took no sequence number.  */
+  gq_record_wipe (&r);
 
   /* A budget smaller than the bad record does not help.  */
   gq_record_init (&r);
@@ -496,11 +508,83 @@ test_skip_budget (void)
     p = copy; l = n1;
     CHECK_EQ (gq_record_receive (&r, &p, &l, collect, &g), GQ_ERR_CRYPTO);
   }
+  gq_record_wipe (&r);
+  gq_record_wipe (&early);
+  gq_record_wipe (&good);
+}
+
+/* A record is protected and opened without setting up a cipher.  That is a
+   context allocation, a key schedule and, with libgcrypt's own random number
+   generator, an entropy poll, for every record, and it cost about as much as
+   the encryption of a full one.  The context is made when the keys are.  */
+static void
+test_no_setup_per_record (void)
+{
+  static const enum gq_aead algs[3] = { GQ_AEAD_AES_128_GCM,
+                                        GQ_AEAD_AES_256_GCM,
+                                        GQ_AEAD_CHACHA20_POLY1305 };
+  static uint8_t out[GQ_REC_MAX_RECORD], pt[1000];
+  static struct got g;
+  int a, i;
+
+  for (i = 0; i < (int) sizeof pt; i++)
+    pt[i] = (uint8_t) (i * 3);
+  for (a = 0; a < 3; a++)
+    {
+      uint8_t secret[48];
+      size_t hl = gq_hash_size (gq_aead_hash (algs[a])), n, l;
+      gq_record w, r;
+      unsigned long before = 0;
+      uint8_t *p;
+
+      memset (secret, 0x42 + a, sizeof secret);
+      gq_record_init (&w);
+      gq_record_init (&r);
+      CHECK_EQ (gq_record_set_keys (&w, GQ_DIR_WRITE, algs[a], secret, hl),
+                GQ_OK);
+      CHECK_EQ (gq_record_set_keys (&r, GQ_DIR_READ, algs[a], secret, hl),
+                GQ_OK);
+      for (i = 0; i < 201; i++)
+        {
+          if (i == 1)
+            before = tst_allocs;	/* The first is the warm up.  */
+          CHECK_EQ (gq_record_protect (&w, GQ_CT_APPLICATION_DATA, pt,
+                                       (size_t) (i * 5), 0, out, sizeof out,
+                                       &n), GQ_OK);
+          p = out;
+          l = n;
+          memset (&g, 0, sizeof g);
+          CHECK_EQ (gq_record_receive (&r, &p, &l, collect, &g), GQ_OK);
+          CHECK (l == 0 && g.n == 1 && g.lens[0] == (size_t) (i * 5)
+                 && memcmp (g.data[0], pt, g.lens[0] < 256 ? g.lens[0] : 256)
+                    == 0);
+        }
+      CHECK_EQ (tst_allocs, before);
+      /* New keys replace the old, and the context with them.  */
+      memset (secret, 0x77, sizeof secret);
+      CHECK_EQ (gq_record_set_keys (&w, GQ_DIR_WRITE, algs[a], secret, hl),
+                GQ_OK);
+      CHECK_EQ (gq_record_set_keys (&r, GQ_DIR_READ, algs[a], secret, hl),
+                GQ_OK);
+      before = tst_allocs;
+      CHECK_EQ (gq_record_protect (&w, GQ_CT_APPLICATION_DATA, pt, 100, 0, out,
+                                   sizeof out, &n), GQ_OK);
+      p = out;
+      l = n;
+      memset (&g, 0, sizeof g);
+      CHECK_EQ (gq_record_receive (&r, &p, &l, collect, &g), GQ_OK);
+      CHECK (g.n == 1 && g.lens[0] == 100 && memcmp (g.data[0], pt, 100) == 0);
+      CHECK_EQ (tst_allocs, before);
+      gq_record_reset_write (&w);
+      gq_record_wipe (&w);
+      gq_record_wipe (&r);
+    }
 }
 
 int
 main (void)
 {
+  tst_count_allocs ();
   CHECK_EQ (gq_crypto_init (), GQ_OK);
   test_server_role ();
   test_skip_budget ();
@@ -509,5 +593,6 @@ main (void)
   test_plaintext_and_ccs ();
   test_protected_rules ();
   test_receive_failures ();
+  test_no_setup_per_record ();
   TST_DONE ();
 }

@@ -350,15 +350,21 @@ sink_change_keys (void *u, enum gq_dir dir, enum gq_aead aead,
     {
       /* The ChangeCipherSpec goes out under the old epoch, in order with
          the messages before it; what follows is epoch 1.  */
-      if (fl_add_ccs (c) != GQ_OK
-          || gq_dtls12_epoch_init (&c->wr1, 1, aead, key, key_len, iv, iv_len)
-             != GQ_OK)
+      if (fl_add_ccs (c) != GQ_OK)
+        return 1;
+      gq_dtls12_epoch_wipe (&c->wr1);
+      if (gq_dtls12_epoch_init (&c->wr1, 1, aead, key, key_len, iv, iv_len)
+          != GQ_OK)
         return 1;
       c->wr_epoch = 1;
     }
-  else if (gq_dtls12_epoch_init (&c->rd1, 1, aead, key, key_len, iv, iv_len)
-           != GQ_OK)
-    return 1;
+  else
+    {
+      gq_dtls12_epoch_wipe (&c->rd1);
+      if (gq_dtls12_epoch_init (&c->rd1, 1, aead, key, key_len, iv, iv_len)
+          != GQ_OK)
+        return 1;
+    }
   return 0;
 }
 

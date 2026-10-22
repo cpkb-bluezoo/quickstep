@@ -109,12 +109,19 @@ int gq_dtls_records (const uint8_t *dgram, size_t len, gq_drec_cb cb,
 
 /* ---- Epoch keys ---- */
 
+struct gqi_cipher;		/* Internal: a cipher context (crypto_int.h).  */
+
 typedef struct gq_dtls_epoch
 {
   int active;
   uint64_t epoch;
   enum gq_aead aead;
   uint8_t key[32], iv[GQ_AEAD_NONCE_LEN], sn_key[32];
+  /* Ciphers kept open for the record key and the record number key, so
+     that a record does not set up two; NULL if there are none (then they
+     are set up per record).  Counted: a copy of this struct is not a
+     holder; use gq_dtls_epoch_move.  */
+  struct gqi_cipher *ctx, *sn_ctx;
   uint64_t send_seq;		/* Next to use.  */
   uint64_t recv_max;		/* Highest authenticated.  */
   uint64_t recv_bits;		/* Bit i: recv_max - i was received.  */
@@ -126,6 +133,10 @@ typedef struct gq_dtls_epoch
 int gq_dtls_epoch_init (gq_dtls_epoch *e, uint64_t epoch, enum gq_aead aead,
                         const uint8_t *secret);
 void gq_dtls_epoch_wipe (gq_dtls_epoch *e);
+
+/* Move SRC to DST: DST first gives up what it held (it must be initialised),
+   then is what SRC was, and SRC is wiped.  */
+void gq_dtls_epoch_move (gq_dtls_epoch *dst, gq_dtls_epoch *src);
 
 /* ---- Encoding: events in, datagram out ---- */
 

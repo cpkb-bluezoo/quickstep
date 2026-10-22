@@ -146,6 +146,8 @@ test_rfc8448_early_record (void)
     CHECK (got.type == GQ_CT_APPLICATION_DATA && got.len == pn
            && memcmp (got.d, payload, pn) == 0);
   }
+  gq_record_wipe (&w);
+  gq_record_wipe (&r);
 }
 
 /* ---- The server engine on the RFC's early-data ClientHello ---- */

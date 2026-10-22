@@ -78,6 +78,8 @@ enum gq_content_type
   GQ_CT_APPLICATION_DATA = 23
 };
 
+struct gqi_cipher;		/* Internal: a cipher context (crypto_int.h).  */
+
 struct gq_rec_dir
 {
   int active;
@@ -85,6 +87,10 @@ struct gq_rec_dir
   uint8_t key[32];
   uint8_t iv[GQ_AEAD_NONCE_LEN];
   uint64_t seq;
+  struct gqi_cipher *ctx;	/* A cipher kept open for KEY, so that a record
+				   does not set one up; NULL if there is none
+				   (then one is set up per record).  Counted:
+				   a copy of this struct is not a holder.  */
 };
 
 typedef struct gq_record
@@ -97,6 +103,11 @@ typedef struct gq_record
   int alert;			/* Alert to send after a receive failure.  */
 } gq_record;
 
+/* A record is initialised once, before anything else is done to it, and
+   wiped when it is finished with.  It holds a cipher for each direction
+   that has keys, which gq_record_set_keys replaces with new keys and
+   gq_record_wipe lets go of; initialising one that is in use forgets them
+   instead.  */
 void gq_record_init (gq_record *r);
 void gq_record_wipe (gq_record *r);
 

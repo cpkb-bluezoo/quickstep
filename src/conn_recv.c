@@ -116,9 +116,13 @@ static int
 derive_next_read (gq_conn *c)
 {
   gq_packet_keys *cur = &c->sp[SP_APP].rk;
-  int r = gq_packet_keys_update (c->version, cur, c->rsec, c->rsec_len,
-                                 c->rsec_next, &c->rk_next);
+  int r;
 
+  /* The next keys, made ahead: they have ciphers of their own if the keys
+     they follow do, and share the header protection one.  */
+  gq_packet_keys_wipe (&c->rk_next);
+  r = gq_packet_keys_update (c->version, cur, c->rsec, c->rsec_len,
+                             c->rsec_next, &c->rk_next);
   c->have_rk_next = r == GQ_OK;
   return r;
 }
@@ -140,13 +144,13 @@ conn_install_keys (gq_conn *c, const gq_tls_secret *s)
         }
       if (s->dir == GQ_DIR_WRITE && c->role == GQ_ROLE_CLIENT)
         {
-          c->early_wk = k;
+          gq_packet_keys_move (&c->early_wk, &k);
           c->have_early_wk = 1;
           ql_key_updated (c, GQ_LEVEL_EARLY, GQ_DIR_WRITE, "tls");
         }
       else if (s->dir == GQ_DIR_READ && c->role == GQ_ROLE_SERVER)
         {
-          c->early_rk = k;
+          gq_packet_keys_move (&c->early_rk, &k);
           c->have_early_rk = 1;
           ql_key_updated (c, GQ_LEVEL_EARLY, GQ_DIR_READ, "tls");
         }
@@ -163,10 +167,15 @@ conn_install_keys (gq_conn *c, const gq_tls_secret *s)
   ql_key_updated (c, s->level, s->dir, "tls");
   if (s->dir == GQ_DIR_READ)
     {
-      c->sp[sp].rk = k;
+      gq_packet_keys_move (&c->sp[sp].rk, &k);
       c->sp[sp].have_rk = 1;
       if (sp == SP_APP)
         {
+          /* These keys protect the packets of the whole connection: keep
+             their ciphers open.  (Not being able to is no matter: they are
+             set up for each packet then.)  Initial, Handshake and 0-RTT keys
+             protect a handful, and are not worth it.  */
+          gq_packet_keys_prepare (&c->sp[sp].rk);
           memcpy (c->rsec, s->secret, s->len);
           c->rsec_len = s->len;
           derive_next_read (c);
@@ -174,10 +183,11 @@ conn_install_keys (gq_conn *c, const gq_tls_secret *s)
     }
   else
     {
-      c->sp[sp].wk = k;
+      gq_packet_keys_move (&c->sp[sp].wk, &k);
       c->sp[sp].have_wk = 1;
       if (sp == SP_APP)
         {
+          gq_packet_keys_prepare (&c->sp[sp].wk);
           if (c->have_early_wk)
             ql_key_discarded (c, GQ_LEVEL_EARLY, GQ_DIR_WRITE, 0, 0, "tls");
           if (c->role == GQ_ROLE_SERVER && !c->handshake_complete)
@@ -204,7 +214,7 @@ write_key_update (gq_conn *c, int remote)
   if (gq_packet_keys_update (c->version, &s->wk, c->wsec, c->wsec_len,
                              next_secret, &next) != GQ_OK)
     return GQ_ERR_CRYPTO;
-  s->wk = next;
+  gq_packet_keys_move (&s->wk, &next);
   memcpy (c->wsec, next_secret, c->wsec_len);
   c->w_phase ^= 1;
   c->w_first_pn = s->next_pn;
@@ -233,11 +243,11 @@ rotate_read_keys (gq_conn *c, uint64_t pn)
 {
   space *s = &c->sp[SP_APP];
 
-  c->rk_prev = s->rk;
+  gq_packet_keys_move (&c->rk_prev, &s->rk);
   c->have_rk_prev = 1;
   /* Kept for reordered packets, but not for long (RFC 9001 section 6.5).  */
   c->rk_prev_until = c->now + 3 * conn_pto_base (c, SP_APP);
-  s->rk = c->rk_next;
+  gq_packet_keys_move (&s->rk, &c->rk_next);
   memcpy (c->rsec, c->rsec_next, c->rsec_len);
   c->r_phase ^= 1;
   c->r_first_pn = pn;

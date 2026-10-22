@@ -27,6 +27,7 @@
 #include <quickstep/packet.h>
 #include <quickstep/protect.h>
 
+#include "crypto_int.h"
 #include "version.h"
 
 #define TRY(expr) do { int r_ = (expr); if (r_ != GQ_OK) return r_; } while (0)
@@ -38,7 +39,44 @@
 void
 gq_packet_keys_wipe (gq_packet_keys *k)
 {
+  gqi_cipher_unref (k->aead_ctx);
+  gqi_cipher_unref (k->hp_ctx);
   gq_wipe (k, sizeof *k);
+}
+
+int
+gq_packet_keys_prepare (gq_packet_keys *k)
+{
+  size_t kl;
+  gqi_cipher *a, *h;
+
+  if (k == NULL)
+    return GQ_ERR_INVAL;
+  kl = gq_aead_key_size (k->aead);
+  if (kl == 0)
+    return GQ_ERR_UNSUPPORTED;
+  a = gqi_aead_new (k->aead, k->key, kl);
+  h = a ? gqi_hp_new (k->aead, k->hp, kl) : NULL;
+  if (a == NULL || h == NULL)
+    {
+      gqi_cipher_unref (a);
+      return GQ_ERR_NOMEM;
+    }
+  gqi_cipher_unref (k->aead_ctx);
+  gqi_cipher_unref (k->hp_ctx);
+  k->aead_ctx = a;
+  k->hp_ctx = h;
+  return GQ_OK;
+}
+
+void
+gq_packet_keys_move (gq_packet_keys *dst, gq_packet_keys *src)
+{
+  if (dst == src)
+    return;
+  gq_packet_keys_wipe (dst);
+  *dst = *src;
+  gq_wipe (src, sizeof *src);	/* Its contexts are DST's now.  */
 }
 
 int
@@ -137,12 +175,33 @@ gq_packet_keys_update (uint32_t version, const gq_packet_keys *cur,
   if (r == GQ_OK)
     {
       uint8_t hp[32];
+      enum gq_aead aead = cur->aead;
+      gqi_cipher *hpc = gqi_cipher_ref (cur->hp_ctx);
+      int had_ctx = cur->aead_ctx != NULL;
 
       memcpy (hp, cur->hp, sizeof hp);	/* CUR and NEXT may alias.  */
-      r = gq_packet_keys_derive (version, cur->aead, next_secret,
-                                 secret_len, next);
+      if (next == cur)
+        {
+          gqi_cipher_unref (cur->aead_ctx);
+          gqi_cipher_unref (cur->hp_ctx);
+        }
+      r = gq_packet_keys_derive (version, aead, next_secret, secret_len, next);
       memcpy (next->hp, hp, sizeof hp);
       gq_wipe (hp, sizeof hp);
+      /* Keys that had contexts have them again: the AEAD key is new, the
+         header protection key is the same, and so is its context.  Not
+         being able to make one is no failure.  */
+      if (r == GQ_OK && had_ctx && hpc != NULL)
+        {
+          next->aead_ctx = gqi_aead_new (aead, next->key,
+                                         gq_aead_key_size (aead));
+          if (next->aead_ctx != NULL)
+            {
+              next->hp_ctx = hpc;
+              hpc = NULL;
+            }
+        }
+      gqi_cipher_unref (hpc);
     }
   return r;
 }
@@ -163,6 +222,34 @@ make_nonce (const gq_packet_keys *k, uint64_t pn, uint8_t nonce[GQ_AEAD_NONCE_LE
     nonce[GQ_AEAD_NONCE_LEN - 1 - i] ^= (uint8_t) (pn >> (8 * i));
 }
 
+/* The AEAD and the mask under K's keys, with K's contexts if they are for
+   the keys K has now, and otherwise with a context set up for the call.  */
+static int
+key_seal (const gq_packet_keys *k, const uint8_t *nonce, const void *aad,
+          size_t aadlen, const void *pt, size_t ptlen, uint8_t *out,
+          size_t outlen)
+{
+  return gqi_seal (k->aead_ctx, k->aead, k->key, gq_aead_key_size (k->aead),
+                   nonce, aad, aadlen, pt, ptlen, out, outlen);
+}
+
+static int
+key_open (const gq_packet_keys *k, const uint8_t *nonce, const void *aad,
+          size_t aadlen, const void *ct, size_t ctlen, uint8_t *out,
+          size_t outlen)
+{
+  return gqi_open (k->aead_ctx, k->aead, k->key, gq_aead_key_size (k->aead),
+                   nonce, aad, aadlen, ct, ctlen, out, outlen);
+}
+
+static int
+key_hp_mask (const gq_packet_keys *k, const uint8_t *sample,
+             uint8_t mask[GQ_HP_MASK_LEN])
+{
+  return gqi_mask (k->hp_ctx, k->aead, k->hp, gq_aead_key_size (k->aead),
+                   sample, mask);
+}
+
 /* Apply or remove the header protection mask.  Long headers protect the
    low 4 bits of the first byte, short headers the low 5.  The mask is a
    plain XOR, so the same code serves both directions; on removal the
@@ -174,8 +261,7 @@ hp_mask (const gq_packet_keys *k, uint8_t *pkt, size_t pn_offset,
   uint8_t mask[GQ_HP_MASK_LEN];
   size_t i, n;
 
-  TRY (gq_hp_mask (k->aead, k->hp, gq_aead_key_size (k->aead),
-                   pkt + pn_offset + 4, mask));
+  TRY (key_hp_mask (k, pkt + pn_offset + 4, mask));
   pkt[0] ^= mask[0] & ((pkt[0] & 0x80) ? 0x0f : 0x1f);
   if (removing)
     *pn_len = (size_t) (pkt[0] & 3) + 1;
@@ -203,9 +289,8 @@ gq_packet_seal (const gq_packet_keys *k, uint64_t pn, uint8_t *pkt,
     return GQ_ERR_BUFSIZE;
 
   make_nonce (k, pn, nonce);
-  r = gq_aead_seal (k->aead, k->key, gq_aead_key_size (k->aead), nonce,
-                    pkt, hdr, pkt + hdr, payload_len, pkt + hdr,
-                    payload_len + GQ_AEAD_TAG_LEN);
+  r = key_seal (k, nonce, pkt, hdr, pkt + hdr, payload_len, pkt + hdr,
+                payload_len + GQ_AEAD_TAG_LEN);
   if (r == GQ_OK)
     r = hp_mask (k, pkt, pn_offset, &pn_len, 0);
   if (r == GQ_OK)
@@ -245,9 +330,8 @@ gq_packet_decrypt (const gq_packet_keys *k, uint64_t full_pn, uint8_t *pkt,
     return GQ_ERR_RANGE;	/* Cannot be a packet; see gq_hp_remove.  */
 
   make_nonce (k, full_pn, nonce);
-  r = gq_aead_open (k->aead, k->key, gq_aead_key_size (k->aead), nonce,
-                    pkt, hdr, pkt + hdr, len - hdr, pkt + hdr,
-                    len - hdr - GQ_AEAD_TAG_LEN);
+  r = key_open (k, nonce, pkt, hdr, pkt + hdr, len - hdr, pkt + hdr,
+                len - hdr - GQ_AEAD_TAG_LEN);
   if (r != GQ_OK)
     return r;
 

@@ -402,12 +402,155 @@ test_recv_rules (void)
   gq_rstream_free (&r);
 }
 
+/* The pattern the byte at stream offset O carries.  */
+static uint8_t
+pat (uint64_t o)
+{
+  return (uint8_t) (o * 31 + (o >> 8));
+}
+
+/* Acknowledging data frees it without moving what is still buffered.  A
+   sender that keeps its buffer full (a bulk transfer) used to shift the
+   whole buffer down by the size of each acknowledged frame: a copy of
+   256 KiB to free 1.4 KB, on every acknowledgement.  A chunk handed out
+   again after an acknowledgement of the data before it is therefore in the
+   same place as the first time.  And the data written afterwards, which
+   reuses the freed space, still comes out in order.  */
+static void
+test_ack_keeps_data_in_place (void)
+{
+  gq_sstream s;
+  uint8_t src[5000];
+  uint8_t got[5000];
+  uint64_t off, nb;
+  const uint8_t *a, *b, *b2;
+  size_t n, i, have = 0;
+  int fin;
+
+  for (i = 0; i < sizeof src; i++)
+    src[i] = pat (i);
+  gq_sstream_init (&s, 4000, 1 << 20);
+  CHECK_EQ (gq_sstream_write (&s, src, 4000), 4000);
+  CHECK (gq_sstream_next (&s, 1000, UINT64_MAX, &off, &a, &n, &fin, &nb));
+  CHECK (off == 0 && n == 1000);
+  CHECK (gq_sstream_next (&s, 1000, UINT64_MAX, &off, &b, &n, &fin, &nb));
+  CHECK (off == 1000 && n == 1000);
+  CHECK (memcmp (b, src + 1000, 1000) == 0);
+  gq_sstream_on_acked (&s, 0, 1000, 0);
+  CHECK_EQ (s.base, 1000);
+  CHECK_EQ (gq_sstream_room (&s), 1000);
+  gq_sstream_on_lost (&s, 1000, 1000, 0);
+  CHECK (gq_sstream_next (&s, 1000, UINT64_MAX, &off, &b2, &n, &fin, &nb));
+  CHECK (off == 1000 && n == 1000);
+  CHECK (b2 == b);		/* Not moved by the acknowledgement.  */
+  CHECK (memcmp (b2, src + 1000, 1000) == 0);
+  /* Fill the freed room, and read everything still unsent, in whatever
+     pieces the buffer hands it out.  */
+  CHECK_EQ (gq_sstream_write (&s, src + 4000, 1000), 1000);
+  CHECK_EQ (gq_sstream_room (&s), 0);
+  memcpy (got + 1000, b2, 1000);
+  have = 2000;
+  while (gq_sstream_next (&s, 3000, UINT64_MAX, &off, &a, &n, &fin, &nb))
+    {
+      CHECK_EQ (off, have);
+      CHECK (have + n <= sizeof got);
+      memcpy (got + have, a, n);
+      have += n;
+    }
+  CHECK_EQ (have, 5000);
+  CHECK (memcmp (got + 1000, src + 1000, 4000) == 0);
+  gq_sstream_free (&s);
+}
+
+/* A small buffer used for many times its size, by a sender whose chunks are
+   acknowledged in any order, lost and sent again: every byte comes out of
+   the buffer exactly as it went in, wherever it lies in it.  */
+static void
+test_buffer_churn (void)
+{
+  enum { LIMIT = 1500, OUT = 64 };
+  struct chunk { uint64_t off; size_t len; int fin; } out[OUT];
+  gq_sstream s;
+  uint64_t written = 0, nb, off;
+  const uint8_t *d;
+  size_t nout = 0, n, k;
+  long guard = 0;
+  int fin, finished = 0;
+
+  rng = 4242;
+  gq_sstream_init (&s, LIMIT, UINT64_MAX / 2);
+  for (;;)
+    {
+      uint32_t r = rnd () % 100;
+
+      CHECK (guard++ < 2000000);
+      if (guard >= 2000000)
+        break;
+      if (written >= 300 * (uint64_t) LIMIT && !finished)
+        {
+          gq_sstream_finish (&s);
+          finished = 1;
+        }
+      if (finished && nout == 0 && !gq_sstream_pending (&s, UINT64_MAX))
+        break;
+      if (r < 25 && !finished)
+        {
+          uint8_t buf[700];
+          size_t want = 1 + rnd () % sizeof buf;
+          long w;
+
+          for (k = 0; k < want; k++)
+            buf[k] = pat (written + k);
+          w = gq_sstream_write (&s, buf, want);
+          CHECK (w >= 0);
+          if (w > 0)
+            written += (uint64_t) w;
+        }
+      else if (r < 60 && nout < OUT)
+        {
+          size_t max = 1 + rnd () % 500;
+
+          if (gq_sstream_next (&s, max, UINT64_MAX, &off, &d, &n, &fin, &nb))
+            {
+              CHECK (n <= max);
+              for (k = 0; k < n; k++)
+                if (d[k] != pat (off + k))
+                  {
+                    CHECK_EQ (d[k], pat (off + k));
+                    break;
+                  }
+              out[nout].off = off;
+              out[nout].len = n;
+              out[nout].fin = fin;
+              nout++;
+            }
+        }
+      else if (nout > 0)
+        {
+          size_t i = rnd () % nout;
+          struct chunk c = out[i];
+
+          out[i] = out[--nout];
+          if (r < 90)
+            gq_sstream_on_acked (&s, c.off, c.len, c.fin);
+          else
+            gq_sstream_on_lost (&s, c.off, c.len, c.fin);
+        }
+    }
+  CHECK_EQ (s.base, written);
+  CHECK_EQ (s.len, 0);
+  CHECK_EQ (gq_sstream_state (&s), GQ_SS_DATA_RECVD);
+  gq_sstream_free (&s);
+}
+
 int
 main (void)
 {
   test_transfers ();
   test_many_holes ();
   test_send_states ();
+  test_ack_keeps_data_in_place ();
+  test_buffer_churn ();
   test_recv_rules ();
   TST_DONE ();
 }

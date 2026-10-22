@@ -25,6 +25,7 @@ libquickstep_la_SOURCES = \
   conn_qlog.c \
   qlog.h \
   crypto.c \
+  crypto_int.h \
   dtls.c \
   endpoint.c \
   conn_int.h \

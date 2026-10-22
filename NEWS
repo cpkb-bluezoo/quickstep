@@ -111,6 +111,31 @@ a newer ID, the older ones are retired and a replacement is issued.  An
 application close is sent only in 1-RTT once those keys exist, so the
 error code is not replaced by APPLICATION_ERROR.
 
+** Performance.  A bulk QUIC transfer between two connections in one process
+runs at about 1 GB/s per core, where it ran at 70 MB/s.
+** Keys keep their ciphers open.  Protecting a packet or a record opened a
+libgcrypt cipher context, set the key and closed it again, for the AEAD and
+for the header or record number mask, and with libgcrypt's own random
+number generator every open runs an entropy poll: a QUIC packet cost 17
+microseconds, ten times its encryption, and a small DTLS 1.3 record 15.
+Keys now hold a context for as long as they last: the 1-RTT keys of a QUIC
+connection, the keys of TLS 1.3 and 1.2 records, the epochs of DTLS 1.3 and
+1.2.  The contexts are only used for the key they were made for.  API:
+gq_packet_keys, gq_rec_dir, gq_rec12_dir, gq_dtls_epoch and gq_dtls12_epoch
+gain a pointer to them, which makes a copy of one of those structures that has
+contexts a second holder of the same count.  gq_packet_keys_move and
+gq_dtls_epoch_move move one, gq_packet_keys_prepare makes the contexts of a
+gq_packet_keys, and gq_packet_keys_update gives the keys it makes contexts if
+the keys it starts from have them.  A record must be initialised with
+gq_record_init or gq_record12_init before gq_record_set_keys, which now lets
+go of the context of the keys it replaces; on memory that was never
+initialised it used to work by luck, and now it does not.
+** QUIC streams: acknowledging data no longer shifts the rest of the send
+buffer down, which copied a whole buffer for every acknowledged frame (256
+KiB by default) and was most of the time of a transfer.  A chunk that
+gq_sstream_next returns ends where the buffer wraps, and may be shorter than
+asked for.
+
 * Noteworthy changes in release 0.0.3 (2026-10-18)
 
 ** gq_tls_info gains sig_scheme and client_sig_scheme: the SignatureScheme

@@ -25,6 +25,8 @@
 #include <quickstep/status.h>
 #include <quickstep/record12.h>
 
+#include "crypto_int.h"
+
 #define TRY(expr) do { int r_ = (expr); if (r_ != GQ_OK) return r_; } while (0)
 
 /* Alert codes used here.  */
@@ -45,6 +47,8 @@ gq_record12_init (gq_record12 *r)
 void
 gq_record12_wipe (gq_record12 *r)
 {
+  gqi_cipher_unref (r->read.ctx);
+  gqi_cipher_unref (r->write.ctx);
   gq_wipe (r, sizeof *r);
 }
 
@@ -64,12 +68,16 @@ gq_record12_set_keys (gq_record12 *r, enum gq_dir dir, enum gq_aead aead,
       || iv_len != (aead == GQ_AEAD_CHACHA20_POLY1305 ? 12u : 4u))
     return GQ_ERR_INVAL;
   d = dir == GQ_DIR_READ ? &r->read : &r->write;
+  gqi_cipher_unref (d->ctx);
   memset (d, 0, sizeof *d);
   d->active = 1;
   d->aead = aead;
   memcpy (d->key, key, key_len);
   memcpy (d->iv, iv, iv_len);
   d->iv_len = iv_len;
+  /* Kept open for as long as the keys last.  Not being able to is no
+     matter.  */
+  d->ctx = gqi_aead_new (aead, d->key, key_len);
   return GQ_OK;
 }
 
@@ -218,10 +226,10 @@ gq_record12_protect (gq_record12 *r, unsigned type, const uint8_t *fragment,
     put64 (out + GQ_REC_HEADER_LEN, r->write.seq);
   nonce_for (&r->write, out + GQ_REC_HEADER_LEN, nonce);
   make_aad (aad, r->write.seq, type, len);
-  TRY (gq_aead_seal (r->write.aead, r->write.key,
-                     gq_aead_key_size (r->write.aead), nonce, aad,
-                     sizeof aad, out + GQ_REC_HEADER_LEN + el, len,
-                     out + GQ_REC_HEADER_LEN + el, len + GQ_AEAD_TAG_LEN));
+  TRY (gqi_seal (r->write.ctx, r->write.aead, r->write.key,
+                 gq_aead_key_size (r->write.aead), nonce, aad,
+                 sizeof aad, out + GQ_REC_HEADER_LEN + el, len,
+                 out + GQ_REC_HEADER_LEN + el, len + GQ_AEAD_TAG_LEN));
   r->write.seq++;
   *out_len = GQ_REC_HEADER_LEN + body;
   return GQ_OK;
@@ -283,9 +291,9 @@ gq_record12_receive (gq_record12 *r, uint8_t **buf, size_t *len,
             return bad (r, ALERT_RECORD_OVERFLOW, GQ_ERR_PROTOCOL);
           nonce_for (&r->read, body, nonce);
           make_aad (aad, r->read.seq, type, plen);
-          rc = gq_aead_open (r->read.aead, r->read.key,
-                             gq_aead_key_size (r->read.aead), nonce, aad,
-                             sizeof aad, body + el, n - el, body + el, plen);
+          rc = gqi_open (r->read.ctx, r->read.aead, r->read.key,
+                         gq_aead_key_size (r->read.aead), nonce, aad,
+                         sizeof aad, body + el, n - el, body + el, plen);
           if (rc != GQ_OK)
             return bad (r, ALERT_BAD_RECORD_MAC, GQ_ERR_CRYPTO);
           r->read.seq++;

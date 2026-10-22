@@ -50,6 +50,18 @@ test_mldsa_LDFLAGS = -static
 # vectors.
 test_mlkem_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
 test_mlkem_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
+# These count libgcrypt's allocations (tst-alloc.h) to see how many cipher
+# contexts a packet or a record opens.
+test_protect_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
+test_protect_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
+test_record_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
+test_record_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
+test_record12_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
+test_record12_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
+test_dtlsrec_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
+test_dtlsrec_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
+test_dtls12rec_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
+test_dtls12rec_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
 
 # It uses the library's internals, which a shared library does not export.
 test_conn_int_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
@@ -61,4 +73,4 @@ test_qlog_LDFLAGS = -static
 test_replay_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
 test_replay_LDFLAGS = -static
 
-EXTRA_DIST = tst-qkv.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h vectors-mlkem.h vectors-mldsa.h tst-mldsa-cert.h tst-qlogcheck.h vectors-pss.h
+EXTRA_DIST = tst-alloc.h tst-qkv.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h vectors-mlkem.h vectors-mldsa.h tst-mldsa-cert.h tst-qlogcheck.h vectors-pss.h

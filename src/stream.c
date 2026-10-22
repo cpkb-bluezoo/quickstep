@@ -47,7 +47,7 @@ gq_sstream_free (gq_sstream *s)
   gq_ranges_free (&s->acked);
   gq_ranges_free (&s->lost);
   s->buf = NULL;
-  s->cap = s->len = 0;
+  s->cap = s->len = s->head = 0;
 }
 
 size_t
@@ -58,10 +58,56 @@ gq_sstream_room (const gq_sstream *s)
   return s->limit - s->len;
 }
 
+/* Where in the ring the byte at stream offset O (base <= O <= base + len)
+   lies.  */
+static size_t
+ring_index (const gq_sstream *s, uint64_t o)
+{
+  size_t i = s->head + (size_t) (o - s->base);
+
+  return i >= s->cap ? i - s->cap : i;
+}
+
+/* How many bytes from stream offset O (below base + len) lie in the ring
+   before it wraps round to its start.  */
+static size_t
+ring_run (const gq_sstream *s, uint64_t o)
+{
+  return s->cap - ring_index (s, o);
+}
+
+/* Make the ring hold at least NEED bytes (not more than the limit),
+   laying the data out from the start of the new storage.  */
+static int
+ring_grow (gq_sstream *s, size_t need)
+{
+  size_t cap = s->cap ? s->cap : 256, first;
+  uint8_t *nb;
+
+  while (cap < need)
+    cap *= 2;
+  if (cap > s->limit)
+    cap = s->limit;
+  nb = malloc (cap);
+  if (nb == NULL)
+    return GQ_ERR_NOMEM;
+  if (s->len)
+    {
+      first = s->cap - s->head < s->len ? s->cap - s->head : s->len;
+      memcpy (nb, s->buf + s->head, first);
+      memcpy (nb + first, s->buf, s->len - first);
+    }
+  free (s->buf);
+  s->buf = nb;
+  s->cap = cap;
+  s->head = 0;
+  return GQ_OK;
+}
+
 long
 gq_sstream_write (gq_sstream *s, const uint8_t *data, size_t len)
 {
-  size_t room;
+  size_t room, tail, first;
 
   if (s->fin_set || s->reset)
     return GQ_ERR_INVAL;
@@ -70,22 +116,14 @@ gq_sstream_write (gq_sstream *s, const uint8_t *data, size_t len)
     len = room;
   if (len == 0)
     return 0;
-  if (s->len + len > s->cap)
-    {
-      size_t cap = s->cap ? s->cap : 256;
-      uint8_t *nb;
-
-      while (cap < s->len + len)
-        cap *= 2;
-      if (cap > s->limit)
-        cap = s->limit;
-      nb = realloc (s->buf, cap);
-      if (nb == NULL)
-        return GQ_ERR_NOMEM;
-      s->buf = nb;
-      s->cap = cap;
-    }
-  memcpy (s->buf + s->len, data, len);
+  if (s->len + len > s->cap && ring_grow (s, s->len + len) != GQ_OK)
+    return GQ_ERR_NOMEM;
+  tail = s->head + s->len;
+  if (tail >= s->cap)
+    tail -= s->cap;
+  first = s->cap - tail < len ? s->cap - tail : len;
+  memcpy (s->buf + tail, data, first);
+  memcpy (s->buf, data + first, len - first);
   s->len += len;
   return (long) len;
 }
@@ -109,7 +147,7 @@ gq_sstream_reset (gq_sstream *s, uint64_t err)
   s->reset_err = err;
   free (s->buf);
   s->buf = NULL;
-  s->cap = s->len = 0;
+  s->cap = s->len = s->head = 0;
   gq_ranges_clear (&s->acked);
   gq_ranges_clear (&s->lost);
 }
@@ -150,12 +188,15 @@ gq_sstream_next (gq_sstream *s, size_t max, uint64_t conn_credit,
   *new_bytes = 0;
   if (s->reset)
     return 0;
-  /* Lost data first.  */
+  /* Lost data first.  A chunk ends where the ring wraps; the rest of what
+     was asked for comes with the next call.  */
+  if (s->lost.n && max > ring_run (s, s->lost.r[0].lo))
+    max = ring_run (s, s->lost.r[0].lo);
   if (gq_ranges_pop_front (&s->lost, max, &lo, &hi))
     {
       *off = lo;
       *len = (size_t) (hi - lo);
-      *data = s->buf + (lo - s->base);
+      *data = s->buf + ring_index (s, lo);
       *fin = 0;
       if (s->fin_lost && s->fin_set && hi == end_of (s))
         {
@@ -172,11 +213,13 @@ gq_sstream_next (gq_sstream *s, size_t max, uint64_t conn_credit,
     avail = conn_credit;
   if (avail > max)
     avail = max;
+  if (avail > 0 && avail > ring_run (s, s->sent))
+    avail = ring_run (s, s->sent);
   if (avail > 0)
     {
       *off = s->sent;
       *len = (size_t) avail;
-      *data = s->buf + (s->sent - s->base);
+      *data = s->buf + ring_index (s, s->sent);
       s->sent += avail;
       *new_bytes = avail;
       *fin = 0;
@@ -234,14 +277,26 @@ gq_sstream_on_acked (gq_sstream *s, uint64_t off, size_t len, int fin)
            be freed past it: send it again, which records it in its turn.  */
         gq_ranges_add_coarse (&s->lost, off, hi);
     }
-  /* Free the acknowledged prefix.  */
+  /* Free the acknowledged prefix.  Nothing is moved: the ring's start
+     advances past it.  (Shifting what remains down to the start of the
+     buffer, as this once did, copied the whole of a full buffer for every
+     acknowledged frame.)  */
   if (s->acked.n && s->acked.r[0].lo <= s->base)
     {
       uint64_t nb = s->acked.r[0].hi;
       size_t drop = (size_t) (nb - s->base);
 
-      memmove (s->buf, s->buf + drop, s->len - drop);
+      if (drop > s->len)	/* Acknowledged beyond what was written. */
+        {
+          drop = s->len;
+          nb = s->base + drop;
+        }
       s->len -= drop;
+      s->head += drop;
+      if (s->head >= s->cap)
+        s->head -= s->cap;
+      if (s->len == 0)
+        s->head = 0;		/* Empty: start again at the front.  */
       s->base = nb;
       gq_ranges_trim_below (&s->acked, nb);
       gq_ranges_trim_below (&s->lost, nb);

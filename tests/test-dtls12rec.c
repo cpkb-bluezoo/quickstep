@@ -27,6 +27,7 @@
 #include <quickstep/dtls12rec.h>
 
 #include "tst-util.h"
+#include "tst-alloc.h"
 
 struct log
 {
@@ -120,6 +121,8 @@ keys (enum gq_aead aead)
     key[i] = (uint8_t) (i * 5 + 2);
   for (i = 0; i < 12; i++)
     iv[i] = (uint8_t) (0x90 + i);
+  gq_dtls12_epoch_wipe (&tx);
+  gq_dtls12_epoch_wipe (&rx);
   CHECK_EQ (gq_dtls12_epoch_init (&tx, 1, aead, key, kl, iv, il), GQ_OK);
   CHECK_EQ (gq_dtls12_epoch_init (&rx, 1, aead, key, kl, iv, il), GQ_OK);
 }
@@ -289,9 +292,44 @@ test_misc (void)
          && gq_dtls12_replay_ok (&e, 37));
 }
 
+/* A record is protected and opened without setting up a cipher (see
+   test-record.c).  */
+static void
+test_no_setup_per_record (void)
+{
+  static const enum gq_aead algs[3] = { GQ_AEAD_AES_128_GCM,
+                                        GQ_AEAD_AES_256_GCM,
+                                        GQ_AEAD_CHACHA20_POLY1305 };
+  uint8_t out[4096], back[4096], pt[400];
+  size_t n, len, i;
+  int a;
+
+  for (i = 0; i < sizeof pt; i++)
+    pt[i] = (uint8_t) (i * 7);
+  for (a = 0; a < 3; a++)
+    {
+      unsigned long before = 0;
+
+      keys (algs[a]);
+      for (i = 0; i < 201; i++)
+        {
+          if (i == 1)
+            before = tst_allocs;	/* The first is the warm up.  */
+          CHECK_EQ (gq_dtls12_protect (&tx, GQ_D12_CT_APPLICATION_DATA, pt,
+                                       i * 2, out, sizeof out, &n), GQ_OK);
+          CHECK_EQ (open_one (out, n, back, &len), GQ_OK);
+          CHECK (len == i * 2 && memcmp (back, pt, len) == 0);
+        }
+      CHECK_EQ (tst_allocs, before);
+    }
+  gq_dtls12_epoch_wipe (&tx);
+  gq_dtls12_epoch_wipe (&rx);
+}
+
 int
 main (void)
 {
+  tst_count_allocs ();
   gq_crypto_init ();
   test_framing ();
   test_roundtrip (GQ_AEAD_AES_128_GCM);
@@ -299,5 +337,6 @@ main (void)
   test_roundtrip (GQ_AEAD_CHACHA20_POLY1305);
   test_wire_nonce ();
   test_misc ();
+  test_no_setup_per_record ();
   TST_DONE ();
 }

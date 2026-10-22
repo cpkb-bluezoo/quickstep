@@ -66,9 +66,10 @@ enum gq_send_state
 
 typedef struct gq_sstream
 {
-  uint8_t *buf;			/* Bytes [base, base + len).  */
+  uint8_t *buf;			/* A ring of CAP bytes, holding [base, base + len)
+				   from index HEAD on, wrapping round.  */
   size_t cap, limit;
-  size_t len;
+  size_t len, head;
   uint64_t base;		/* Everything below is acknowledged.  */
   uint64_t sent;		/* Next never-sent offset.  */
   uint64_t max_data;		/* Peer's flow control limit.  */
@@ -110,7 +111,8 @@ void gq_sstream_set_max (gq_sstream *s, uint64_t max);
 /* Choose the next chunk to send, at most MAX bytes.  On success returns 1
    and sets *OFF, *LEN, *FIN and *DATA, which points into the send buffer
    and stays valid until the next call that changes the stream; the chunk
-   counts as sent.  New data is limited by the peer's credit and, through
+   counts as sent, and may be shorter than MAX where the send buffer wraps
+   round (the next call gives the rest).  New data is limited by the peer's credit and, through
    CONN_CREDIT, by the connection-level credit still available (pass
    UINT64_MAX when not tracking it); *NEW_BYTES reports how much of the
    chunk was sent for the first time, for the connection's accounting.

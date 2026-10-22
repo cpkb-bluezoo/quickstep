@@ -281,6 +281,8 @@ static void
 side_free (struct side *s)
 {
   gq_tlsconn_free (s->conn);
+  gq_record_wipe (&s->rin);
+  gq_record_wipe (&s->rout);
   if (s->peer.tr)
     gq_transcript_free (s->peer.tr);
   free (s->ev.wire.p);

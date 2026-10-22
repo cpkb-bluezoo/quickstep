@@ -26,6 +26,8 @@
 #include <quickstep/keysched.h>
 #include <quickstep/dtlsrec.h>
 
+#include "crypto_int.h"
+
 #define TRY(expr) do { int r_ = (expr); if (r_ != GQ_OK) return r_; } while (0)
 
 /* ------------------------------------------------------------------ */
@@ -106,13 +108,31 @@ gq_dtls_epoch_init (gq_dtls_epoch *e, uint64_t epoch, enum gq_aead aead,
   e->active = 1;
   e->epoch = epoch;
   e->aead = aead;
+  /* Kept open for as long as the epoch lasts; for records of a few hundred
+     bytes setting up the two ciphers costs ten times what they do.  Not
+     being able to is no matter.  E is initialised, not updated: anything
+     it held is not let go of here.  */
+  e->ctx = gqi_aead_new (aead, e->key, gq_aead_key_size (aead));
+  e->sn_ctx = gqi_hp_new (aead, e->sn_key, gq_aead_key_size (aead));
   return GQ_OK;
 }
 
 void
 gq_dtls_epoch_wipe (gq_dtls_epoch *e)
 {
+  gqi_cipher_unref (e->ctx);
+  gqi_cipher_unref (e->sn_ctx);
   gq_wipe (e, sizeof *e);
+}
+
+void
+gq_dtls_epoch_move (gq_dtls_epoch *dst, gq_dtls_epoch *src)
+{
+  if (dst == src)
+    return;
+  gq_dtls_epoch_wipe (dst);
+  *dst = *src;
+  gq_wipe (src, sizeof *src);	/* Its contexts are DST's now.  */
 }
 
 /* ------------------------------------------------------------------ */
@@ -153,7 +173,8 @@ mask_seq (const gq_dtls_epoch *e, const uint8_t *ct, uint8_t *seqbytes,
   uint8_t m[GQ_HP_MASK_LEN];
   unsigned i;
 
-  TRY (gq_hp_mask (e->aead, e->sn_key, gq_aead_key_size (e->aead), ct, m));
+  TRY (gqi_mask (e->sn_ctx, e->aead, e->sn_key, gq_aead_key_size (e->aead),
+                 ct, m));
   for (i = 0; i < n; i++)
     seqbytes[i] ^= m[i];
   return GQ_OK;
@@ -189,9 +210,9 @@ gq_dtls_protect (gq_dtls_epoch *e, unsigned type, const uint8_t *payload,
   out[GQ_DTLS_CIPHER_HEADER + len] = (uint8_t) type;
   nonce_for (e, seq, nonce);
   /* The additional data is the header before sequence number encryption.  */
-  TRY (gq_aead_seal (e->aead, e->key, gq_aead_key_size (e->aead), nonce, out,
-                     GQ_DTLS_CIPHER_HEADER, out + GQ_DTLS_CIPHER_HEADER, inner,
-                     out + GQ_DTLS_CIPHER_HEADER, body));
+  TRY (gqi_seal (e->ctx, e->aead, e->key, gq_aead_key_size (e->aead), nonce,
+                 out, GQ_DTLS_CIPHER_HEADER, out + GQ_DTLS_CIPHER_HEADER,
+                 inner, out + GQ_DTLS_CIPHER_HEADER, body));
   TRY (mask_seq (e, out + GQ_DTLS_CIPHER_HEADER, out + 1, 2));
   e->send_seq++;
   *out_len = GQ_DTLS_CIPHER_HEADER + body;
@@ -279,8 +300,8 @@ gq_dtls_deprotect (gq_dtls_epoch *e, const gq_drec *rec, uint8_t *out,
     return GQ_ERR_RANGE;
 
   nonce_for (e, seq, nonce);
-  if (gq_aead_open (e->aead, e->key, gq_aead_key_size (e->aead), nonce, hdr,
-                    hl, rec->body.data, n, out, n - GQ_AEAD_TAG_LEN)
+  if (gqi_open (e->ctx, e->aead, e->key, gq_aead_key_size (e->aead), nonce,
+                hdr, hl, rec->body.data, n, out, n - GQ_AEAD_TAG_LEN)
       != GQ_OK)
     {
       e->bad++;

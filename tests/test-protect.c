@@ -25,6 +25,7 @@
 #include <quickstep/protect.h>
 
 #include "tst-util.h"
+#include "tst-alloc.h"
 #include "vectors.h"
 
 static const char *DCID_HEX = "8394c8f03e515708";
@@ -291,14 +292,236 @@ test_key_update (void)
   CHECK (tst_eq_hex (k0.key, 4, "00000000"));
 }
 
+/* Seal and open N packets of PAYLOAD bytes under K, each with its own packet
+   number, and check that each comes back as it went.  */
+static void
+churn (const gq_packet_keys *k, int n, size_t payload)
+{
+  uint8_t pkt[200];
+  uint8_t plain[200];
+  int i;
+
+  for (i = 0; i < n; i++)
+    {
+      size_t hdr, out, off, plen, j;
+      uint64_t pn;
+
+      CHECK_EQ (gq_short_header_build (NULL, 0, 0, 0, (uint64_t) i, 2, pkt,
+                                       sizeof pkt, &hdr), GQ_OK);
+      for (j = 0; j < payload; j++)
+        pkt[hdr + j] = plain[j] = (uint8_t) (i + 3 * j);
+      CHECK_EQ (gq_packet_seal (k, (uint64_t) i, pkt, 1, 2, payload,
+                                sizeof pkt, &out), GQ_OK);
+      CHECK_EQ (gq_packet_open (k, i > 0, (uint64_t) (i ? i - 1 : 0), pkt, out,
+                                1, &pn, &off, &plen), GQ_OK);
+      CHECK_EQ (pn, (uint64_t) i);
+      CHECK_EQ (plen, payload);
+      CHECK (memcmp (pkt + off, plain, payload) == 0);
+    }
+}
+
+/* Protecting a packet must not set up a cipher: that is a context
+   allocation, a key schedule and, with libgcrypt's own random number
+   generator, an entropy poll, per packet and for the header mask as well as
+   the AEAD, and at 1200 bytes it cost ten times the encryption itself.  The
+   contexts are made when the keys are, and used for every packet after.  */
+static void
+test_no_setup_per_packet (void)
+{
+  static const uint8_t secret[48] = { 5 };
+  static const enum gq_aead algs[3] = { GQ_AEAD_AES_128_GCM,
+                                        GQ_AEAD_AES_256_GCM,
+                                        GQ_AEAD_CHACHA20_POLY1305 };
+  int a;
+
+  for (a = 0; a < 3; a++)
+    {
+      gq_packet_keys k, k2;
+      uint8_t next[48];
+      size_t secret_len = gq_hash_size (gq_aead_hash (algs[a]));
+      unsigned long before;
+
+      CHECK_EQ (gq_packet_keys_derive (GQ_VERSION_1, algs[a], secret,
+                                       secret_len, &k), GQ_OK);
+      CHECK_EQ (gq_packet_keys_prepare (&k), GQ_OK);
+      churn (&k, 1, 40);		/* Anything lazy is made by now.  */
+      before = tst_allocs;
+      churn (&k, 300, 40);
+      CHECK_EQ (tst_allocs, before);
+      /* Keys after a key update, which share the header protection key.  */
+      CHECK_EQ (gq_packet_keys_update (GQ_VERSION_1, &k, secret, secret_len,
+                                       next, &k2), GQ_OK);
+      churn (&k2, 1, 40);
+      before = tst_allocs;
+      churn (&k2, 300, 40);
+      churn (&k, 50, 40);
+      CHECK_EQ (tst_allocs, before);
+      gq_packet_keys_wipe (&k);
+      gq_packet_keys_wipe (&k2);
+    }
+}
+
+/* Keys with contexts and keys without are the same keys: a packet sealed by
+   one opens with the other, in both directions, whatever the cipher.  */
+static void
+test_prepared_and_plain_agree (void)
+{
+  static const uint8_t secret[48] = { 9 };
+  static const enum gq_aead algs[3] = { GQ_AEAD_AES_128_GCM,
+                                        GQ_AEAD_AES_256_GCM,
+                                        GQ_AEAD_CHACHA20_POLY1305 };
+  int a;
+
+  for (a = 0; a < 3; a++)
+    {
+      gq_packet_keys plain, fast;
+      size_t secret_len = gq_hash_size (gq_aead_hash (algs[a]));
+      uint8_t p1[100], p2[100];
+      size_t hdr, o1, o2, off, plen;
+      uint64_t pn;
+
+      CHECK_EQ (gq_packet_keys_derive (GQ_VERSION_1, algs[a], secret,
+                                       secret_len, &plain), GQ_OK);
+      fast = plain;		/* No contexts yet: a plain copy.  */
+      CHECK_EQ (gq_packet_keys_prepare (&fast), GQ_OK);
+      CHECK (fast.aead_ctx != NULL && fast.hp_ctx != NULL);
+      CHECK (plain.aead_ctx == NULL && plain.hp_ctx == NULL);
+      gq_short_header_build (NULL, 0, 0, 1, 77, 2, p1, sizeof p1, &hdr);
+      memset (p1 + hdr, 0x5a, 50);
+      memcpy (p2, p1, hdr + 50);
+      CHECK_EQ (gq_packet_seal (&plain, 77, p1, 1, 2, 50, sizeof p1, &o1),
+                GQ_OK);
+      CHECK_EQ (gq_packet_seal (&fast, 77, p2, 1, 2, 50, sizeof p2, &o2),
+                GQ_OK);
+      CHECK_EQ (o1, o2);
+      CHECK (memcmp (p1, p2, o1) == 0);
+      CHECK_EQ (gq_packet_open (&fast, 0, 0, p1, o1, 1, &pn, &off, &plen),
+                GQ_OK);
+      CHECK_EQ (plen, 50);
+      CHECK_EQ (gq_packet_open (&plain, 0, 0, p2, o2, 1, &pn, &off, &plen),
+                GQ_OK);
+      CHECK_EQ (plen, 50);
+      /* A packet that was changed does not open, and leaves the context
+         usable for the next.  */
+      gq_short_header_build (NULL, 0, 0, 1, 78, 2, p1, sizeof p1, &hdr);
+      memset (p1 + hdr, 0x5a, 50);
+      CHECK_EQ (gq_packet_seal (&fast, 78, p1, 1, 2, 50, sizeof p1, &o1),
+                GQ_OK);
+      memcpy (p2, p1, o1);		/* Opening works on the packet in place.  */
+      p1[o1 - 3] ^= 1;
+      CHECK_EQ (gq_packet_open (&fast, 0, 0, p1, o1, 1, &pn, &off, &plen),
+                GQ_ERR_CRYPTO);
+      CHECK_EQ (gq_packet_open (&fast, 0, 0, p2, o1, 1, &pn, &off, &plen),
+                GQ_OK);
+      CHECK_EQ (pn, 78);
+      gq_packet_keys_wipe (&fast);
+      CHECK (fast.aead_ctx == NULL && fast.hp_ctx == NULL);
+      gq_packet_keys_wipe (&plain);
+    }
+}
+
+/* A context made for one key is not used for another.  Keys are plain
+   data; if the bytes are changed after the contexts were made, the packets
+   are protected by the bytes, not by the contexts' memory of the old ones.  */
+static void
+test_stale_context_not_used (void)
+{
+  static const uint8_t secret[32] = { 3 };
+  gq_packet_keys plain, fast;
+  uint8_t p1[100], p2[100];
+  size_t hdr, o1, o2;
+
+  CHECK_EQ (gq_packet_keys_derive (GQ_VERSION_1, GQ_AEAD_AES_128_GCM, secret,
+                                   32, &plain), GQ_OK);
+  fast = plain;
+  CHECK_EQ (gq_packet_keys_prepare (&fast), GQ_OK);
+  /* New bytes in both the key and the header protection key.  */
+  plain.key[0] ^= 0x80;
+  plain.hp[5] ^= 0x01;
+  fast.key[0] ^= 0x80;
+  fast.hp[5] ^= 0x01;
+  gq_short_header_build (NULL, 0, 0, 0, 5, 2, p1, sizeof p1, &hdr);
+  memset (p1 + hdr, 0x33, 40);
+  memcpy (p2, p1, hdr + 40);
+  CHECK_EQ (gq_packet_seal (&plain, 5, p1, 1, 2, 40, sizeof p1, &o1), GQ_OK);
+  CHECK_EQ (gq_packet_seal (&fast, 5, p2, 1, 2, 40, sizeof p2, &o2), GQ_OK);
+  CHECK_EQ (o1, o2);
+  CHECK (memcmp (p1, p2, o1) == 0);
+  gq_packet_keys_wipe (&fast);
+}
+
+/* Moving keys: the destination has them and the source has nothing; what
+   the destination held is let go; moving to oneself is no move.  Key update
+   in place, and from keys that have contexts to keys that have their own.  */
+static void
+test_move_and_update (void)
+{
+  static const uint8_t secret[32] = { 11 };
+  gq_packet_keys a, b, ref, upd, upd2;
+  uint8_t next[32], next2[32];
+  unsigned long before;
+  static const uint8_t zero[sizeof (gq_packet_keys)];
+
+  CHECK_EQ (gq_packet_keys_derive (GQ_VERSION_1, GQ_AEAD_AES_128_GCM, secret,
+                                   32, &a), GQ_OK);
+  ref = a;				/* Plain copy, for comparison.  */
+  CHECK_EQ (gq_packet_keys_prepare (&a), GQ_OK);
+  memset (&b, 0, sizeof b);
+  gq_packet_keys_move (&b, &a);
+  CHECK (memcmp (&a, zero, sizeof a) == 0);
+  CHECK (b.aead_ctx != NULL && b.hp_ctx != NULL);
+  CHECK (memcmp (b.key, ref.key, 16) == 0);
+  gq_packet_keys_move (&b, &b);		/* Nothing happens.  */
+  CHECK (b.aead_ctx != NULL);
+  churn (&b, 5, 40);
+
+  /* Onto keys that have contexts of their own: they are let go (checked
+     for leaks by the sanitizers in CI), and the new ones work.  */
+  CHECK_EQ (gq_packet_keys_derive (GQ_VERSION_1, GQ_AEAD_AES_128_GCM, secret,
+                                   32, &a), GQ_OK);
+  CHECK_EQ (gq_packet_keys_prepare (&a), GQ_OK);
+  gq_packet_keys_move (&b, &a);
+  churn (&b, 5, 40);
+
+  /* An update from prepared keys is prepared, and the same keys as from
+     plain ones.  */
+  CHECK_EQ (gq_packet_keys_update (GQ_VERSION_1, &b, secret, 32, next, &upd),
+            GQ_OK);
+  CHECK_EQ (gq_packet_keys_update (GQ_VERSION_1, &ref, secret, 32, next2,
+                                   &upd2), GQ_OK);
+  CHECK (upd.aead_ctx != NULL && upd.hp_ctx == b.hp_ctx);
+  CHECK (upd2.aead_ctx == NULL && upd2.hp_ctx == NULL);
+  CHECK (memcmp (upd.key, upd2.key, 16) == 0);
+  CHECK (memcmp (upd.iv, upd2.iv, 12) == 0);
+  CHECK (memcmp (upd.hp, upd2.hp, 16) == 0);
+  CHECK (memcmp (next, next2, 32) == 0);
+  before = tst_allocs;
+  churn (&upd, 20, 40);
+  CHECK_EQ (tst_allocs, before);
+  /* The old keys' header protection context outlives them: it is shared.  */
+  gq_packet_keys_wipe (&b);
+  churn (&upd, 5, 40);
+  /* In place.  */
+  CHECK_EQ (gq_packet_keys_update (GQ_VERSION_1, &upd, next, 32, next2, &upd),
+            GQ_OK);
+  CHECK (upd.aead_ctx != NULL && upd.hp_ctx != NULL);
+  churn (&upd, 5, 40);
+  gq_packet_keys_wipe (&upd);
+}
+
 int
 main (void)
 {
+  tst_count_allocs ();
   test_initial_keys ();
   test_client_initial ();
   test_server_initial ();
   test_chacha_short ();
   test_seal_errors_and_reserved ();
   test_key_update ();
+  test_no_setup_per_packet ();
+  test_prepared_and_plain_agree ();
+  test_stale_context_not_used ();
+  test_move_and_update ();
   TST_DONE ();
 }

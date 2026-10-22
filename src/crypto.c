@@ -20,6 +20,7 @@
 # include <config.h>
 #endif
 
+#include <stdlib.h>
 #include <string.h>
 
 #include <gcrypt.h>
@@ -27,6 +28,7 @@
 #include <quickstep/status.h>
 #include <quickstep/crypto.h>
 
+#include "crypto_int.h"
 #include "gettext.h"
 
 #define GQ_MIN_GCRYPT "1.12.0"
@@ -401,13 +403,54 @@ gq_aead_open (enum gq_aead alg, const uint8_t *key, size_t keylen,
   return r;
 }
 
+/* A handle for the header protection mask of ALG: the ChaCha20 block
+   function, or AES in ECB mode for one block.  */
+static int
+hp_open_handle (enum gq_aead alg, gcry_cipher_hd_t *h)
+{
+  if (alg == GQ_AEAD_CHACHA20_POLY1305)
+    return gcry_cipher_open (h, GCRY_CIPHER_CHACHA20, GCRY_CIPHER_MODE_STREAM,
+                             0) ? GQ_ERR_CRYPTO : GQ_OK;
+  return gcry_cipher_open (h, alg == GQ_AEAD_AES_128_GCM
+                              ? GCRY_CIPHER_AES128 : GCRY_CIPHER_AES256,
+                           GCRY_CIPHER_MODE_ECB, 0) ? GQ_ERR_CRYPTO : GQ_OK;
+}
+
+/* The mask, from a handle whose key is set.  */
+static int
+hp_mask_with (gcry_cipher_hd_t h, enum gq_aead alg,
+              const uint8_t sample[GQ_HP_SAMPLE_LEN],
+              uint8_t mask[GQ_HP_MASK_LEN])
+{
+  uint8_t block[GQ_HP_SAMPLE_LEN];
+
+  if (alg == GQ_AEAD_CHACHA20_POLY1305)
+    {
+      /* Counter is the first four sample bytes (little endian) and the
+         nonce the remaining twelve; libgcrypt's ChaCha20 accepts exactly
+         that 16-byte layout through setiv.  Encrypting zeros yields the
+         keystream.  */
+      static const uint8_t zeros[GQ_HP_MASK_LEN];
+
+      if (gcry_cipher_setiv (h, sample, GQ_HP_SAMPLE_LEN)
+          || gcry_cipher_encrypt (h, mask, GQ_HP_MASK_LEN, zeros,
+                                  GQ_HP_MASK_LEN))
+        return GQ_ERR_CRYPTO;
+      return GQ_OK;
+    }
+  if (gcry_cipher_encrypt (h, block, sizeof block, sample, GQ_HP_SAMPLE_LEN))
+    return GQ_ERR_CRYPTO;
+  memcpy (mask, block, GQ_HP_MASK_LEN);
+  gq_wipe (block, sizeof block);
+  return GQ_OK;
+}
+
 int
 gq_hp_mask (enum gq_aead alg, const uint8_t *hp_key, size_t keylen,
             const uint8_t sample[GQ_HP_SAMPLE_LEN],
             uint8_t mask[GQ_HP_MASK_LEN])
 {
   gcry_cipher_hd_t h;
-  uint8_t block[GQ_HP_SAMPLE_LEN];
   int r = gq_crypto_init ();
 
   if (r != GQ_OK)
@@ -417,38 +460,187 @@ gq_hp_mask (enum gq_aead alg, const uint8_t *hp_key, size_t keylen,
   if (keylen != gq_aead_key_size (alg) || hp_key == NULL)
     return GQ_ERR_INVAL;
 
-  if (alg == GQ_AEAD_CHACHA20_POLY1305)
-    {
-      /* Counter is the first four sample bytes (little endian) and the
-         nonce the remaining twelve; libgcrypt's ChaCha20 accepts exactly
-         that 16-byte layout through setiv.  Encrypting zeros yields the keystream.  */
-      static const uint8_t zeros[GQ_HP_MASK_LEN];
-
-      if (gcry_cipher_open (&h, GCRY_CIPHER_CHACHA20,
-                            GCRY_CIPHER_MODE_STREAM, 0))
-        return GQ_ERR_CRYPTO;
-      if (gcry_cipher_setkey (h, hp_key, keylen)
-          || gcry_cipher_setiv (h, sample, GQ_HP_SAMPLE_LEN)
-          || gcry_cipher_encrypt (h, mask, GQ_HP_MASK_LEN, zeros,
-                                  GQ_HP_MASK_LEN))
-        r = GQ_ERR_CRYPTO;
-      gcry_cipher_close (h);
-      return r;
-    }
-
-  if (gcry_cipher_open (&h, alg == GQ_AEAD_AES_128_GCM
-                            ? GCRY_CIPHER_AES128 : GCRY_CIPHER_AES256,
-                        GCRY_CIPHER_MODE_ECB, 0))
+  if (hp_open_handle (alg, &h) != GQ_OK)
     return GQ_ERR_CRYPTO;
-  if (gcry_cipher_setkey (h, hp_key, keylen)
-      || gcry_cipher_encrypt (h, block, sizeof block, sample,
-                              GQ_HP_SAMPLE_LEN))
+  if (gcry_cipher_setkey (h, hp_key, keylen))
     r = GQ_ERR_CRYPTO;
   else
-    memcpy (mask, block, GQ_HP_MASK_LEN);
+    r = hp_mask_with (h, alg, sample, mask);
   gcry_cipher_close (h);
-  gq_wipe (block, sizeof block);
   return r;
+}
+
+/* ------------------------------------------------------------------ */
+/* Contexts kept for the life of a key                                */
+/* ------------------------------------------------------------------ */
+
+struct gqi_cipher
+{
+  unsigned refs;
+  enum gq_aead alg;
+  int hp;			/* Header protection, not the AEAD.  */
+  size_t keylen;
+  uint8_t key[32];		/* What the handle's key was set from.  */
+  gcry_cipher_hd_t h;
+};
+
+static gqi_cipher *
+cipher_new (enum gq_aead alg, int hp, const uint8_t *key, size_t keylen)
+{
+  gqi_cipher *c;
+  int r;
+
+  if (gq_crypto_init () != GQ_OK || key == NULL
+      || gq_aead_key_size (alg) == 0 || keylen != gq_aead_key_size (alg)
+      || keylen > sizeof c->key)
+    return NULL;
+  c = calloc (1, sizeof *c);
+  if (c == NULL)
+    return NULL;
+  r = hp ? hp_open_handle (alg, &c->h) : aead_open_handle (alg, &c->h);
+  if (r != GQ_OK)
+    {
+      free (c);
+      return NULL;
+    }
+  if (gcry_cipher_setkey (c->h, key, keylen))
+    {
+      gcry_cipher_close (c->h);
+      free (c);
+      return NULL;
+    }
+  c->refs = 1;
+  c->alg = alg;
+  c->hp = hp;
+  c->keylen = keylen;
+  memcpy (c->key, key, keylen);
+  return c;
+}
+
+gqi_cipher *
+gqi_aead_new (enum gq_aead alg, const uint8_t *key, size_t keylen)
+{
+  return cipher_new (alg, 0, key, keylen);
+}
+
+gqi_cipher *
+gqi_hp_new (enum gq_aead alg, const uint8_t *hp_key, size_t keylen)
+{
+  return cipher_new (alg, 1, hp_key, keylen);
+}
+
+gqi_cipher *
+gqi_cipher_ref (gqi_cipher *c)
+{
+  if (c)
+    c->refs++;
+  return c;
+}
+
+void
+gqi_cipher_unref (gqi_cipher *c)
+{
+  if (c == NULL || --c->refs > 0)
+    return;
+  gcry_cipher_close (c->h);
+  gq_wipe (c, sizeof *c);
+  free (c);
+}
+
+int
+gqi_cipher_is (const gqi_cipher *c, enum gq_aead alg, const uint8_t *key,
+               size_t keylen)
+{
+  return c != NULL && c->alg == alg && c->keylen == keylen && key != NULL
+         && gq_ct_equal (c->key, key, keylen);
+}
+
+int
+gqi_aead_seal (gqi_cipher *c, const uint8_t *nonce, const void *aad,
+               size_t aadlen, const void *pt, size_t ptlen, uint8_t *out,
+               size_t outlen)
+{
+  if (c == NULL || c->hp || nonce == NULL || (aad == NULL && aadlen > 0)
+      || (pt == NULL && ptlen > 0) || outlen != ptlen + GQ_AEAD_TAG_LEN)
+    return GQ_ERR_INVAL;
+  if (gcry_cipher_reset (c->h)
+      || gcry_cipher_setiv (c->h, nonce, GQ_AEAD_NONCE_LEN)
+      || (aadlen > 0 && gcry_cipher_authenticate (c->h, aad, aadlen))
+      || (ptlen > 0 && gcry_cipher_encrypt (c->h, out, ptlen, pt, ptlen))
+      || gcry_cipher_gettag (c->h, out + ptlen, GQ_AEAD_TAG_LEN))
+    return GQ_ERR_CRYPTO;
+  return GQ_OK;
+}
+
+int
+gqi_aead_open (gqi_cipher *c, const uint8_t *nonce, const void *aad,
+               size_t aadlen, const void *ct, size_t ctlen, uint8_t *out,
+               size_t outlen)
+{
+  size_t ptlen;
+  int r = GQ_OK;
+
+  if (c == NULL || c->hp)
+    return GQ_ERR_INVAL;
+  if (ctlen < GQ_AEAD_TAG_LEN)
+    return GQ_ERR_CRYPTO;
+  ptlen = ctlen - GQ_AEAD_TAG_LEN;
+  if (nonce == NULL || (aad == NULL && aadlen > 0) || ct == NULL
+      || outlen != ptlen)
+    return GQ_ERR_INVAL;
+  if (gcry_cipher_reset (c->h)
+      || gcry_cipher_setiv (c->h, nonce, GQ_AEAD_NONCE_LEN)
+      || (aadlen > 0 && gcry_cipher_authenticate (c->h, aad, aadlen)))
+    return GQ_ERR_CRYPTO;
+  if (ptlen > 0 && gcry_cipher_decrypt (c->h, out, ptlen, ct, ptlen))
+    r = GQ_ERR_CRYPTO;
+  else if (gcry_cipher_checktag (c->h, (const uint8_t *) ct + ptlen,
+                                 GQ_AEAD_TAG_LEN))
+    r = GQ_ERR_CRYPTO;
+  if (r != GQ_OK && ptlen > 0)
+    gq_wipe (out, ptlen);
+  return r;
+}
+
+int
+gqi_hp_mask (gqi_cipher *c, const uint8_t sample[GQ_HP_SAMPLE_LEN],
+             uint8_t mask[GQ_HP_MASK_LEN])
+{
+  if (c == NULL || !c->hp)
+    return GQ_ERR_INVAL;
+  return hp_mask_with (c->h, c->alg, sample, mask);
+}
+
+int
+gqi_seal (gqi_cipher *ctx, enum gq_aead alg, const uint8_t *key,
+          size_t keylen, const uint8_t *nonce, const void *aad, size_t aadlen,
+          const void *pt, size_t ptlen, uint8_t *out, size_t outlen)
+{
+  if (ctx != NULL && !ctx->hp && gqi_cipher_is (ctx, alg, key, keylen))
+    return gqi_aead_seal (ctx, nonce, aad, aadlen, pt, ptlen, out, outlen);
+  return gq_aead_seal (alg, key, keylen, nonce, aad, aadlen, pt, ptlen, out,
+                       outlen);
+}
+
+int
+gqi_open (gqi_cipher *ctx, enum gq_aead alg, const uint8_t *key,
+          size_t keylen, const uint8_t *nonce, const void *aad, size_t aadlen,
+          const void *ct, size_t ctlen, uint8_t *out, size_t outlen)
+{
+  if (ctx != NULL && !ctx->hp && gqi_cipher_is (ctx, alg, key, keylen))
+    return gqi_aead_open (ctx, nonce, aad, aadlen, ct, ctlen, out, outlen);
+  return gq_aead_open (alg, key, keylen, nonce, aad, aadlen, ct, ctlen, out,
+                       outlen);
+}
+
+int
+gqi_mask (gqi_cipher *ctx, enum gq_aead alg, const uint8_t *hp_key,
+          size_t keylen, const uint8_t sample[GQ_HP_SAMPLE_LEN],
+          uint8_t mask[GQ_HP_MASK_LEN])
+{
+  if (ctx != NULL && ctx->hp && gqi_cipher_is (ctx, alg, hp_key, keylen))
+    return gqi_hp_mask (ctx, sample, mask);
+  return gq_hp_mask (alg, hp_key, keylen, sample, mask);
 }
 
 static int

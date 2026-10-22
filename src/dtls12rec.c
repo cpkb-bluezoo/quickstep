@@ -25,6 +25,8 @@
 #include <quickstep/status.h>
 #include <quickstep/dtls12rec.h>
 
+#include "crypto_int.h"
+
 #define TRY(expr) do { int r_ = (expr); if (r_ != GQ_OK) return r_; } while (0)
 
 int
@@ -87,12 +89,17 @@ gq_dtls12_epoch_init (gq_dtls12_epoch *e, uint16_t epoch, enum gq_aead aead,
   memcpy (e->key, key, key_len);
   memcpy (e->iv, iv, iv_len);
   e->iv_len = iv_len;
+  /* Kept open for as long as the epoch lasts.  Not being able to is no
+     matter.  E is initialised, not updated: anything it held is not let go
+     of here.  */
+  e->ctx = gqi_aead_new (aead, e->key, key_len);
   return GQ_OK;
 }
 
 void
 gq_dtls12_epoch_wipe (gq_dtls12_epoch *e)
 {
+  gqi_cipher_unref (e->ctx);
   gq_wipe (e, sizeof *e);
 }
 
@@ -237,9 +244,9 @@ gq_dtls12_protect (gq_dtls12_epoch *e, unsigned type, const uint8_t *payload,
     memcpy (out + GQ_DTLS12_HEADER, es, 8);
   make_nonce (e, es, nonce);
   make_aad (aad, e->epoch, seq, type, (const uint8_t *) "\xfe\xfd", len);
-  TRY (gq_aead_seal (e->aead, e->key, gq_aead_key_size (e->aead), nonce, aad,
-                     sizeof aad, out + GQ_DTLS12_HEADER + el, len,
-                     out + GQ_DTLS12_HEADER + el, len + GQ_AEAD_TAG_LEN));
+  TRY (gqi_seal (e->ctx, e->aead, e->key, gq_aead_key_size (e->aead), nonce,
+                 aad, sizeof aad, out + GQ_DTLS12_HEADER + el, len,
+                 out + GQ_DTLS12_HEADER + el, len + GQ_AEAD_TAG_LEN));
   e->send_seq++;
   *out_len = GQ_DTLS12_HEADER + body;
   return GQ_OK;
@@ -276,8 +283,8 @@ gq_dtls12_deprotect (gq_dtls12_epoch *e, const gq_d12rec *rec, uint8_t *out,
   make_nonce (e, es, nonce);
   /* The version as received: DTLS 1.2 authenticates it.  */
   make_aad (aad, rec->epoch, rec->seq, rec->type, rec->header.data + 1, plen);
-  if (gq_aead_open (e->aead, e->key, gq_aead_key_size (e->aead), nonce, aad,
-                    sizeof aad, rec->body.data + el, n - el, out, plen)
+  if (gqi_open (e->ctx, e->aead, e->key, gq_aead_key_size (e->aead), nonce,
+                aad, sizeof aad, rec->body.data + el, n - el, out, plen)
       != GQ_OK)
     {
       e->bad++;

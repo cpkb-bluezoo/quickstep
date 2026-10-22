@@ -27,6 +27,7 @@
 #include <quickstep/keysched.h>
 
 #include "tst-util.h"
+#include "tst-alloc.h"
 
 /* A log of the events one datagram produced.  */
 struct log
@@ -171,6 +172,8 @@ keys (enum gq_aead aead, uint64_t epoch)
 
   for (i = 0; i < sizeof secret; i++)
     secret[i] = (uint8_t) (i * 11 + 3);
+  gq_dtls_epoch_wipe (&tx);
+  gq_dtls_epoch_wipe (&rx);
   CHECK_EQ (gq_dtls_epoch_init (&tx, epoch, aead, secret), GQ_OK);
   CHECK_EQ (gq_dtls_epoch_init (&rx, epoch, aead, secret), GQ_OK);
 }
@@ -427,9 +430,49 @@ test_short (void)
     }
 }
 
+/* A record is protected and opened without setting up a cipher, and the
+   record number is encrypted and decrypted without one either: two
+   contexts a record, for records of a few hundred bytes.  */
+static void
+test_no_setup_per_record (void)
+{
+  static const enum gq_aead algs[3] = { GQ_AEAD_AES_128_GCM,
+                                        GQ_AEAD_AES_256_GCM,
+                                        GQ_AEAD_CHACHA20_POLY1305 };
+  uint8_t out[2048], back[2048], pt[400];
+  size_t n, len, i;
+  unsigned type;
+  uint64_t seq, used;
+  int a;
+
+  for (i = 0; i < sizeof pt; i++)
+    pt[i] = (uint8_t) (i * 7);
+  for (a = 0; a < 3; a++)
+    {
+      unsigned long before = 0;
+
+      keys (algs[a], 3);
+      for (i = 0; i < 201; i++)
+        {
+          if (i == 1)
+            before = tst_allocs;	/* The first is the warm up.  */
+          CHECK_EQ (gq_dtls_protect (&tx, GQ_DTLS_CT_APPLICATION_DATA, pt,
+                                     i * 2, out, sizeof out, &n, &used),
+                    GQ_OK);
+          CHECK_EQ (open_one (out, n, back, &type, &len, &seq), GQ_OK);
+          CHECK (len == i * 2 && memcmp (back, pt, len) == 0);
+          CHECK_EQ (seq, (uint64_t) i);
+        }
+      CHECK_EQ (tst_allocs, before);
+    }
+  gq_dtls_epoch_wipe (&tx);
+  gq_dtls_epoch_wipe (&rx);
+}
+
 int
 main (void)
 {
+  tst_count_allocs ();
   gq_crypto_init ();
   test_framing ();
   test_roundtrip (GQ_AEAD_AES_128_GCM);
@@ -441,5 +484,6 @@ main (void)
   test_integrity_limit (GQ_AEAD_AES_128_GCM);
   test_integrity_limit (GQ_AEAD_CHACHA20_POLY1305);
   test_short ();
+  test_no_setup_per_record ();
   TST_DONE ();
 }

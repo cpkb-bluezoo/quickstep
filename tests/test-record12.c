@@ -27,6 +27,7 @@
 #include <quickstep/record12.h>
 
 #include "tst-util.h"
+#include "tst-alloc.h"
 
 struct sink
 {
@@ -144,6 +145,7 @@ test_roundtrip (enum gq_aead aead)
     size_t bit, total;
 
     gq_record12_init (&w2);
+    gq_record12_init (&r2);
     keys (&w2, &r2, aead);
     CHECK_EQ (gq_record12_protect (&w2, GQ_CT_HANDSHAKE, pt, 20, out,
                                    sizeof out, &total), GQ_OK);
@@ -159,6 +161,7 @@ test_roundtrip (enum gq_aead aead)
           continue;
         memcpy (copy, out, total);
         copy[bit / 8] ^= (uint8_t) (1 << (bit % 8));
+        gq_record12_wipe (&r2);
         gq_record12_init (&r2);
         keys (&w2, &r2, aead);
         s->n = 0;
@@ -169,6 +172,8 @@ test_roundtrip (enum gq_aead aead)
         CHECK (rc != GQ_OK);
         CHECK (s->n == 0);
       }
+    gq_record12_wipe (&w2);
+    gq_record12_wipe (&r2);
   }
 
   /* Record replayed under a later sequence number does not verify.  */
@@ -177,6 +182,7 @@ test_roundtrip (enum gq_aead aead)
     size_t m;
 
     gq_record12_init (&w2);
+    gq_record12_init (&r2);
     keys (&w2, &r2, aead);
     CHECK_EQ (gq_record12_protect (&w2, GQ_CT_APPLICATION_DATA, pt, 5, out,
                                    sizeof out, &m), GQ_OK);
@@ -187,7 +193,11 @@ test_roundtrip (enum gq_aead aead)
     l = m;
     CHECK_EQ (gq_record12_receive (&r2, &p, &l, on_rec, s), GQ_ERR_CRYPTO);
     CHECK_EQ (gq_record12_alert (&r2), 20);
+    gq_record12_wipe (&w2);
+    gq_record12_wipe (&r2);
   }
+  gq_record12_wipe (&w);
+  gq_record12_wipe (&r);
   free (s);
 }
 
@@ -201,6 +211,7 @@ test_chunking (void)
   struct sink *s = calloc (1, sizeof *s);
 
   gq_record12_init (&w);
+  gq_record12_init (&r);
   keys (&w, &r, GQ_AEAD_AES_128_GCM);
   for (k = 0; k < 3; k++)
     {
@@ -217,6 +228,7 @@ test_chunking (void)
     {
       size_t pos = 0, have = 0;
 
+      gq_record12_wipe (&r);
       gq_record12_init (&r);
       keys (&w, &r, GQ_AEAD_AES_128_GCM);
       s->n = 0;
@@ -238,6 +250,8 @@ test_chunking (void)
         }
       CHECK (s->calls == 3 && s->n == 120 && have == 0);
     }
+  gq_record12_wipe (&w);
+  gq_record12_wipe (&r);
   free (s);
 }
 
@@ -300,12 +314,14 @@ test_limits (void)
 
   /* AES-GCM stops at the record limit; ChaCha20-Poly1305 does not.  */
   gq_record12_init (&w);
+  gq_record12_init (&r);
   keys (&w, &r, GQ_AEAD_AES_128_GCM);
   w.write.seq = GQ_REC12_SEQ_LIMIT - 1;
   CHECK_EQ (gq_record12_protect (&w, GQ_CT_APPLICATION_DATA, (const uint8_t *) "x",
                                  1, out, sizeof out, &n), GQ_OK);
   CHECK_EQ (gq_record12_protect (&w, GQ_CT_APPLICATION_DATA, (const uint8_t *) "x",
                                  1, out, sizeof out, &n), GQ_ERR_RANGE);
+  gq_record12_wipe (&w);
   gq_record12_init (&w);
   keys (&w, &r, GQ_AEAD_CHACHA20_POLY1305);
   w.write.seq = GQ_REC12_SEQ_LIMIT + 5;
@@ -326,11 +342,70 @@ test_limits (void)
     CHECK_EQ (gq_record12_set_keys (&w, GQ_DIR_WRITE, (enum gq_aead) 9, k, 16,
                                     iv, 4), GQ_ERR_UNSUPPORTED);
   }
+  gq_record12_wipe (&w);
+  gq_record12_wipe (&r);
+}
+
+/* A record is protected and opened without setting up a cipher (see
+   test-record.c).  */
+static void
+test_no_setup_per_record (void)
+{
+  static const enum gq_aead algs[3] = { GQ_AEAD_AES_128_GCM,
+                                        GQ_AEAD_AES_256_GCM,
+                                        GQ_AEAD_CHACHA20_POLY1305 };
+  static uint8_t out[GQ_REC12_MAX_RECORD], pt[1000];
+  struct sink *s = calloc (1, sizeof *s);
+  int a, i;
+
+  for (i = 0; i < (int) sizeof pt; i++)
+    pt[i] = (uint8_t) (i * 3);
+  for (a = 0; a < 3; a++)
+    {
+      gq_record12 w, r;
+      unsigned long before = 0;
+      size_t n, l;
+      uint8_t *p;
+
+      gq_record12_init (&w);
+      gq_record12_init (&r);
+      keys (&w, &r, algs[a]);
+      for (i = 0; i < 201; i++)
+        {
+          if (i == 1)
+            before = tst_allocs;	/* The first is the warm up.  */
+          s->n = 0;
+          CHECK_EQ (gq_record12_protect (&w, GQ_CT_APPLICATION_DATA, pt,
+                                         (size_t) (i * 5), out, sizeof out,
+                                         &n), GQ_OK);
+          p = out;
+          l = n;
+          CHECK_EQ (gq_record12_receive (&r, &p, &l, on_rec, s), GQ_OK);
+          CHECK (l == 0 && s->n == (size_t) (i * 5)
+                 && memcmp (s->data, pt, s->n) == 0);
+        }
+      CHECK_EQ (tst_allocs, before);
+      /* New keys replace the old, and the context with them.  */
+      keys (&w, &r, algs[a]);
+      before = tst_allocs;
+      s->n = 0;
+      CHECK_EQ (gq_record12_protect (&w, GQ_CT_APPLICATION_DATA, pt, 100, out,
+                                     sizeof out, &n), GQ_OK);
+      p = out;
+      l = n;
+      CHECK_EQ (gq_record12_receive (&r, &p, &l, on_rec, s), GQ_OK);
+      CHECK (s->n == 100 && memcmp (s->data, pt, 100) == 0);
+      CHECK_EQ (tst_allocs, before);
+      gq_record12_wipe (&w);
+      gq_record12_wipe (&r);
+    }
+  free (s);
 }
 
 int
 main (void)
 {
+  tst_count_allocs ();
   gq_crypto_init ();
   test_plaintext ();
   test_roundtrip (GQ_AEAD_AES_128_GCM);
@@ -339,5 +414,6 @@ main (void)
   test_chunking ();
   test_headers ();
   test_limits ();
+  test_no_setup_per_record ();
   TST_DONE ();
 }

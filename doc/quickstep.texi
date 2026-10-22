@@ -143,6 +143,24 @@ because TLS needs extract and expand separately), HKDF-Expand-Label
 Each is checked against the vectors in its RFC (@file{tests/test-crypto.c}).
 No primitive is implemented in this tree.
 
+@cindex cipher contexts
+libgcrypt opens a context for every cipher, hash and MAC operation, which
+for a single operation is right and for every packet is not: an allocation,
+a key schedule, and with libgcrypt's own random number generator an entropy
+poll in each open.  Measured, protecting a QUIC packet took 17 microseconds
+that way, and a small DTLS 1.3 record 15, ten to fifty times the encryption.
+So the structures that hold keys for many packets keep a context open for
+them: @code{gq_packet_keys} for the 1-RTT keys of a QUIC connection, the
+directions of @code{gq_record} and @code{gq_record12}, the epochs of DTLS 1.3
+and 1.2.  The contexts are made when the keys are, counted rather than
+copied (a key update shares the header protection context, whose key does
+not change), and used only for the key bytes they were made for, so keys
+that are changed behind their context's back, or that have none, are
+protected by a context made for the call instead: slower, never wrong.
+Keys that protect a handful of packets (Initial, Handshake, 0-RTT) have
+none.  Which random number generator libgcrypt uses is left to the
+application; none of this depends on it.
+
 Findings from probing libgcrypt 1.12.4:
 
 @itemize @bullet

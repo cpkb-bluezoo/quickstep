@@ -39,17 +39,43 @@
 extern "C" {
 #endif
 
-/* Keys for one direction and one encryption level.  */
+struct gqi_cipher;		/* Internal: a cipher context (crypto_int.h).  */
+
+/* Keys for one direction and one encryption level.
+
+   AEAD_CTX and HP_CTX are cipher contexts kept open for the AEAD key and the
+   header protection key, so that protecting a packet does not set up a
+   cipher.  They are NULL unless gq_packet_keys_prepare made them, and that
+   is not an error: the functions below set one up for the packet instead,
+   at several times the cost.  Make them for keys that protect many packets
+   (1-RTT), not for those that protect a few.
+
+   A struct without contexts may be copied like any other.  One with them
+   is shared by count, not by copy: move it to its new place with
+   gq_packet_keys_move, which gives up what that place held, and let go of
+   it with gq_packet_keys_wipe.  Copying it with = leaves two holders of one
+   count.  Both are used by one thread at a time.  */
 typedef struct gq_packet_keys
 {
   enum gq_aead aead;
   uint8_t key[32];
   uint8_t iv[GQ_AEAD_NONCE_LEN];
   uint8_t hp[32];		/* Header protection key.  */
+  struct gqi_cipher *aead_ctx, *hp_ctx;
 } gq_packet_keys;
 
-/* Wipe the key material.  */
+/* Wipe the key material, and let go of the contexts.  K must have been
+   initialised: by one of the functions below, or zeroed.  */
 void gq_packet_keys_wipe (gq_packet_keys *k);
+
+/* Make the contexts for K's present keys (K as derived, initial or
+   updated), replacing any it has.  GQ_ERR_NOMEM or GQ_ERR_CRYPTO if they
+   cannot be made, in which case K is as it was and still works.  */
+int gq_packet_keys_prepare (gq_packet_keys *k);
+
+/* Move SRC to DST: DST first gives up what it held (it must be initialised),
+   then is what SRC was, and SRC is wiped.  */
+void gq_packet_keys_move (gq_packet_keys *dst, gq_packet_keys *src);
 
 /* Derive packet protection key, IV and header protection key from a
    traffic SECRET (HKDF-Expand-Label "quic key", "quic iv", "quic hp";
@@ -68,7 +94,9 @@ int gq_packet_keys_initial (uint32_t version, const uint8_t *dcid,
 /* Key update (RFC 9001 section 6): compute the next traffic secret
    ("quic ku") into NEXT_SECRET (same length as SECRET) and the keys
    derived from it into NEXT.  The header protection key does not change
-   and is copied from CUR.  */
+   and is copied from CUR.  If CUR has contexts, NEXT has its own for the
+   new AEAD key and shares CUR's for the header protection key.  NEXT is
+   initialised, not updated: it may be CUR, but holds nothing of its own.  */
 int gq_packet_keys_update (uint32_t version, const gq_packet_keys *cur,
                            const uint8_t *secret, size_t secret_len,
                            uint8_t *next_secret, gq_packet_keys *next);

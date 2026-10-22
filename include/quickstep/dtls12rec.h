@@ -85,6 +85,8 @@ typedef int (*gq_d12rec_cb) (void *user, const gq_d12rec *rec);
 int gq_dtls12_records (const uint8_t *dgram, size_t len, gq_d12rec_cb cb,
                        void *user);
 
+struct gqi_cipher;		/* Internal: a cipher context (crypto_int.h).  */
+
 typedef struct gq_dtls12_epoch
 {
   int active;			/* Keys installed (epoch 0 never is).  */
@@ -92,6 +94,9 @@ typedef struct gq_dtls12_epoch
   enum gq_aead aead;
   uint8_t key[32], iv[GQ_AEAD_NONCE_LEN];
   size_t iv_len;		/* 4 for AES-GCM, 12 for ChaCha20.  */
+  struct gqi_cipher *ctx;	/* A cipher kept open for KEY, so that a record
+				   does not set one up; NULL if there is none
+				   (then one is set up per record).  */
   uint64_t send_seq;
   uint64_t recv_max, recv_bits;
   int recv_any;

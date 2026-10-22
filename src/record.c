@@ -26,6 +26,8 @@
 #include <quickstep/keysched.h>
 #include <quickstep/record.h>
 
+#include "crypto_int.h"
+
 #define TRY(expr) do { int r_ = (expr); if (r_ != GQ_OK) return r_; } while (0)
 
 void
@@ -38,6 +40,8 @@ gq_record_init (gq_record *r)
 void
 gq_record_wipe (gq_record *r)
 {
+  gqi_cipher_unref (r->read.ctx);
+  gqi_cipher_unref (r->write.ctx);
   gq_wipe (r, sizeof *r);
 }
 
@@ -56,12 +60,16 @@ gq_record_set_keys (gq_record *r, enum gq_dir dir, enum gq_aead aead,
     return GQ_ERR_INVAL;
   TRY (gq_traffic_keys (aead, secret, key, iv));
   d = dir == GQ_DIR_READ ? &r->read : &r->write;
+  gqi_cipher_unref (d->ctx);
   d->active = 1;
   d->aead = aead;
   memset (d->key, 0, sizeof d->key);
   memcpy (d->key, key, gq_aead_key_size (aead));
   memcpy (d->iv, iv, sizeof d->iv);
   d->seq = 0;
+  /* Records are sent and read for as long as the keys last: keep a cipher
+     open for them.  Not being able to is no matter.  */
+  d->ctx = gqi_aead_new (aead, d->key, gq_aead_key_size (aead));
   gq_wipe (key, sizeof key);
   return GQ_OK;
 }
@@ -81,6 +89,7 @@ gq_record_set_skip_budget (gq_record *r, size_t budget)
 void
 gq_record_reset_write (gq_record *r)
 {
+  gqi_cipher_unref (r->write.ctx);
   gq_wipe (&r->write, sizeof r->write);
 }
 
@@ -184,11 +193,11 @@ gq_record_protect (gq_record *r, unsigned type, const uint8_t *fragment,
     memset (out + GQ_REC_HEADER_LEN + len + 1, 0, padding);
 
   nonce_for (&r->write, nonce);
-  TRY (gq_aead_seal (r->write.aead, r->write.key,
-                     gq_aead_key_size (r->write.aead), nonce, out,
-                     GQ_REC_HEADER_LEN, out + GQ_REC_HEADER_LEN,
-                     len + 1 + padding, out + GQ_REC_HEADER_LEN,
-                     len + 1 + padding + GQ_AEAD_TAG_LEN));
+  TRY (gqi_seal (r->write.ctx, r->write.aead, r->write.key,
+                 gq_aead_key_size (r->write.aead), nonce, out,
+                 GQ_REC_HEADER_LEN, out + GQ_REC_HEADER_LEN,
+                 len + 1 + padding, out + GQ_REC_HEADER_LEN,
+                 len + 1 + padding + GQ_AEAD_TAG_LEN));
   r->write.seq++;
   *out_len = GQ_REC_HEADER_LEN + body;
   return GQ_OK;
@@ -262,10 +271,10 @@ gq_record_receive (gq_record *r, uint8_t **buf, size_t *len, gq_record_cb cb,
           if (r->read.seq >= GQ_REC_SEQ_LIMIT)
             return bad (r, ALERT_UNEXPECTED_MESSAGE, GQ_ERR_PROTOCOL);
           nonce_for (&r->read, nonce);
-          rc = gq_aead_open (r->read.aead, r->read.key,
-                             gq_aead_key_size (r->read.aead), nonce, p,
-                             GQ_REC_HEADER_LEN, body, n, body,
-                             n - GQ_AEAD_TAG_LEN);
+          rc = gqi_open (r->read.ctx, r->read.aead, r->read.key,
+                         gq_aead_key_size (r->read.aead), nonce, p,
+                         GQ_REC_HEADER_LEN, body, n, body,
+                         n - GQ_AEAD_TAG_LEN);
           if (rc != GQ_OK)
             {
               /* Possibly a 0-RTT record we declined: drop it if allowed.  */

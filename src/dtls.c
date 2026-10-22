@@ -573,7 +573,7 @@ sink_secret (void *u, const gq_tls_secret *s)
     return 1;
   if (s->dir == GQ_DIR_READ)
     {
-      *pool_slot (c->rd, epoch) = tmp;
+      gq_dtls_epoch_move (pool_slot (c->rd, epoch), &tmp);
       c->have_rd = 1;
       if (s->level == GQ_LEVEL_APPLICATION)
         {
@@ -586,7 +586,7 @@ sink_secret (void *u, const gq_tls_secret *s)
     }
   else
     {
-      *pool_slot (c->wr, epoch) = tmp;
+      gq_dtls_epoch_move (pool_slot (c->wr, epoch), &tmp);
       if (s->level == GQ_LEVEL_APPLICATION)
         {
           if (epoch == 3)
@@ -600,7 +600,7 @@ sink_secret (void *u, const gq_tls_secret *s)
             }
         }
     }
-  gq_wipe (&tmp, sizeof tmp);
+  gq_dtls_epoch_wipe (&tmp);	/* Nothing left of it: it was moved.  */
   return 0;
 }
 

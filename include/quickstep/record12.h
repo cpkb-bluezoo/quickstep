@@ -54,6 +54,8 @@ extern "C" {
 #define GQ_REC12_OVERHEAD (GQ_REC_HEADER_LEN + 8 + GQ_AEAD_TAG_LEN)
 #define GQ_REC12_SEQ_LIMIT (UINT64_C (1) << 24)
 
+struct gqi_cipher;		/* Internal: a cipher context (crypto_int.h).  */
+
 struct gq_rec12_dir
 {
   int active;
@@ -62,6 +64,10 @@ struct gq_rec12_dir
   uint8_t iv[12];		/* 4 bytes for AES-GCM, 12 for ChaCha20.  */
   size_t iv_len;
   uint64_t seq;
+  struct gqi_cipher *ctx;	/* A cipher kept open for KEY, so that a record
+				   does not set one up; NULL if there is none
+				   (then one is set up per record).  Counted:
+				   a copy of this struct is not a holder.  */
 };
 
 typedef struct gq_record12
@@ -71,6 +77,11 @@ typedef struct gq_record12
   int alert;			/* Alert to send after a receive failure.  */
 } gq_record12;
 
+/* A record is initialised once, before anything else is done to it, and
+   wiped when it is finished with.  It holds a cipher for each direction
+   that has keys, which gq_record12_set_keys replaces with new keys and
+   gq_record12_wipe lets go of; initialising one that is in use forgets them
+   instead.  */
 void gq_record12_init (gq_record12 *r);
 void gq_record12_wipe (gq_record12 *r);
 
