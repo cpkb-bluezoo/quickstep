@@ -1290,13 +1290,65 @@ test_warning_alerts (void)
         }
     }
 
-  /* close_notify at warning level is an orderly close.  */
+  /* close_notify in the clear is nobody's: before the keys it is a
+     datagram anyone can send, and ends nothing.  The handshake goes on.  */
   n = net_new (&o);
   CHECK_EQ (gq_dtls12_start (n->s[0].d, n->now), GQ_OK);
   l = spoof_alert (d, 1, 0, 30);
   gq_dtls12_receive (n->s[0].d, d, l, n->now);
-  CHECK_EQ (n->s[0].closed, 1);
-  CHECK_EQ (n->s[0].close_err, 0);
+  CHECK_EQ (n->s[0].closed, 0);
+  run (n, 20000);
+  expect_ok (n);
+  net_free (n);
+}
+
+static int
+drop_client_after_first (struct net *n, int from, int index, void *user)
+{
+  (void) n;
+  (void) user;
+  return from == 0 && index > 0;
+}
+
+/* A fatal alert in the clear is believed for as long as it can be: a peer
+   refusing our first flight has no keys to say so with.  Once the peer has
+   gone on past that (a message other than ClientHello or HelloVerifyRequest
+   from it), what is left to arrive unprotected is whatever anyone cared to
+   send, and it is ignored; a refusal then is learned by the retransmission
+   timer, or from a protected alert.  Without this anyone who knows the
+   addresses could end a handshake with a 15 byte datagram.  */
+static void
+test_cleartext_alert_window (void)
+{
+  struct opts o;
+  struct net *n;
+  uint8_t d[32];
+  size_t l;
+
+  memset (&o, 0, sizeof o);
+
+  /* The server has sent its flight and heard nothing since the ClientHello:
+     a client refusing it (a certificate it will not take) may say so.  */
+  n = net_new (&o);
+  n->lose = drop_client_after_first;
+  CHECK_EQ (gq_dtls12_start (n->s[0].d, n->now), GQ_OK);
+  run (n, 200);
+  CHECK (n->s[1].sent > 0);
+  l = spoof_alert (d, 2, 42, 50);
+  gq_dtls12_receive (n->s[1].d, d, l, n->now);
+  CHECK_EQ (n->s[1].closed, 1);
+  CHECK_EQ (n->s[1].close_alert, 42);
+  net_free (n);
+
+  /* The client has its server's flight, so the first exchange is over.  */
+  n = net_new (&o);
+  n->lose = drop_client_after_first;
+  CHECK_EQ (gq_dtls12_start (n->s[0].d, n->now), GQ_OK);
+  run (n, 200);
+  CHECK (n->s[0].sent > 1);		/* It answered: its second flight.  */
+  l = spoof_alert (d, 2, 42, 51);
+  gq_dtls12_receive (n->s[0].d, d, l, n->now);
+  CHECK_EQ (n->s[0].closed, 0);
   net_free (n);
 }
 
@@ -1355,6 +1407,7 @@ main (void)
   test_spoofed_duplicate_draws_no_flight ();
   test_spoofed_fragments_mid_handshake ();
   test_warning_alerts ();
+  test_cleartext_alert_window ();
   test_empty_send ();
   TST_DONE ();
 }

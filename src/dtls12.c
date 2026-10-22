@@ -30,6 +30,7 @@
 #include <quickstep/dtls12rec.h>
 #include <quickstep/dtlshs.h>
 #include <quickstep/dtls12.h>
+#include <quickstep/tls12msg.h>
 
 #define TRY(expr) do { int r_ = (expr); if (r_ != GQ_OK) return r_; } while (0)
 
@@ -99,6 +100,8 @@ struct gq_dtls12
   size_t rx_cap;
 
   int d_dup, d_hs;		/* What the datagram being processed did.  */
+  int past_first;		/* The peer has sent a message other than a
+				   ClientHello or HelloVerifyRequest.  */
 };
 
 /* ------------------------------------------------------------------ */
@@ -589,7 +592,10 @@ on_msg (void *u, unsigned type, gq_slice msg)
   size_t l = msg.len;
   int r;
 
-  (void) type;
+  /* The first exchange is over once the peer says anything but the opening
+     (ClientHello, HelloVerifyRequest): see the alerts of epoch 0.  */
+  if (type != GQ_HS_CLIENT_HELLO && type != GQ_HS12_HELLO_VERIFY_REQUEST)
+    c->past_first = 1;
   /* The peer's next message answers our flight (a final one stays).  */
   if (c->fl.active && !c->fl.final)
     c->fl.superseded = 1;
@@ -693,9 +699,17 @@ on_record (void *u, const gq_d12rec *rec)
             }
           break;
         case GQ_D12_CT_ALERT:
-          /* Unauthenticated: honoured only before anything is protected,
-             else anyone who can guess the addresses could end us.  */
-          if (!c->rd1.active)
+          /* Unauthenticated.  A peer that refuses our first flight (a server
+             that will not have our ClientHello, a client that will not have
+             the server's certificate) has no keys to say so with, so a fatal
+             alert is believed until the peer goes on past that first
+             exchange; after that, or at warning level, or as a close_notify,
+             it is only ever something anyone who can guess the addresses
+             sent, and ends nothing.  */
+          if (!c->rd1.active && !c->past_first
+              && rec->body.len == 2
+              && rec->body.data[0] == GQ_ALERT_LEVEL_FATAL
+              && rec->body.data[1] != GQ_ALERT_CLOSE_NOTIFY)
             {
               gq_dtls12_replay_update (&c->rd0, rec->seq);
               handle_alert (c, rec->body);

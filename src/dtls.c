@@ -942,8 +942,11 @@ on_record (void *u, const gq_drec *rec)
         case GQ_DTLS_CT_ALERT:
           /* Unauthenticated: honoured only while nothing is protected yet
              (a server refusing our ClientHello), else it could be forged
-             by anyone who can guess the addresses.  */
-          if (!c->have_rd)
+             by anyone who can guess the addresses.  And then only an alert
+             that refuses: a close_notify says all went well, which nobody
+             can have shown, and anyone can send one.  */
+          if (!c->have_rd && rec->body.len == 2
+              && rec->body.data[1] != GQ_ALERT_CLOSE_NOTIFY)
             handle_alert (c, rec->body);
           break;
         case GQ_DTLS_CT_ACK:

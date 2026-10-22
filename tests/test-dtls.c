@@ -1689,6 +1689,25 @@ test_alerts_by_type (void)
           exchange (n, 3, 1);
           net_free (n);
         }
+      /* close_notify in the clear is not believed: it is the one alert
+         that says everything went well, anyone can send it, and before the
+         keys exist it ends nothing.  The handshake goes on.  */
+      for (level = 1; level <= 2; level++)
+        {
+          n = net_new (&o);
+          if (target == 0)
+            CHECK_EQ (gq_dtls_start (n->s[0].d, n->now), GQ_OK);
+          l = spoof_alert (d, (unsigned) level, GQ_ALERT_CLOSE_NOTIFY, 12);
+          gq_dtls_receive (n->s[target].d, d, l, n->now);
+          CHECK_EQ (n->s[target].closed, 0);
+          if (target == 0)
+            run (n, 20000);
+          else
+            CHECK (handshake (n, 20000));
+          expect_ok (n);
+          exchange (n, 3, 1);
+          net_free (n);
+        }
       /* Anything else ends it, warning level or not.  */
       for (level = 1; level <= 2; level++)
         {
