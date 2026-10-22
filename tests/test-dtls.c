@@ -1200,6 +1200,49 @@ test_listener (void)
                             sizeof reply, &rl, &prime), GQ_DTLS_LISTEN_REPLY);
   CHECK (rl > 0 && rl < ch1_len);
   CHECK_EQ (reply[0], 22);
+  /* A ClientHello with a long list of cipher suites (unassigned ones
+     among them, as GREASE does) is legal, however unusual: the answer is
+     the same kind of reply, not an error status, which is for bad
+     arguments.  The list sits after 2 + 32 + 1 + 1 bytes of the body, which
+     starts after the 13 byte record header and the 12 byte fragment
+     header.  */
+  {
+    uint8_t big[1500];
+    size_t off = 13 + 12 + 2 + 32 + 1 + 1, sl, extra = 600, k, hl, fl, rl2;
+
+    sl = ((size_t) ch1[off] << 8) | ch1[off + 1];
+    CHECK (ch1_len + extra <= sizeof big);
+    memcpy (big, ch1, off + 2 + sl);
+    for (k = 0; k < extra; k += 2)
+      {
+        big[off + 2 + sl + k] = 0x0a;	/* 0x?a?a: reserved for GREASE.  */
+        big[off + 2 + sl + k + 1] = (uint8_t) (0x0a + 0x10 * (k % 16));
+      }
+    memcpy (big + off + 2 + sl + extra, ch1 + off + 2 + sl,
+            ch1_len - (off + 2 + sl));
+    sl += extra;
+    big[off] = (uint8_t) (sl >> 8);
+    big[off + 1] = (uint8_t) sl;
+    hl = ((size_t) big[14] << 16 | (size_t) big[15] << 8 | big[16]) + extra;
+    big[14] = (uint8_t) (hl >> 16);
+    big[15] = (uint8_t) (hl >> 8);
+    big[16] = (uint8_t) hl;
+    fl = ((size_t) big[22] << 16 | (size_t) big[23] << 8 | big[24]) + extra;
+    big[22] = (uint8_t) (fl >> 16);
+    big[23] = (uint8_t) (fl >> 8);
+    big[24] = (uint8_t) fl;
+    rl2 = (((size_t) big[11] << 8) | big[12]) + extra;
+    big[11] = (uint8_t) (rl2 >> 8);
+    big[12] = (uint8_t) rl2;
+    CHECK_EQ (gq_dtls_listen (ck, &sc, bind1, sizeof bind1, big,
+                              ch1_len + extra, reply, sizeof reply, &rl,
+                              &prime), GQ_DTLS_LISTEN_REPLY);
+    CHECK (rl > 0 && rl < ch1_len + extra);
+    /* Restore REPLY for the checks that follow.  */
+    CHECK_EQ (gq_dtls_listen (ck, &sc, bind1, sizeof bind1, ch1, ch1_len,
+                              reply, sizeof reply, &rl, &prime),
+              GQ_DTLS_LISTEN_REPLY);
+  }
   /* The same again gives the same answer (stateless, deterministic).  */
   {
     uint8_t again[GQ_DTLS_LISTEN_REPLY_MAX];
@@ -1416,6 +1459,71 @@ test_spoofed_cleartext_after_handshake (void)
 /* Two cleartext fragments of the same message that disagree are an attack
    or a corruption, not a reason to give up on the peer: the real message
    follows.  */
+static int
+drop_from_server (struct net *n, int from, int index, void *user)
+{
+  (void) n;
+  (void) index;
+  (void) user;
+  return from == 1;
+}
+
+/* Once the server holds keys for the client's handshake records, a repeat of
+   a cleartext message must not draw its flight again nor an ACK: it is 25
+   bytes anyone who knows the addresses can send, the flight is kilobytes (the
+   certificate chain), and the server's own timer already resends it.  Nor
+   after the handshake: the repeat can only be from a forger then.  */
+static void
+test_spoofed_duplicate_draws_no_flight (void)
+{
+  struct opts o;
+  struct net *n;
+  uint8_t d[64];
+  size_t l;
+  unsigned k;
+  int before, target;
+
+  /* The server's flight is lost, so it is outstanding.  */
+  memset (&o, 0, sizeof o);
+  n = net_new (&o);
+  n->lose = drop_from_server;
+  CHECK_EQ (gq_dtls_start (n->s[0].d, n->now), GQ_OK);
+  run (n, 100);
+  CHECK (n->s[1].sent > 0);
+  before = n->s[1].sent;
+  for (k = 0; k < 6; k++)
+    {
+      /* Past a quarter of the retransmission timeout each time.  */
+      n->now += 400;
+      l = spoof_hs (d, 1, 100, 0, 0, 10, 9000 + k);
+      gq_dtls_receive (n->s[1].d, d, l, n->now);
+    }
+  CHECK_EQ (n->s[1].sent, before);
+  CHECK_EQ (n->s[1].closed, 0);
+  net_free (n);
+
+  /* And when it is over.  */
+  for (target = 0; target < 2; target++)
+    {
+      memset (&o, 0, sizeof o);
+      n = net_new (&o);
+      CHECK (handshake (n, 20000));
+      run (n, 20000);
+      expect_ok (n);
+      before = n->s[target].sent;
+      for (k = 0; k < 6; k++)
+        {
+          n->now += 5000;
+          l = spoof_hs (d, 1, 100, k % 3, 0, 10, 9100 + k);
+          gq_dtls_receive (n->s[target].d, d, l, n->now);
+        }
+      CHECK_EQ (n->s[target].sent, before);
+      CHECK_EQ (n->s[0].closed, 0);
+      CHECK_EQ (n->s[1].closed, 0);
+      net_free (n);
+    }
+}
+
 static void
 test_spoofed_fragments_mid_handshake (void)
 {
@@ -1441,6 +1549,50 @@ test_spoofed_fragments_mid_handshake (void)
 
 /* A cleartext ACK may only acknowledge cleartext records: otherwise a
    forged one silences the retransmission of a protected flight.  */
+/* The ClientHello is acknowledged by the ServerHello (or the retry request),
+   never by an ACK.  Its record number is predictable (0, then 1 after a
+   cookie), and an ACK in the clear costs nothing to forge: it must not
+   complete the flight, or a lost ServerHello would never make the client
+   send again nor tell the application that it timed out.  */
+static void
+test_spoofed_cleartext_ack_of_clienthello (void)
+{
+  struct opts o;
+  struct net *n;
+  uint8_t c[64];
+  uint64_t deadline;
+  unsigned k;
+  int before;
+
+  memset (&o, 0, sizeof o);
+  n = net_new (&o);
+  n->lose = drop_from_server;
+  CHECK_EQ (gq_dtls_start (n->s[0].d, n->now), GQ_OK);
+  deadline = gq_dtls_deadline (n->s[0].d);
+  CHECK (deadline != 0);
+  /* A plaintext ACK naming epoch 0 records 0 and 1.  */
+  c[0] = 26;
+  c[1] = 0xfe;
+  c[2] = 0xfd;
+  memset (c + 3, 0, 8);
+  c[10] = 7;
+  c[11] = 0;
+  c[12] = 2 + 32;
+  c[13] = 0;
+  c[14] = 32;
+  memset (c + 15, 0, 32);
+  c[15 + 15] = 0;
+  c[31 + 15] = 1;
+  gq_dtls_receive (n->s[0].d, c, 15 + 32, n->now + 5);
+  CHECK (gq_dtls_deadline (n->s[0].d) != 0);
+  /* And the client still sends the ClientHello again when it should.  */
+  before = n->s[0].sent;
+  for (k = 0; k < 3; k++)
+    run (n, 3000);
+  CHECK (n->s[0].sent > before);
+  net_free (n);
+}
+
 static void
 test_spoofed_cleartext_ack (void)
 {
@@ -1608,8 +1760,10 @@ main (void)
   test_key_update ();
   test_noise ();
   test_spoofed_cleartext_after_handshake ();
+  test_spoofed_duplicate_draws_no_flight ();
   test_spoofed_fragments_mid_handshake ();
   test_spoofed_cleartext_ack ();
+  test_spoofed_cleartext_ack_of_clienthello ();
   test_alerts_by_type ();
   test_empty_send ();
   TST_DONE ();

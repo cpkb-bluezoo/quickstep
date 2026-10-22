@@ -1161,6 +1161,45 @@ test_spoofed_cleartext_after_handshake (void)
 
 /* Two cleartext fragments of the same message that disagree are an attack
    or a corruption, not a reason to give up on the peer.  */
+/* A repeat of a message draws our last flight again, since it means the peer
+   did not get it.  Once keys are in use that must be a repeat the peer could
+   not have forged: a cleartext fragment is 25 bytes that anyone who knows the
+   addresses can send, and the flight it would draw is several kilobytes (the
+   server's tickets and Finished, a client's certificate chain).  */
+static void
+test_spoofed_duplicate_draws_no_flight (void)
+{
+  int target;
+
+  for (target = 0; target < 2; target++)
+    {
+      struct opts o;
+      struct net *n;
+      unsigned k;
+      int before;
+
+      memset (&o, 0, sizeof o);
+      n = net_new (&o);
+      CHECK (handshake (n, 20000));
+      run (n, 20000);
+      expect_ok (n);
+      before = n->s[target].sent;
+      for (k = 0; k < 10; k++)
+        {
+          uint8_t d[64];
+          size_t l = spoof_hs (d, 0, 0, k % 3, 0, 0, 7000 + k);
+
+          /* Long enough after the flight for it to be sent again.  */
+          n->now += 5000;
+          gq_dtls12_receive (n->s[target].d, d, l, n->now);
+        }
+      CHECK_EQ (n->s[target].sent, before);
+      CHECK_EQ (n->s[0].closed, 0);
+      CHECK_EQ (n->s[1].closed, 0);
+      net_free (n);
+    }
+}
+
 static void
 test_spoofed_fragments_mid_handshake (void)
 {
@@ -1313,6 +1352,7 @@ main (void)
   test_client_auth ();
   test_noise ();
   test_spoofed_cleartext_after_handshake ();
+  test_spoofed_duplicate_draws_no_flight ();
   test_spoofed_fragments_mid_handshake ();
   test_warning_alerts ();
   test_empty_send ();

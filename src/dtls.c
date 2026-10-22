@@ -472,6 +472,13 @@ process_ack (gq_dtls *c, gq_slice body, int cleartext)
 {
   if (!c->fl.active)
     return;
+  /* The only records a client sends in the clear are ClientHellos, and
+     those are acknowledged by the ServerHello (or HelloRetryRequest), never
+     by an ACK.  The numbers are predictable and a cleartext ACK costs
+     nothing to forge, so one must not end the flight: if the ServerHello
+     were then lost the client would never send again.  */
+  if (cleartext && !c->server)
+    return;
   c->ack_clear = cleartext;
   if (gq_dtls_acks (body, on_ack_rec, c) == GQ_OK)
     fl_check_done (c);
@@ -829,12 +836,14 @@ on_frag (void *u, const gq_dtls_hs_frag *f)
   gq_dtls *c = x->c;
   int d, ok = 0;
 
-  /* A cleartext message with something to say is only for as long as nothing
-     is protected yet; after that only a repeat of one already delivered is
-     of any use (it draws our flight again).  RFC 6347 section 4.1.2.7:
-     what cannot be authenticated is discarded, not fatal.  */
-  if (x->unauth && c->have_rd
-      && !((int16_t) (uint16_t) (f->message_seq - c->reasm.next_seq) < 0))
+  /* A cleartext message is only for as long as nothing is protected yet.
+     After that it is ignored, a repeat of one already delivered included:
+     acting on one (resending our flight, or acknowledging it) would let
+     anyone who knows the addresses draw kilobytes with 25 bytes.  A peer that
+     lost our flight resends its own, protected records, and our own timer
+     resends ours in any case.  RFC 9147 section 4.1.2.7: what cannot be
+     authenticated is discarded, not fatal.  */
+  if (x->unauth && c->have_rd)
     return 0;
   d = gq_dtls_reasm_push (&c->reasm, f, on_msg, x);
   if (d == GQ_ERR_HANDLER || c->closed)
@@ -889,6 +898,10 @@ process_hs (gq_dtls *c, enum gq_level level, gq_slice body, gq_dtls_recno rec)
   x.rec = rec;
   x.acked = 0;
   x.unauth = level == GQ_LEVEL_INITIAL;
+  /* Nothing in a cleartext record is acted on once protected ones can be
+     read (see on_frag), including by owing an ACK for it.  */
+  if (x.unauth && c->have_rd)
+    return;
   c->d_hs = 1;
   /* A malformed record is dropped; whatever it completed stays done.  */
   gq_dtls_hs_parse (body, c->reasm.max_len, on_frag, &x);

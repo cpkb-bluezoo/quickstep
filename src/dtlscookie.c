@@ -125,13 +125,24 @@ tag_of (const uint8_t key[32], const uint8_t *binding, size_t bl,
 static int
 check_of (const uint8_t *random, gq_slice suites, uint8_t out[CHECK_LEN])
 {
-  uint8_t buf[32 + 512], h[32];
+  /* Incrementally, with no limit on the list: any length a ClientHello can
+     have is a legal one, and an error status here would come out of
+     gq_dtls_listen as if its caller had passed bad arguments.  */
+  gq_transcript *tr;
+  uint8_t h[32];
+  int r;
 
-  if (suites.len > 512)
-    return GQ_ERR_RANGE;
-  memcpy (buf, random, 32);
-  memcpy (buf + 32, suites.data, suites.len);
-  TRY (gq_hash_compute (GQ_HASH_SHA256, buf, 32 + suites.len, h, 32));
+  r = gq_transcript_new (&tr, GQ_HASH_SHA256);
+  if (r != GQ_OK)
+    return r;
+  r = gq_transcript_update (tr, random, 32);
+  if (r == GQ_OK)
+    r = gq_transcript_update (tr, suites.data, suites.len);
+  if (r == GQ_OK)
+    r = gq_transcript_hash (tr, h, 32);
+  gq_transcript_free (tr);
+  if (r != GQ_OK)
+    return r;
   memcpy (out, h, CHECK_LEN);
   return GQ_OK;
 }

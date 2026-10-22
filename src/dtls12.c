@@ -609,12 +609,14 @@ on_frag (void *u, const gq_dtls_hs_frag *f)
   gq_dtls12 *c = x->c;
   int d;
 
-  /* A cleartext message with something to say is only for as long as nothing
-     is protected yet; after that only a repeat of one already delivered is
-     of any use (it draws our flight again).  RFC 6347 section 4.1.2.7:
-     what cannot be authenticated is discarded, not fatal.  */
-  if (x->unauth && c->rd1.active
-      && !((int16_t) (uint16_t) (f->message_seq - c->reasm.next_seq) < 0))
+  /* A cleartext message is only for as long as nothing is protected yet.
+     After that it is ignored, a repeat of one already delivered included: a
+     peer that did not get our last flight sends its own again, and the
+     Finished in it is protected, so that repeat is one nobody else could
+     have forged.  Acting on a cleartext one would let anyone who knows the
+     addresses draw our flight, several kilobytes, with 25 bytes.  RFC 6347
+     section 4.1.2.7: what cannot be authenticated is discarded, not fatal.  */
+  if (x->unauth && c->rd1.active)
     return 0;
   d = gq_dtls_reasm_push (&c->reasm, f, on_msg, x);
   if (d == GQ_ERR_HANDLER || c->closed)
