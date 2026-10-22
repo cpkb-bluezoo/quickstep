@@ -33,7 +33,7 @@ int
 gq_token_keys_init (gq_token_keys *k)
 {
   memset (k, 0, sizeof *k);
-  return gq_random (k->key[0], GQ_TOKEN_KEY_LEN);
+  return gq_random_key (k->key[0], GQ_TOKEN_KEY_LEN);
 }
 
 int
@@ -41,7 +41,7 @@ gq_token_keys_rotate (gq_token_keys *k)
 {
   uint8_t fresh[GQ_TOKEN_KEY_LEN];
 
-  if (gq_random (fresh, sizeof fresh) != GQ_OK)
+  if (gq_random_key (fresh, sizeof fresh) != GQ_OK)
     return GQ_ERR_CRYPTO;
   memcpy (k->key[1], k->key[0], GQ_TOKEN_KEY_LEN);
   memcpy (k->key[0], fresh, sizeof fresh);

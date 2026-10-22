@@ -686,6 +686,30 @@ test_coalesced_key_updates (void)
 /* End of file on the transport is not the end of the data unless the peer
    said so with close_notify (RFC 8446 section 6.1): whoever can inject a FIN
    or a reset would otherwise cut what is read off, undetected.  */
+/* RFC 8446 appendix D.4: a ChangeCipherSpec may come at any time after the
+   first ClientHello has been sent or received, not before.  */
+static void
+test_ccs_before_the_hello (void)
+{
+  struct side *s = side_new ();
+  static const uint8_t ccs[6] = { 20, 3, 3, 0, 1, 1 };
+
+  CHECK_EQ (gq_tlsconn_client_new (&s->conn, &s->cfg, &s->events), GQ_OK);
+  CHECK_EQ (gq_tlsconn_receive (s->conn, ccs, sizeof ccs), GQ_ERR_PROTOCOL);
+  CHECK_EQ (s->ev.closed, 1);
+  CHECK_EQ (s->ev.close_alert, GQ_ALERT_UNEXPECTED_MESSAGE);
+  side_free (s);
+
+  /* Once the hello is out the server may send it, as the compatibility
+     mode of TLS 1.3 does.  */
+  s = side_new ();
+  CHECK_EQ (gq_tlsconn_client_new (&s->conn, &s->cfg, &s->events), GQ_OK);
+  CHECK_EQ (gq_tlsconn_start (s->conn), GQ_OK);
+  CHECK_EQ (gq_tlsconn_receive (s->conn, ccs, sizeof ccs), GQ_OK);
+  CHECK_EQ (s->ev.closed, 0);
+  side_free (s);
+}
+
 static void
 test_transport_eof (void)
 {
@@ -879,6 +903,7 @@ main (void)
   test_rekey_by_count ();
   test_flights_over_tcp ();
   test_coalesced_key_updates ();
+  test_ccs_before_the_hello ();
   test_transport_eof ();
   test_failures ();
   TST_DONE ();

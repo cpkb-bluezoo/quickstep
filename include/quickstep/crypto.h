@@ -55,6 +55,12 @@ int gq_crypto_init (void);
 /* Fill BUF with LEN cryptographically strong random bytes.  */
 int gq_random (void *buf, size_t len);
 
+/* The same for keys that are kept: a token, ticket or cookie key, the
+   stateless reset key.  libgcrypt asks its strongest level for long-term keys
+   (it may wait for entropy, once); gq_random is for nonces, connection IDs
+   and the like.  */
+int gq_random_key (void *buf, size_t len);
+
 /* Constant-time comparison of two N-byte buffers: 1 if equal, else 0.
    Use for every comparison involving a MAC, tag or token.  */
 int gq_ct_equal (const void *a, const void *b, size_t n);

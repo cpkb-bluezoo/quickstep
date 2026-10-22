@@ -410,6 +410,7 @@ that everything excluded here is rejected.
 * Signatures and certificates::
 * Server behaviour::
 * Other rules::
+* Application responsibilities::
 @end menu
 
 @node Versions
@@ -873,8 +874,85 @@ policy question for the embedding application, which receives the peer's
 chain.
 
 @item
-Key material is wiped after use.  The library never logs secrets.
+Key material is wiped after use.  Secrets are not logged: the stateless
+reset tokens that qlog could show appear only when @code{qlog_raw} is
+nonzero.
 @end itemize
+
+@node Application responsibilities
+@section Application responsibilities
+@cindex application responsibilities
+@cindex hardening
+
+The library does no I/O and keeps no clock or key store of its own, so some
+of what makes a deployment safe is the application's.
+
+@heading Starting up
+Call @code{gq_crypto_init}, or initialise libgcrypt yourself, before any
+thread is created.  libgcrypt's own initialisation cannot be run by two
+threads at once, and the constructors of the library call
+@code{gq_crypto_init} on first use.  When the library does the
+initialising it turns off libgcrypt's warning about insecure memory (the
+library never writes to stderr); initialise libgcrypt first to configure
+its secure memory or keep the warning.  One connection is used by one thread
+at a time.
+
+@heading Authenticating the server
+Set @code{server_name} on every client that uses a trust store.  It is the
+name the certificate is checked for, as well as the SNI.  A client that has
+no name to check (an IP literal, which is no SNI) says so with
+@code{no_name_check}, or authenticates the peer itself in
+@code{verify_peer}.  Name matching is GnuTLS's: it also accepts the subject
+common name of a certificate that has no DNS subject alternative name, and
+lets an IP literal match a DNS name.  Validity is checked against the
+system clock, not the library's clock hooks.  Revocation is never checked.
+
+@heading End of file
+When a read on a TLS byte stream returns 0, call @code{gq_tlsconn_eof} (or
+the @code{gq_tls12conn} and @code{gq_tlsauto} ones).  A FIN, or a reset,
+can be forged: without the peer's close_notify, what has been read may be
+cut short, and it is not to be taken for complete.  The call closes the
+connection with @code{GQ_ERR_PROTOCOL} in that case and says so through the
+closed event.
+
+@heading Keys that rotate
+Tokens (Retry and NEW_TOKEN), session tickets, DTLS cookies and the stateless
+reset key are all derived from keys the application owns.  Rotate them.
+Tokens and tickets are sealed under a random 96 bit nonce, which is safe for
+no more than about 2^32 of them per key, so rotate far sooner than that.  A
+DTLS cookie carries no time, and one that was captured can be replayed until
+two rotations have passed: rotate every minute or so, and route a datagram
+from an address that already has an association to it, not to the
+listener.  Servers behind one address that share a reset key can be made to
+reset each other's connections (RFC 9000 section 21.11) unless the
+connection IDs say which server they belong to, as the load balancer
+encoding of @file{quiclb.h} does.
+
+@heading Early data
+0-RTT data can be replayed.  A single process uses
+@code{gq_replay_cache_check}; several servers behind one address need a
+store they share, supplied as the @code{replay_check} callback.  See
+@ref{Early data}.
+
+@heading What an unauthenticated peer can cost
+A server that is willing to answer anyone can be made to spend memory and
+bandwidth for a sender who has proved nothing.  The bounds are
+@code{max_connections} and @code{retry_above} (by default half of it, past
+which a client must prove its address with a Retry), @code{datagram_queue},
+@code{send_buffer}, @code{max_buffered_packets} and, for the handshake
+engines, @code{max_message_len}.  A DTLS server puts @code{gq_dtls_listen}
+in front of its associations.  A connection that has not accepted a packet
+from its first datagram is freed at once, and a server looks at no more than
+8 PSK identities of a ClientHello.
+
+@heading Logs
+qlog events can carry the data of frames and the stateless reset tokens, both
+set by @code{qlog_raw}.  Leave it at 0 for logs that are shipped or pasted
+into bug reports.
+
+@heading Reporting a problem
+Report security problems, privately if you like, to
+@email{bug-quickstep@@gnu.org}.
 
 @node Early data
 @chapter Early data (0-RTT)
@@ -1210,9 +1288,11 @@ awk '$2 == "quic:packet_lost"' abcd1234_server.qlog.txt
 @heading Detail
 @code{qlog_importance} chooses by the draft's levels (Core, Base, Extra; 0,
 the default, is all of them), and @code{qlog_raw} how many bytes of the data
-of CRYPTO, STREAM, DATAGRAM and NEW_TOKEN frames to include as hex; the
-default, none, logs lengths only, since the data can be secret or personal.
-Keys are never logged: @code{key_updated} names the key and its phase.  A
+of CRYPTO, STREAM, DATAGRAM and NEW_TOKEN frames to include as hex, and
+whether stateless reset tokens are shown; the default, none, logs lengths
+only, since the data can be secret or personal.
+Keys are never logged: @code{key_updated} names the key and its phase.  Stateless
+reset tokens, which are secrets too, are logged only with @code{qlog_raw}.  A
 connection that logs holds about 48 KiB of buffers for it.
 
 @heading Many connections

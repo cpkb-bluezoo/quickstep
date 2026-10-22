@@ -24,6 +24,9 @@
 # include <config.h>
 #endif
 
+#include <pthread.h>
+#include <stdio.h>
+
 #include <quickstep/status.h>
 #include <quickstep/tlsauto.h>
 #include <quickstep/tls12conn.h>
@@ -582,6 +585,95 @@ test_transport_eof (void)
   peer_free (&s);
 }
 
+/* The largest hello the engine will make is 16 KB, which one record holds
+   (the engine refuses to make more).  The TLS 1.2 engine that continues from
+   it needs all of it; check one close to the limit.  */
+static void
+test_hello_over_one_record (void)
+{
+  static char names[70][201];
+  static gq_slice alpn[70];
+  gq_tls_config cfg = client_cfg ();
+  struct peer c, s;
+  size_t i, k;
+
+  for (i = 0; i < 70; i++)
+    {
+      memset (names[i], 'a' + (int) (i % 26), 200);
+      names[i][0] = (char) ('A' + (int) (i % 26));
+      names[i][1] = (char) ('0' + (int) (i / 10 % 10));
+      names[i][2] = (char) ('0' + (int) (i % 10));
+      alpn[i].data = (const uint8_t *) names[i];
+      alpn[i].len = 200;
+    }
+  cfg.alpn = alpn;
+  cfg.n_alpn = 70;
+  for (k = 0; k < 2; k++)
+    {
+      peer_init (&c, KAUTO);
+      make_server (&s, k ? S_BARE12 : S_AUTO12);
+      CHECK_EQ (gq_tlsauto_client_new (&c.ca, &cfg, &c.ev, 0), GQ_OK);
+      CHECK_EQ (gq_tlsauto_start (c.ca), GQ_OK);
+      CHECK (c.out.n > 12000);
+      pump (&c, &s, 100000);
+      CHECK (c.connected && s.connected);
+      CHECK_EQ (gq_tlsauto_version (c.ca), 0x0303);
+      peer_free (&c);
+      peer_free (&s);
+    }
+}
+
+/* The code that decides which protocol a peer speaks looks at the first
+   flight before there is an engine, and it must not need a big stack to do
+   so: a thread of a program may have 64 KB.  */
+struct small_stack
+{
+  int kind;			/* 0 server, 1 client.  */
+  int done;
+};
+
+static void *
+small_stack_run (void *arg)
+{
+  struct small_stack *w = arg;
+  struct peer p;
+  /* The start of a hello, then of a server hello: the record is declared
+     bigger than what has arrived, so the decision waits for more.  */
+  static const uint8_t partial[] = { 22, 3, 1, 0x20, 0, 1, 0, 0x1f, 0xf0,
+                                     3, 3, 0, 0, 0, 0, 0, 0 };
+
+  if (w->kind == 0)
+    make_auto_server (&p, 0);
+  else
+    make_client (&p, KAUTO, 0);
+  peer_recv (&p, partial, sizeof partial);
+  peer_free (&p);
+  w->done = 1;
+  return NULL;
+}
+
+static void
+test_small_stack (void)
+{
+  int kind;
+
+  for (kind = 0; kind < 2; kind++)
+    {
+      pthread_t th;
+      pthread_attr_t at;
+      struct small_stack w;
+
+      w.kind = kind;
+      w.done = 0;
+      pthread_attr_init (&at);
+      pthread_attr_setstacksize (&at, 64 * 1024);
+      CHECK_EQ (pthread_create (&th, &at, small_stack_run, &w), 0);
+      pthread_join (th, NULL);
+      pthread_attr_destroy (&at);
+      CHECK_EQ (w.done, 1);
+    }
+}
+
 /* ---- verify_peer replaces the trust store ---- */
 
 static int
@@ -698,6 +790,8 @@ main (void)
   test_fragmented_hello ();
   test_garbage ();
   test_transport_eof ();
+  test_hello_over_one_record ();
+  test_small_stack ();
   test_verify_peer ();
   TST_DONE ();
 }

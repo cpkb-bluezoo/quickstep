@@ -226,8 +226,13 @@ gq_sstream_on_acked (gq_sstream *s, uint64_t off, size_t len, int fin)
     {
       if (off < s->base)
         off = s->base;
-      gq_ranges_add (&s->acked, off, hi, 0);
-      gq_ranges_remove (&s->lost, off, hi);
+      if (gq_ranges_add (&s->acked, off, hi, 0) == GQ_OK)
+        gq_ranges_remove (&s->lost, off, hi);
+      else
+        /* No room to record it.  Not recording it would leave a hole in
+           what is acknowledged that nothing fills, and the buffer would never
+           be freed past it: send it again, which records it in its turn.  */
+        gq_ranges_add_coarse (&s->lost, off, hi);
     }
   /* Free the acknowledged prefix.  */
   if (s->acked.n && s->acked.r[0].lo <= s->base)
@@ -257,7 +262,7 @@ gq_sstream_on_lost (gq_sstream *s, uint64_t off, size_t len, int fin)
     off = s->base;
   if (off >= hi)
     return;
-  gq_ranges_add (&s->lost, off, hi, 0);
+  gq_ranges_add_coarse (&s->lost, off, hi);
   /* Anything acknowledged in the meantime need not be sent again.  */
   for (i = 0; i < s->acked.n; i++)
     gq_ranges_remove (&s->lost, s->acked.r[i].lo, s->acked.r[i].hi);
@@ -425,8 +430,19 @@ gq_rstream_push (gq_rstream *s, uint64_t off, const uint8_t *data,
           size_t cap = s->cap ? s->cap : 512;
           uint8_t *nb;
 
+          /* More than the address space holds (a 32 bit size_t and a window
+             over 2 GiB): cannot be buffered.  */
+          if (need > (uint64_t) SIZE_MAX)
+            return GQ_ERR_NOMEM;
           while (cap < need)
-            cap *= 2;
+            {
+              if (cap > SIZE_MAX / 2)	/* Doubling would wrap.  */
+                {
+                  cap = (size_t) need;
+                  break;
+                }
+              cap *= 2;
+            }
           if (cap > s->max_data - s->off)
             cap = (size_t) (s->max_data - s->off);
           nb = realloc (s->buf, cap);

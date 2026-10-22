@@ -498,7 +498,12 @@ psk_acceptable (gq_tls *t, const gq_session_state *s, const gq_client_hello *ch,
       || !gqi_in_list (t->suites, t->n_suites, s->cipher_suite))
     return 0;
   life = s->lifetime < 604800 ? s->lifetime : 604800;
-  if (s->created_ms > now + 60000 || now - s->created_ms > life * 1000)
+  /* A ticket from a server whose clock is up to a minute ahead of ours is
+     young, not old: the unsigned difference would wrap.  Further ahead is
+     not believed.  */
+  if (s->created_ms > now + 60000)
+    return 0;
+  if ((s->created_ms > now ? 0 : now - s->created_ms) > life * 1000)
     return 0;
   /* A ticket is bound to the server name it was issued for.  */
   if (s->server_name_len
@@ -801,6 +806,10 @@ on_client_hello (gq_tls *t, gq_slice msg, gq_slice body)
       t->hlen = gq_hash_size (t->hash);
       memcpy (t->ch_random, ch.random, 32);
       memcpy (t->ch_suites_hash, suites_hash, 32);
+      /* RFC 9001 section 8.4: QUIC has no use for the compatibility mode a
+         session ID asks for, and a server treats one as an error.  */
+      if (t->quic && ch.session_id.len != 0)
+        return gqi_fail (t, GQ_ALERT_ILLEGAL_PARAMETER, GQ_ERR_PROTOCOL);
       memcpy (t->sid, ch.session_id.data, ch.session_id.len);
       t->sid_len = ch.session_id.len;
       if (t->primed && t->suite != t->prime.suite)

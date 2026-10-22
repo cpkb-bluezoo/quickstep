@@ -115,7 +115,7 @@ gq_ticket_keys_new (gq_ticket_keys **out)
   k = calloc (1, sizeof *k);
   if (k == NULL)
     return GQ_ERR_NOMEM;
-  r = gq_random (key, sizeof key);
+  r = gq_random_key (key, sizeof key);
   if (r == GQ_OK)
     r = gq_ticket_keys_add (k, key, 1);
   gq_wipe (key, sizeof key);
@@ -194,7 +194,7 @@ gq_ticket_keys_rotate (gq_ticket_keys *k)
 
   if (k == NULL)
     return GQ_ERR_INVAL;
-  r = gq_random (key, sizeof key);
+  r = gq_random_key (key, sizeof key);
   if (r == GQ_OK)
     r = gq_ticket_keys_add (k, key, 1);
   gq_wipe (key, sizeof key);

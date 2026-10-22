@@ -60,7 +60,17 @@ void gq_ranges_clear (gq_ranges *s);
    ignored.  */
 int gq_ranges_add (gq_ranges *s, uint64_t lo, uint64_t hi, int evict_low);
 
-/* Remove [LO, HI) from the set (splitting a range if needed).  */
+/* Add [LO, HI) without ever refusing it, for a set whose members stand for
+   work still to do (data to send again).  If the set is full and the new
+   range cannot merge, it is joined to the neighbour with the smaller gap
+   between them, so the set then holds more than was asked, never less.
+   Returns GQ_OK, or GQ_ERR_NOMEM.  */
+int gq_ranges_add_coarse (gq_ranges *s, uint64_t lo, uint64_t hi);
+
+/* Remove [LO, HI) from the set (splitting a range if needed).  If the set is
+   full and a range would have to be split in two, it is left whole and
+   GQ_ERR_RANGE is returned: the set holds more than was asked, never less,
+   which is the safe error for a set of work still to do.  */
 int gq_ranges_remove (gq_ranges *s, uint64_t lo, uint64_t hi);
 
 /* Drop everything below X.  */

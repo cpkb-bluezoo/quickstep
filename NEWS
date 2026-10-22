@@ -2,6 +2,79 @@ quickstep NEWS - history of user-visible changes.
 
 * Noteworthy changes in release ?.? (????-??-??) [?]
 
+** Security review.  Changes that need an application to adapt come first
+(those marked API), then those that only make the library stricter or safer.
+** API: a client that checks the server's certificate against a trust store
+must say whom to expect.  gq_tls_config gains no_name_check, and
+gq_tls_client_new, gq_tls12_client_new and what is built on them (gq_dtls,
+gq_tlsconn, gq_tlsauto, gq_conn, gq_endpoint_connect) return GQ_ERR_INVAL
+for a trust store and no server_name unless it is set, or a verify_peer
+callback authenticates the peer.  Before, the chain was accepted for any
+name, so a certificate that any trusted CA issued for another site would do.
+** API: gq_conn_stateless_reset takes the token that was matched and returns
+whether it ended the connection; the tokens of connection IDs not in use, or
+retired, are not looked for (RFC 9000 section 10.3.1).
+** API: gq_tlsconn_eof, gq_tls12conn_eof and gq_tlsauto_eof tell the
+connection that the transport reached end of file.  Without the peer's
+close_notify that is a truncation (RFC 8446 section 6.1): the connection is
+closed with GQ_ERR_PROTOCOL.  Call it when read returns 0.
+** API: gq_endpoint_config.retry_above is by default half of max_connections
+instead of off, so a busy server asks for a Retry; a value above
+max_connections turns that off.  admit.retry_cid_len defaults to
+conn.cid_len, and gq_endpoint_new refuses a different one.  gq_quic_admit
+returns GQ_ERR_INVAL for require_retry without token keys.
+** API: GQ_TP_MAX_VERSIONS is 16, and a peer's version_information list
+longer than that is refused instead of cut short, which could hide a forged
+Version Negotiation packet.  Configured flow control windows and stream
+counts are clamped to what the protocol can carry.
+** qlog: stateless reset tokens, which are secrets, are logged only when
+qlog_raw is nonzero.
+** libgcrypt: when gq_crypto_init does the initialising it turns off the
+warning about insecure memory, so the library never writes to stderr.
+Initialise libgcrypt before creating threads.
+** TLS 1.3: a KeyUpdate must end its record (RFC 8446 section 5.1), as any
+message that changes the keys.  A client that sent early data and is told it
+was accepted refuses a suite or ALPN protocol other than the ticket's.  A
+server looks at no more than 8 PSK identities of a ClientHello.  A QUIC
+server refuses a ClientHello with a session ID (RFC 9001 section 8.4); a
+HelloRetryRequest is checked for its legacy_version; a ChangeCipherSpec
+before the first hello is refused.
+** QUIC: a packet too short to be unprotected is discarded, where it closed
+the connection, and the sender needed no keys to cause that.
+RETIRE_CONNECTION_ID for an ID not yet sent is a PROTOCOL_VIOLATION.  A
+client discards a server Initial with a token and a Retry naming the
+original destination ID.  A NEW_CONNECTION_ID to a zero-length ID, and
+CONNECTION_CLOSE 0x1d in an Initial or Handshake packet, are
+PROTOCOL_VIOLATIONs.  Failed 0-RTT packets
+count towards the AEAD integrity limit.  The first datagram a client
+receives, if nothing in it is accepted, does not set the server's address.
+** QUIC endpoint: a connection whose first datagram held no packet that
+decrypts is dropped at once rather than kept for the idle timeout, and the
+timer heap no longer grows with every packet.
+** QUIC streams: data lost, or acknowledged, in more separate pieces than
+the bookkeeping holds is no longer forgotten (a stream could stall); some
+data may be sent again instead.
+** DTLS: a cleartext handshake message or ACK is ignored once protected
+records can be read, a cleartext alert is believed only if it is fatal, is
+not close_notify, and comes before the peer has gone past the first exchange,
+and a client takes no cleartext ACK for its ClientHello.  Anyone who knew the
+addresses could end a handshake, or draw a whole flight, with one small
+datagram.  A ClientHello with more than 256 cipher suites no longer makes
+gq_dtls_listen fail.
+** API: gq_random_key fills a buffer with libgcrypt's strongest level of
+randomness, as long-term keys ask for; token, ticket, cookie and reset keys
+use it.
+** A peer's idle timeout, in milliseconds, no longer wraps when it is made
+microseconds (one value gave 384 microseconds), and a ticket from a server
+whose clock is up to a minute ahead is accepted, as meant.  A DTLS 1.3 key
+that has seen 2^36 forged records ends the association (RFC 9147 section
+4.5.3).  The code that picks between TLS 1.3 and 1.2 no longer needs 70 KB
+of stack.
+** Fixes: the transcript hash of a TLS 1.3 handshake was never freed, which a
+remote client could use to exhaust a server's memory; the 0-RTT replay cache
+searched its whole table after enough tickets had come and gone; a
+connection ID longer than 20 bytes could overflow gq_token_make; secrets in
+a few places were cleared in a way the compiler may remove.
 ** QUIC: max_udp_payload_size is now sent as a transport parameter, with the
 value of gq_conn_config.max_udp_payload.  It was never sent, so a peer assumed
 65527 and its path MTU probes could outgrow a path that carries our

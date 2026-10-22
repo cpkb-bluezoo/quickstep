@@ -98,7 +98,13 @@ typedef struct gq_endpoint_config
   int no_stateless_reset;
   /* Key the stateless reset tokens derive from.  If not given a random one
      is used, so tokens do not survive a restart; set it (and keep it the
-     same across restarts or servers behind one address) to make them.  */
+     same across restarts or servers behind one address) to make them.
+     Servers that share a key can be made to reset each other's
+     connections: one that is shown a packet for a connection ID it does not
+     know answers with the token for it, which is the token of the server
+     that owns it (RFC 9000 section 21.11).  Share a key only where the
+     connection IDs say which server they belong to (quiclb.h), or where no
+     packet can reach the wrong server.  */
   uint8_t reset_key[32];
   int have_reset_key;
 } gq_endpoint_config;

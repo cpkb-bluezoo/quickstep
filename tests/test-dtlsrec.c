@@ -205,6 +205,34 @@ open_one (const uint8_t *d, size_t n, uint8_t *out, unsigned *type,
   return gq_dtls_deprotect (&rx, &o.rec, out, 2048, type, len, seq);
 }
 
+/* RFC 9147 section 4.5.3: past a number of records that failed
+   authentication a key must not be used any more, and the association is
+   to end.  The record layer says so with GQ_ERR_PROTOCOL, which unlike the
+   ordinary failures is not to be dropped quietly.  */
+static void
+test_integrity_limit (enum gq_aead aead)
+{
+  uint8_t out[2048], back[2048], bad[2048];
+  size_t n, len;
+  unsigned type;
+  uint64_t seq, used;
+
+  keys (aead, 3);
+  CHECK_EQ (gq_dtls_protect (&tx, GQ_DTLS_CT_APPLICATION_DATA,
+                             (const uint8_t *) "abc", 3, out, sizeof out, &n,
+                             &used), GQ_OK);
+  memcpy (bad, out, n);
+  bad[n - 1] ^= 1;
+  rx.bad = GQ_DTLS_INTEGRITY_LIMIT - 2;
+  CHECK_EQ (open_one (bad, n, back, &type, &len, &seq), GQ_ERR_CRYPTO);
+  CHECK_EQ (rx.bad, GQ_DTLS_INTEGRITY_LIMIT - 1);
+  /* The failure that reaches the limit is the last the key survives.  */
+  CHECK_EQ (open_one (bad, n, back, &type, &len, &seq), GQ_ERR_PROTOCOL);
+  CHECK_EQ (rx.bad, GQ_DTLS_INTEGRITY_LIMIT);
+  /* A genuine record is refused too: the key is finished.  */
+  CHECK_EQ (open_one (out, n, back, &type, &len, &seq), GQ_ERR_PROTOCOL);
+}
+
 static void
 test_roundtrip (enum gq_aead aead)
 {
@@ -410,6 +438,8 @@ main (void)
   test_handmade (GQ_AEAD_AES_128_GCM);
   test_handmade (GQ_AEAD_AES_256_GCM);
   test_handmade (GQ_AEAD_CHACHA20_POLY1305);
+  test_integrity_limit (GQ_AEAD_AES_128_GCM);
+  test_integrity_limit (GQ_AEAD_CHACHA20_POLY1305);
   test_short ();
   TST_DONE ();
 }

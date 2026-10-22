@@ -701,6 +701,68 @@ server_initial (gq_conn *c, uint8_t *out, size_t cap, size_t token_len)
   return len;
 }
 
+/* The same, carrying the frame F instead of a PING.  */
+static size_t
+server_initial_frame (gq_conn *c, uint8_t *out, size_t cap, const gq_frame *f)
+{
+  gq_packet_keys ck, sk;
+  gq_cid cc[2];
+  uint8_t scid[8] = { 9, 8, 7, 6, 5, 4, 3, 2 }, pl[64];
+  size_t hdr, w = 0, len;
+
+  CHECK_EQ (gq_conn_local_cids (c, cc, 2), 1);
+  CHECK_EQ (gq_packet_keys_initial (c->version, c->initial_dcid.data,
+                                    c->initial_dcid.len, &ck, &sk), GQ_OK);
+  CHECK_EQ (gq_frame_write (f, pl, sizeof pl, &w), GQ_OK);
+  memset (pl + w, 0, 40 - w);			/* PADDING.  */
+  CHECK_EQ (gq_long_header_build (GQ_PKT_INITIAL, c->version, cc[0].data,
+                                  cc[0].len, scid, sizeof scid, NULL, 0, 0, 1,
+                                  40, out, cap, &hdr), GQ_OK);
+  memcpy (out + hdr, pl, 40);
+  CHECK_EQ (gq_packet_seal (&sk, 0, out, hdr - 1, 1, 40, cap, &len), GQ_OK);
+  return len;
+}
+
+/* RFC 9000 section 12.5: an Initial or Handshake packet carries the
+   transport kind of CONNECTION_CLOSE (0x1c), never the application kind
+   (0x1d), which would give away the state of the application; section
+   12.4: a frame in a packet type that may not carry it is a
+   PROTOCOL_VIOLATION.  */
+static void
+test_application_close_in_initial (void)
+{
+  int application;
+
+  for (application = 0; application < 2; application++)
+    {
+      struct pair *p = pair_new (NULL, NULL, 0, 1);
+      gq_conn *c = p->cli.c;
+      gq_frame f;
+      uint8_t pkt[1500];
+      size_t n;
+
+      memset (&f, 0, sizeof f);
+      f.type = GQ_FRAME_CONNECTION_CLOSE;
+      f.u.connection_close.application = application;
+      f.u.connection_close.error = 5;
+      n = server_initial_frame (c, pkt, sizeof pkt, &f);
+      gq_conn_recv (c, p->net.now, pkt, n);
+      CHECK_EQ (p->cli.closed, 1);
+      if (application)
+        {
+          /* Our own error, not the peer's close taken at its word.  */
+          CHECK_EQ (p->cli.ci.source, GQ_CLOSE_LOCAL);
+          CHECK_EQ (p->cli.ci.error, GQ_QERR_PROTOCOL_VIOLATION);
+        }
+      else
+        {
+          CHECK_EQ (p->cli.ci.source, GQ_CLOSE_PEER);
+          CHECK_EQ (p->cli.ci.error, 5);
+        }
+      pair_free (p);
+    }
+}
+
 /* A client discards what a server may not send it (RFC 9000 section 17.2.2:
    an Initial carrying a token; section 17.2.5.2: a Retry whose source ID is
    the destination ID of the Initial it answers), however well made.  */
@@ -932,6 +994,59 @@ test_qlog_reset_tokens_are_opt_in (void)
   seen = token_mentions (&p->qlog_sink[0]) + token_mentions (&p->qlog_sink[1]);
   CHECK (seen > 0);
   pair_free (p);
+}
+
+/* Flow control limits are varints, 62 bits at most (RFC 9000 section 16): a
+   window configured beyond that cannot be advertised.  It is clamped, and
+   the connection works.  */
+static void
+test_flow_windows_are_clamped (void)
+{
+  gq_conn_config cc;
+  struct pair *p;
+  const uint64_t max62 = (UINT64_C (1) << 62) - 1;
+
+  memset (&cc, 0, sizeof cc);
+  cc.initial_max_data = UINT64_MAX;
+  cc.initial_max_stream_data = UINT64_MAX;
+  cc.initial_max_streams_bidi = UINT64_MAX;
+  cc.initial_max_streams_uni = UINT64_MAX;
+  p = pair_new (&cc, &cc, 0, 1);
+  CHECK (run (&p->net, both_connected, 30000000));
+  CHECK (p->cli.c->cfg.initial_max_data <= max62);
+  CHECK (p->cli.c->cfg.initial_max_stream_data <= max62);
+  CHECK (p->srv.c->max_data_peer <= max62);
+  CHECK (p->srv.c->cfg.initial_max_streams_bidi <= ((uint64_t) 1 << 60));
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  pair_free (p);
+}
+
+/* Idle timeouts are milliseconds on the wire and microseconds here.  A peer
+   that sends 18446744073709552 ms (not above the 62 bits a varint holds)
+   multiplied by 1000 wraps to 384 microseconds: it must not shorten our
+   timeout to that, nor may a deadline wrap round.  */
+static void
+test_idle_timeout_does_not_wrap (void)
+{
+  gq_conn_config sc;
+  struct pair *p;
+  gq_conn c;
+
+  memset (&sc, 0, sizeof sc);
+  sc.idle_timeout_ms = UINT64_C (18446744073709552);
+  p = pair_new (NULL, &sc, 0, 1);
+  CHECK (run (&p->net, both_connected, 30000000));
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  /* The client's own, 30 seconds, is the shorter.  */
+  CHECK_EQ (p->cli.c->idle_timeout_us, UINT64_C (30000000));
+  /* And that of the server, whose setting wrapped on the way, is not tiny.  */
+  CHECK (p->srv.c->idle_timeout_us >= UINT64_C (30000000));
+  pair_free (p);
+
+  memset (&c, 0, sizeof c);
+  c.idle_timeout_us = UINT64_MAX;
+  conn_recompute_idle (&c, UINT64_C (1) << 63);
+  CHECK (c.idle_deadline >= UINT64_C (1) << 63);
 }
 
 /* RFC 9000 section 19.16: RETIRE_CONNECTION_ID for a sequence number we have
@@ -3652,8 +3767,11 @@ main (void)
   test_acked_acks_are_retired ();
   test_persistent_congestion_over_several_rounds ();
   test_stream_frames_after_the_end ();
+  test_flow_windows_are_clamped ();
+  test_idle_timeout_does_not_wrap ();
   test_reset_tokens_of_unused_ids ();
   test_client_discards_bad_server_packets ();
+  test_application_close_in_initial ();
   test_new_cid_to_zero_length_peer ();
   test_client_path_not_set_by_garbage ();
   test_early_failures_are_counted ();

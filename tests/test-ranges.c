@@ -153,6 +153,35 @@ test_limits (void)
   CHECK_EQ (gq_ranges_add (&s, 200, 210, 0), GQ_OK);
   CHECK_EQ (gq_ranges_add (&s, 300, 310, 0), GQ_OK);
   CHECK_EQ (gq_ranges_remove (&s, 40, 50), GQ_ERR_RANGE);
+  /* ...and when it cannot get one the range stays whole: a set of work to
+     do may hold too much, never forget some.  */
+  CHECK (gq_ranges_contains (&s, 10) && gq_ranges_contains (&s, 60)
+         && gq_ranges_contains (&s, 99));
+  gq_ranges_free (&s);
+
+  /* The coarse add always takes the range, by joining a neighbour, and the
+     nearer one.  */
+  gq_ranges_init (&s, 3);
+  CHECK_EQ (gq_ranges_add (&s, 10, 12, 0), GQ_OK);
+  CHECK_EQ (gq_ranges_add (&s, 100, 102, 0), GQ_OK);
+  CHECK_EQ (gq_ranges_add (&s, 200, 202, 0), GQ_OK);
+  CHECK_EQ (gq_ranges_add_coarse (&s, 14, 16), GQ_OK);	/* Joins [10,12).  */
+  CHECK (gq_ranges_contains (&s, 10) && gq_ranges_contains (&s, 15));
+  CHECK (!gq_ranges_contains (&s, 100 - 1 - 80));
+  CHECK_EQ (s.n, 3);
+  CHECK_EQ (gq_ranges_add_coarse (&s, 190, 195), GQ_OK);	/* Joins [200,..).  */
+  CHECK (gq_ranges_contains (&s, 190) && gq_ranges_contains (&s, 201));
+  CHECK (s.n == 3 && s.r[1].lo == 100 && s.r[1].hi == 102);
+  /* Below everything, above everything, and in a set of one.  */
+  CHECK_EQ (gq_ranges_add_coarse (&s, 1, 2), GQ_OK);
+  CHECK (gq_ranges_contains (&s, 1) && gq_ranges_contains (&s, 10));
+  CHECK_EQ (gq_ranges_add_coarse (&s, 500, 501), GQ_OK);
+  CHECK (gq_ranges_contains (&s, 500) && s.n <= 3);
+  gq_ranges_free (&s);
+  gq_ranges_init (&s, 1);
+  CHECK_EQ (gq_ranges_add (&s, 10, 12, 0), GQ_OK);
+  CHECK_EQ (gq_ranges_add_coarse (&s, 30, 32), GQ_OK);
+  CHECK (s.n == 1 && gq_ranges_contains (&s, 10) && gq_ranges_contains (&s, 31));
   gq_ranges_free (&s);
 
   /* Adjacent ranges merge; empty ranges are ignored; huge values work.  */

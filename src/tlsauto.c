@@ -110,9 +110,9 @@ make_server_engine (gq_tlsauto *c, unsigned version)
    decided, 0 if more bytes are needed.  Anything that does not look like a
    ClientHello goes to an engine that will refuse it properly.  */
 static unsigned
-decide (const gq_tlsauto *c, const uint8_t *d, size_t n)
+decide_in (const gq_tlsauto *c, const uint8_t *d, size_t n, uint8_t *hs,
+           size_t hs_cap)
 {
-  uint8_t hs[MAX_FIRST_FLIGHT];
   size_t hn = 0, off = 0, bodylen;
   unsigned fallback = (c->versions & GQ_TLSAUTO_TLS13) ? 0x0304 : 0x0303;
   gq_client_hello ch;
@@ -129,7 +129,7 @@ decide (const gq_tlsauto *c, const uint8_t *d, size_t n)
         return fallback;
       if (off + 5 + len > n)
         break;
-      if (hn + len > sizeof hs)
+      if (hn + len > hs_cap)
         return fallback;
       memcpy (hs + hn, d + off + 5, len);
       hn += len;
@@ -169,6 +169,23 @@ complete:
   if (has12 && (c->versions & GQ_TLSAUTO_TLS12))
     return 0x0303;
   return fallback;
+}
+
+/* The first flight is gathered into a scratch buffer: on the heap, since it
+   is as big as 70 KB and the caller may be on a thread with a small stack.  */
+static unsigned
+decide (const gq_tlsauto *c, const uint8_t *d, size_t n)
+{
+  unsigned fallback = (c->versions & GQ_TLSAUTO_TLS13) ? 0x0304 : 0x0303;
+  size_t cap = n < MAX_FIRST_FLIGHT ? n : MAX_FIRST_FLIGHT;
+  uint8_t *hs = malloc (cap ? cap : 1);
+  unsigned v;
+
+  if (hs == NULL)
+    return fallback;		/* An engine will say what is wrong.  */
+  v = decide_in (c, d, n, hs, cap);
+  free (hs);
+  return v;
 }
 
 static int
@@ -224,7 +241,8 @@ w_write (void *u, const uint8_t *d, size_t n)
 
       /* Whatever its size: with a ticket and a hybrid key share the hello
          is several KB.  Without it a TLS 1.2 server's answer could not be
-         continued.  */
+         continued.  The engine makes no hello over CH_BUF bytes (16 KB), so
+         one record always holds it all.  */
       if (5 + len <= n)
         {
           c->ch = malloc (len ? len : 1);
@@ -342,9 +360,8 @@ gq_tlsauto_client_new (gq_tlsauto **out, const gq_tls_config *config,
 /* Client: which engine does the server's first flight belong to?  Returns
    0x0304 or 0x0303 when decided, 0 if more bytes are needed.  */
 static unsigned
-client_decide (const uint8_t *d, size_t n)
+client_decide_in (const uint8_t *d, size_t n, uint8_t *hs, size_t hs_cap)
 {
-  uint8_t hs[MAX_FIRST_FLIGHT];
   size_t hn = 0, off = 0, bodylen;
   gq_server_hello sh;
   gq_slice body, v;
@@ -357,7 +374,7 @@ client_decide (const uint8_t *d, size_t n)
         return 0x0304;		/* An alert or junk: the engine deals.  */
       if (off + 5 + len > n)
         return 0;
-      if (hn + len > sizeof hs)
+      if (hn + len > hs_cap)
         return 0x0304;
       memcpy (hs + hn, d + off + 5, len);
       hn += len;
@@ -380,6 +397,20 @@ client_decide (const uint8_t *d, size_t n)
         }
     }
   return 0;
+}
+
+static unsigned
+client_decide (const uint8_t *d, size_t n)
+{
+  size_t cap = n < MAX_FIRST_FLIGHT ? n : MAX_FIRST_FLIGHT;
+  uint8_t *hs = malloc (cap ? cap : 1);
+  unsigned v;
+
+  if (hs == NULL)
+    return 0x0304;
+  v = client_decide_in (d, n, hs, cap);
+  free (hs);
+  return v;
 }
 
 static int

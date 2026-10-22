@@ -27,7 +27,15 @@
    signed with MD5 or SHA-1, or containing RSA keys under 2048 bits, are
    rejected, the leaf must be usable for the stated purpose (TLS server or
    client authentication), validity dates are always checked, and when a
-   host name is supplied it must match a subjectAltName (RFC 9525).  */
+   host name is supplied it must match the certificate.
+
+   What this does not do, and the application must know: the matching is
+   GnuTLS's, which falls back to the subject common name of a certificate
+   with no DNS subjectAltName and lets an IP address match a DNS name, so it
+   is not RFC 9525 to the letter; validity is checked against the system
+   clock, not the clock hooks of the engines; and revocation (CRL, OCSP) is
+   never consulted.  An application with other needs checks the chain itself
+   in a verify_peer callback.  */
 
 #ifndef QUICKSTEP_TRUST_H
 #define QUICKSTEP_TRUST_H

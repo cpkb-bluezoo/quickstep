@@ -29,7 +29,13 @@
    AEAD associated data, carries its issue time, and for Retry also the
    original destination connection ID and the connection ID the server
    chose.  Nothing is stored server side.  Keys rotate: the previous key
-   still verifies, so tokens survive one rotation.  */
+   still verifies, so tokens survive one rotation.
+
+   Each token is sealed under a random 96-bit GCM nonce, which bounds the
+   tokens per key at about 2^32 (a repeated nonce lets tokens be forged,
+   and with them the lifting of the anti-amplification limit for any
+   address): rotate far sooner than that, at least daily on a busy server.
+   The key set is not thread safe.  */
 
 #ifndef QUICKSTEP_TOKEN_H
 #define QUICKSTEP_TOKEN_H

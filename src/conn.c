@@ -67,6 +67,14 @@ conn_pto_base (const gq_conn *c, int sp)
   return v;
 }
 
+/* Milliseconds to microseconds, stopping at the largest value: a peer may
+   send up to 2^62 - 1 and the product would wrap round to something tiny.  */
+static uint64_t
+ms_to_us (uint64_t ms)
+{
+  return ms > UINT64_MAX / 1000 ? UINT64_MAX : ms * 1000;
+}
+
 void
 conn_recompute_idle (gq_conn *c, uint64_t now)
 {
@@ -79,7 +87,7 @@ conn_recompute_idle (gq_conn *c, uint64_t now)
     }
   /* At least three probe timeouts, so a lossy path does not kill us.  */
   t = umax (t, 3 * conn_pto_base (c, SP_APP));
-  c->idle_deadline = now + t;
+  c->idle_deadline = t > UINT64_MAX - now ? UINT64_MAX : now + t;
 }
 
 /* ---- Connection IDs ---- */
@@ -717,7 +725,7 @@ conn_apply_peer_params (gq_conn *c)
       c->p[0].has_token = 1;
       conn_peer_token (c, c->p[0].token);
     }
-  idle = p->max_idle_timeout * 1000;
+  idle = ms_to_us (p->max_idle_timeout);
   if (idle && (c->idle_timeout_us == 0 || idle < c->idle_timeout_us))
     c->idle_timeout_us = idle;
   streams_apply_peer_params (c);
@@ -1040,6 +1048,16 @@ fill_defaults (gq_conn_config *g)
     g->initial_max_streams_bidi = DEFAULT_STREAMS;
   if (g->initial_max_streams_uni == 0)
     g->initial_max_streams_uni = DEFAULT_STREAMS;
+  /* Limits are sent as varints (62 bits) and stream counts cannot pass 2^60
+     (RFC 9000 sections 4.6 and 16): a bigger setting means "no limit".  */
+  if (g->initial_max_data > ((uint64_t) 1 << 62) - 1)
+    g->initial_max_data = ((uint64_t) 1 << 62) - 1;
+  if (g->initial_max_stream_data > ((uint64_t) 1 << 62) - 1)
+    g->initial_max_stream_data = ((uint64_t) 1 << 62) - 1;
+  if (g->initial_max_streams_bidi > (uint64_t) 1 << 60)
+    g->initial_max_streams_bidi = (uint64_t) 1 << 60;
+  if (g->initial_max_streams_uni > (uint64_t) 1 << 60)
+    g->initial_max_streams_uni = (uint64_t) 1 << 60;
   if (g->datagram_queue == 0)
     g->datagram_queue = 64u << 10;
   if (g->send_buffer == 0)
@@ -1125,7 +1143,7 @@ conn_alloc (enum gq_role role, const gq_conn_config *config,
   c->rttvar = CONN_INITIAL_RTT (c) / 2;
   c->peer_max_ack_delay_us = 25000;
   c->peer_ack_delay_exp = 3;
-  c->idle_timeout_us = c->cfg.idle_timeout_ms * 1000;
+  c->idle_timeout_us = ms_to_us (c->cfg.idle_timeout_ms);
   c->max_data_local = c->max_data_sent = c->cfg.initial_max_data;
   c->max_streams_local[1] = c->max_streams_local_sent[1]
     = c->cfg.initial_max_streams_bidi;

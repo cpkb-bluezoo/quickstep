@@ -263,6 +263,10 @@ gq_dtls_deprotect (gq_dtls_epoch *e, const gq_drec *rec, uint8_t *out,
     return GQ_ERR_ENCODING;
   if (cap < n - GQ_AEAD_TAG_LEN)
     return GQ_ERR_BUFSIZE;
+  /* RFC 9147 section 4.5.3: a key that has seen this many forgeries is not
+     used again.  */
+  if (e->bad >= GQ_DTLS_INTEGRITY_LIMIT)
+    return GQ_ERR_PROTOCOL;
 
   /* Decrypt the sequence number in a copy of the header, which is then the
      additional data.  */
@@ -280,7 +284,8 @@ gq_dtls_deprotect (gq_dtls_epoch *e, const gq_drec *rec, uint8_t *out,
       != GQ_OK)
     {
       e->bad++;
-      return GQ_ERR_CRYPTO;
+      return e->bad >= GQ_DTLS_INTEGRITY_LIMIT ? GQ_ERR_PROTOCOL
+                                               : GQ_ERR_CRYPTO;
     }
   /* Only now, after authentication, is the record number trusted.  */
   if (!replay_ok (e, seq))

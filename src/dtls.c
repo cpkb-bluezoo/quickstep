@@ -986,6 +986,12 @@ on_record (void *u, const gq_drec *rec)
           c->rx_cap = rec->body.len;
         }
       r = gq_dtls_deprotect (e, rec, c->rx, c->rx_cap, &type, &len, &seq);
+      if (r == GQ_ERR_PROTOCOL)
+        {
+          /* Too many forgeries under this key (RFC 9147 section 4.5.3).  */
+          fail (c, GQ_ERR_RANGE, -1);
+          return 1;
+        }
       if (r != GQ_OK)
         return 0;		/* Silently dropped.  */
       pt.data = c->rx;

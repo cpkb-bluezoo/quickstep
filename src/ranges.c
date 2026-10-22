@@ -150,8 +150,9 @@ gq_ranges_remove (gq_ranges *s, uint64_t lo, uint64_t hi)
           /* Split in two.  */
           if (s->n >= s->max || reserve (s, s->n + 1) != GQ_OK)
             {
-              /* No room for the second half: keep the lower part only.  */
-              s->r[i].hi = lo;
+              /* No room for the second half.  Leave the range whole: the
+                 set then holds more than was asked, which is safe for work
+                 still to do; cutting it would forget the upper part.  */
               return GQ_ERR_RANGE;
             }
           memmove (&s->r[i + 2], &s->r[i + 1], (s->n - i - 1) * sizeof s->r[0]);
@@ -251,4 +252,27 @@ gq_ranges_total (const gq_ranges *s)
       t += d;
     }
   return t;
+}
+
+int
+gq_ranges_add_coarse (gq_ranges *s, uint64_t lo, uint64_t hi)
+{
+  size_t i;
+  uint64_t gap_below, gap_above;
+  int r;
+
+  if (lo >= hi)
+    return GQ_OK;
+  r = gq_ranges_add (s, lo, hi, 0);
+  if (r != GQ_ERR_RANGE || s->n == 0)
+    return r;
+  /* Full, and the range touches none: join it to the nearer neighbour.
+     The result touches that neighbour, so adding it merges and needs no
+     slot.  */
+  i = first_at_or_after (s, lo);
+  gap_below = i > 0 ? lo - s->r[i - 1].hi : UINT64_MAX;
+  gap_above = i < s->n ? s->r[i].lo - hi : UINT64_MAX;
+  if (gap_below <= gap_above)
+    return gq_ranges_add (s, s->r[i - 1].lo, hi, 0);
+  return gq_ranges_add (s, lo, s->r[i].hi, 0);
 }

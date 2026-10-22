@@ -486,3 +486,14 @@ gq_aes128_ecb_decrypt (const uint8_t key[16], const uint8_t block[16],
 {
   return aes128_ecb (key, block, out, 1);
 }
+
+int
+gq_random_key (void *buf, size_t len)
+{
+  int r = gq_crypto_init ();
+
+  if (r != GQ_OK)
+    return r;
+  gcry_randomize (buf, len, GCRY_VERY_STRONG_RANDOM);
+  return GQ_OK;
+}

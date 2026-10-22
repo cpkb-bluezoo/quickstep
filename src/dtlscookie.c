@@ -51,7 +51,7 @@ gq_dtls_cookies_new (gq_dtls_cookies **out)
   ck = calloc (1, sizeof *ck);
   if (ck == NULL)
     return GQ_ERR_NOMEM;
-  if (gq_random (ck->cur, sizeof ck->cur) != GQ_OK)
+  if (gq_random_key (ck->cur, sizeof ck->cur) != GQ_OK)
     {
       free (ck);
       return GQ_ERR_CRYPTO;
@@ -77,7 +77,7 @@ gq_dtls_cookies_rotate (gq_dtls_cookies *ck)
 
   if (ck == NULL)
     return GQ_ERR_INVAL;
-  TRY (gq_random (fresh, sizeof fresh));
+  TRY (gq_random_key (fresh, sizeof fresh));
   memcpy (ck->prev, ck->cur, sizeof ck->prev);
   memcpy (ck->cur, fresh, sizeof ck->cur);
   ck->have_prev = 1;

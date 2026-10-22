@@ -783,6 +783,9 @@ on_hrr (gq_tls *t, gq_slice msg, const gq_server_hello *sh)
 
   if (t->hrr_seen)
     return gqi_fail (t, GQ_ALERT_UNEXPECTED_MESSAGE, GQ_ERR_PROTOCOL);
+  /* RFC 8446 section 4.1.3: it is a ServerHello, and says what one does.  */
+  if (sh->legacy_version != (t->dtls ? 0xfefd : 0x0303))
+    return gqi_fail (t, GQ_ALERT_ILLEGAL_PARAMETER, GQ_ERR_PROTOCOL);
   t->hrr_seen = 1;
   t->hrr_suite = sh->cipher_suite;
   if (!gqi_in_list (t->suites, t->n_suites, sh->cipher_suite)

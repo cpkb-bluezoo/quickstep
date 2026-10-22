@@ -1792,6 +1792,128 @@ test_resumption_basic (void)
   gq_ticket_keys_free (keys);
 }
 
+/* RFC 9001 section 8.4: a client does not ask for the middlebox
+   compatibility mode over QUIC, and a server treats a ClientHello with a
+   session ID as an error rather than echoing it.  */
+static void
+test_quic_server_refuses_session_id (void)
+{
+  struct pair *p;
+  uint8_t ch[8192];
+  size_t n, k;
+  int r;
+
+  for (k = 0; k < 2; k++)
+    {
+      p = pair_new ();
+      p->calpn[0] = (gq_slice) { (const uint8_t *) "h3", 2 };
+      p->salpn[0] = (gq_slice) { (const uint8_t *) "h3", 2 };
+      p->cc.alpn = p->calpn;
+      p->cc.n_alpn = 1;
+      p->cc.transport_params = p->ctp;
+      p->cc.transport_params_len = sizeof p->ctp;
+      p->cc.quic = 1;
+      p->sc.alpn = p->salpn;
+      p->sc.n_alpn = 1;
+      p->sc.transport_params = p->stp;
+      p->sc.transport_params_len = sizeof p->stp;
+      p->sc.quic = 1;
+      pair_create (p);
+      n = client_hello (p, ch);
+      CHECK (n > 4 + 2 + 32 + 1 && ch[4 + 2 + 32] == 0);
+      if (k && n > 4 + 2 + 32 + 1 && n + 32 <= sizeof ch)
+        {
+          /* A session ID of 32 bytes put in.  */
+          memmove (ch + 4 + 2 + 32 + 1 + 32, ch + 4 + 2 + 32 + 1,
+                   n - (4 + 2 + 32 + 1));
+          ch[4 + 2 + 32] = 32;
+          memset (ch + 4 + 2 + 32 + 1, 0x99, 32);
+          n += 32;
+          ch[1] = (uint8_t) ((n - 4) >> 16);
+          ch[2] = (uint8_t) ((n - 4) >> 8);
+          ch[3] = (uint8_t) (n - 4);
+        }
+      r = feed_end (&p->s, GQ_LEVEL_INITIAL, ch, n, 0);
+      if (k)
+        {
+          CHECK_EQ (r, GQ_ERR_PROTOCOL);
+          CHECK_EQ (p->s.alert, GQ_ALERT_ILLEGAL_PARAMETER);
+        }
+      else
+        CHECK_EQ (r, GQ_OK);		/* Control: as the client made it.  */
+      pair_free (p);
+    }
+}
+
+/* RFC 8446 section 4.1.3: a HelloRetryRequest is a ServerHello and its
+   legacy_version is 0x0303 as well.  */
+static void
+test_hrr_legacy_version (void)
+{
+  int variant;
+
+  for (variant = 0; variant < 2; variant++)
+    {
+      struct pair *p = pair_new ();
+      static const uint16_t only_p384[] = { GQ_GROUP_SECP384R1 };
+      uint8_t ch[8192], hrr[8192];
+      size_t n, hn;
+      int r;
+
+      p->sc.groups = only_p384;
+      p->sc.n_groups = 1;
+      pair_create (p);
+      n = client_hello (p, ch);
+      CHECK_EQ (feed_end (&p->s, GQ_LEVEL_INITIAL, ch, n, 0), GQ_OK);
+      hn = p->s.sent_len[GQ_LEVEL_INITIAL];
+      memcpy (hrr, p->s.sent[GQ_LEVEL_INITIAL], hn);
+      p->s.sent_len[GQ_LEVEL_INITIAL] = 0;
+      CHECK (hrr[0] == GQ_HS_SERVER_HELLO && hrr[4] == 3 && hrr[5] == 3);
+      if (variant)
+        hrr[5] = 4;			/* 0x0304.  */
+      r = feed_end (&p->c, GQ_LEVEL_INITIAL, hrr, hn, 0);
+      if (variant)
+        {
+          CHECK_EQ (r, GQ_ERR_PROTOCOL);
+          CHECK_EQ (p->c.alert, GQ_ALERT_ILLEGAL_PARAMETER);
+        }
+      else
+        CHECK_EQ (r, GQ_OK);
+      pair_free (p);
+    }
+}
+
+/* Servers behind one address share ticket keys and their clocks differ a
+   little: a ticket another one issued a few seconds "in the future" is
+   good, one far in the future is not.  */
+static void
+test_ticket_from_a_clock_slightly_ahead (void)
+{
+  gq_ticket_keys *keys;
+  static gq_tls_session sess;
+  static const int64_t behind_ms[] = { 30000, 120000 };
+  size_t i;
+
+  CHECK_EQ (gq_ticket_keys_new (&keys), GQ_OK);
+  first_connection (keys, &sess, NULL);
+  for (i = 0; i < 2; i++)
+    {
+      struct pair *p = pair_new ();
+
+      p->sc.ticket_keys = keys;
+      p->cc.resume = &sess;
+      p->cnow += 5000;			/* The client's clock goes on.  */
+      p->snow -= (uint64_t) behind_ms[i];	/* This server's is behind.  */
+      pair_create (p);
+      CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+      CHECK_EQ (pump (p, 0), GQ_OK);
+      check_success (p);
+      CHECK_EQ (p->s.info.resumed, (int) (i == 0));
+      pair_free (p);
+    }
+  gq_ticket_keys_free (keys);
+}
+
 static int g_lookups;
 
 static int
@@ -2405,7 +2527,10 @@ main (void)
   test_mutations (1200);
   test_resumption_basic ();
   test_client_checks_early_data_acceptance ();
+  test_ticket_from_a_clock_slightly_ahead ();
   test_psk_identities_are_capped ();
+  test_quic_server_refuses_session_id ();
+  test_hrr_legacy_version ();
   test_resumption_fallbacks ();
   test_resumption_policy ();
   test_resumption_client_auth ();

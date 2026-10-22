@@ -156,6 +156,11 @@ test_misc (void)
   CHECK_EQ (gq_random (a, sizeof a), GQ_OK);
   CHECK_EQ (gq_random (b, sizeof b), GQ_OK);
   CHECK (memcmp (a, b, sizeof a) != 0);
+  /* The same for keys that are kept.  */
+  CHECK_EQ (gq_random_key (a, sizeof a), GQ_OK);
+  CHECK_EQ (gq_random_key (b, sizeof b), GQ_OK);
+  CHECK (memcmp (a, b, sizeof a) != 0);
+  CHECK_EQ (gq_random_key (a, 0), GQ_OK);
   CHECK (gq_ct_equal (a, a, sizeof a));
   CHECK (!gq_ct_equal (a, b, sizeof a));
 

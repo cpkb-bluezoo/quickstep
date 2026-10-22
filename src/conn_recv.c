@@ -432,6 +432,14 @@ on_frame (void *user, const gq_frame *f)
       conn_fail (c, GQ_QERR_PROTOCOL_VIOLATION, "frame not allowed here");
       return 1;
     }
+  /* RFC 9000 sections 12.4 and 12.5: only the transport kind of
+     CONNECTION_CLOSE (0x1c) is allowed in Initial and Handshake packets.  */
+  if (sp != SP_APP && f->type == GQ_FRAME_CONNECTION_CLOSE
+      && f->u.connection_close.application)
+    {
+      conn_fail (c, GQ_QERR_PROTOCOL_VIOLATION, "frame not allowed here");
+      return 1;
+    }
   if (c->rx_early
       && (f->type == GQ_FRAME_ACK || f->type == GQ_FRAME_CRYPTO
           || f->type == GQ_FRAME_NEW_TOKEN

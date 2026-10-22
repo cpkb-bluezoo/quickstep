@@ -42,6 +42,7 @@ struct gq_tlsconn
   int status;			/* Why: 0 orderly, else a negative status.  */
   int close_sent;
   int ccs_sent;
+  int hello_seen;		/* A ClientHello has been sent or received.  */
   int early_active;		/* Client: early write keys are in use.  */
   size_t early_sent, early_max;
   size_t early_received, early_limit;
@@ -239,7 +240,7 @@ conn_alloc (const gq_tlsconn_events *events, int server)
   gq_record_init (&c->rec);
   if (server)
     gq_record_set_server (&c->rec);
-  gq_record_allow_ccs (&c->rec, 1);
+  gq_record_allow_ccs (&c->rec, 0);	/* Not before the first hello.  */
   c->ev = *events;
   c->rekey_after = events->rekey_records ? events->rekey_records
                                          : GQ_REC_REKEY_ADVISED;
@@ -333,6 +334,7 @@ gq_tlsconn_start (gq_tlsconn *c)
   if (c->server)		/* Servers wait for the ClientHello.  */
     return GQ_OK;
   r = gq_tls_start (c->tls);
+  c->hello_seen = 1;
   if (r != GQ_OK)
     finish (c, r, gq_tls_alert (c->tls));
   return r;
@@ -353,6 +355,7 @@ on_record (void *u, unsigned type, const uint8_t *data, size_t len)
   switch (type)
     {
     case GQ_CT_HANDSHAKE:
+      c->hello_seen = 1;
       r = gq_tls_feed (c->tls, c->read_level, &p, &l);
       if (r != GQ_OK)
         {
@@ -463,7 +466,9 @@ gq_tlsconn_receive (gq_tlsconn *c, const uint8_t *data, size_t len)
 
       p = c->inbuf;
       l = c->in_len;
-      gq_record_allow_ccs (&c->rec, !c->connected);
+      /* RFC 8446 appendix D.4: after the first ClientHello, sent or
+         received, and until the handshake is done.  */
+      gq_record_allow_ccs (&c->rec, c->hello_seen && !c->connected);
       r = gq_record_receive (&c->rec, &p, &l, on_record, c);
       if (r == GQ_ERR_HANDLER)
         {

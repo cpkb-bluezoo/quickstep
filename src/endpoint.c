@@ -700,7 +700,7 @@ gq_endpoint_new (gq_endpoint **out, const gq_endpoint_config *config,
       return GQ_ERR_INVAL;
     }
   if (!config->have_reset_key)
-    gq_random (ep->cfg.reset_key, sizeof ep->cfg.reset_key);
+    gq_random_key (ep->cfg.reset_key, sizeof ep->cfg.reset_key);
   gq_random (&ep->seed, sizeof ep->seed);
   if (gq_token_keys_init (&ep->keys) != GQ_OK)
     {

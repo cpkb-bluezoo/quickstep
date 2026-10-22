@@ -74,6 +74,10 @@ enum gq_dtls_ct
 #define GQ_DTLS_SEQ_LIMIT (UINT64_C (1) << 24)
 #define GQ_DTLS_REKEY_ADVISED (UINT64_C (1) << 22)
 
+/* Records that may fail authentication under one key (RFC 9147 section
+   4.5.3, for the AEADs here).  */
+#define GQ_DTLS_INTEGRITY_LIMIT (UINT64_C (1) << 36)
+
 /* ---- Decoding: datagram in, record events out ---- */
 
 enum gq_drec_kind
@@ -142,8 +146,10 @@ int gq_dtls_protect (gq_dtls_epoch *e, unsigned type, const uint8_t *payload,
    content type, *LEN the payload length and *SEQ the full sequence number
    and the anti-replay window is updated.  GQ_ERR_ENCODING: too short or
    all padding; GQ_ERR_CRYPTO: authentication failed (counted in e->bad);
-   GQ_ERR_RANGE: replayed or too old.  Neither is fatal in DTLS: the
-   caller drops the record.  */
+   GQ_ERR_RANGE: replayed or too old.  These are not fatal in DTLS: the
+   caller drops the record.  GQ_ERR_PROTOCOL: e->bad has reached
+   GQ_DTLS_INTEGRITY_LIMIT, the key is finished and the caller ends the
+   association.  */
 int gq_dtls_deprotect (gq_dtls_epoch *e, const gq_drec *rec, uint8_t *out,
                        size_t cap, unsigned *type, size_t *len, uint64_t *seq);
 

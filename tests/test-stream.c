@@ -172,6 +172,60 @@ test_transfers (void)
   transfer (40000, 30, 50, 4000, 4000);
 }
 
+/* More holes than the bookkeeping has slots for (256 each): nothing may be
+   forgotten.  Data lost must still be sent again, and data acknowledged
+   must still free the buffer, however scattered; at worst some is sent that
+   did not need to be.  */
+static void
+test_many_holes (void)
+{
+  gq_sstream s;
+  uint8_t data[1000], seen[1000];
+  uint64_t off, nb;
+  const uint8_t *d;
+  size_t n, i, k;
+  int fin, rounds;
+
+  for (i = 0; i < sizeof data; i++)
+    data[i] = (uint8_t) i;
+
+  /* Lost: 400 separate single bytes of a thousand sent.  */
+  gq_sstream_init (&s, 4096, 1 << 20);
+  CHECK_EQ (gq_sstream_write (&s, data, sizeof data), (long) sizeof data);
+  CHECK (gq_sstream_next (&s, 4096, UINT64_MAX, &off, &d, &n, &fin, &nb));
+  CHECK (off == 0 && n == sizeof data);
+  for (k = 0; k < 400; k++)
+    gq_sstream_on_lost (&s, 2 * k, 1, 0);
+  memset (seen, 0, sizeof seen);
+  for (rounds = 0;
+       rounds < 5000
+       && gq_sstream_next (&s, 4096, UINT64_MAX, &off, &d, &n, &fin, &nb);
+       rounds++)
+    for (i = 0; i < n; i++)
+      seen[off + i] = 1;
+  for (k = 0; k < 400; k++)
+    CHECK_EQ (seen[2 * k], 1);
+  gq_sstream_free (&s);
+
+  /* Acknowledged: 400 separate single bytes, then the bytes between.  The
+     buffer is freed all the way once what was not recorded is sent again and
+     acknowledged in its turn.  */
+  gq_sstream_init (&s, 4096, 1 << 20);
+  CHECK_EQ (gq_sstream_write (&s, data, 800), 800);
+  CHECK (gq_sstream_next (&s, 4096, UINT64_MAX, &off, &d, &n, &fin, &nb));
+  for (k = 0; k < 400; k++)
+    gq_sstream_on_acked (&s, 2 * k + 1, 1, 0);
+  for (k = 0; k < 400; k++)
+    gq_sstream_on_acked (&s, 2 * k, 1, 0);
+  for (rounds = 0;
+       rounds < 5000
+       && gq_sstream_next (&s, 4096, UINT64_MAX, &off, &d, &n, &fin, &nb);
+       rounds++)
+    gq_sstream_on_acked (&s, off, n, 0);
+  CHECK_EQ (s.base, 800);
+  gq_sstream_free (&s);
+}
+
 static void
 test_send_states (void)
 {
@@ -351,6 +405,7 @@ int
 main (void)
 {
   test_transfers ();
+  test_many_holes ();
   test_send_states ();
   test_recv_rules ();
   TST_DONE ();
