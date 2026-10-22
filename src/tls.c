@@ -1450,6 +1450,7 @@ gqi_on_key_update (gq_tls *t, gq_slice body)
     return gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_CRYPTO);
   memcpy (read_secret (t), next, t->hlen);
   gq_wipe (next, sizeof next);
+  t->read_rekeyed = 1;
   TRY (gqi_emit_secret (t, GQ_LEVEL_APPLICATION, GQ_DIR_READ,
                         read_secret (t)));
   if (request && !t->ku_busy)
@@ -1545,6 +1546,23 @@ dispatch_any (gq_tls *t, enum gq_level level, gq_slice msg)
   return dispatch (t, level, msg);
 }
 
+/* Handle one message.  LEFT is how many bytes of the same input follow it.
+   RFC 8446 section 5.1: a message that changes the keys must end its record,
+   since what comes after was protected under the keys it retires.  Without
+   this a record of KeyUpdates (3,000 fit in one) is taken whole, each one
+   rekeying both directions and asking for the same back.  */
+static int
+dispatch_checked (gq_tls *t, enum gq_level level, gq_slice msg, size_t left)
+{
+  int r;
+
+  t->read_rekeyed = 0;
+  r = dispatch_any (t, level, msg);
+  if (r == GQ_OK && t->read_rekeyed && left > 0)
+    return gqi_fail (t, GQ_ALERT_UNEXPECTED_MESSAGE, GQ_ERR_PROTOCOL);
+  return r;
+}
+
 static size_t
 body_len (const uint8_t *p)
 {
@@ -1576,7 +1594,7 @@ gq_tls_feed (gq_tls *t, enum gq_level level, const uint8_t **buf, size_t *len)
               m.len = 4 + n;
               *buf += 4 + n;
               *len -= 4 + n;
-              r = dispatch_any (t, level, m);
+              r = dispatch_checked (t, level, m, *len);
               if (r != GQ_OK)
                 return r;
               continue;
@@ -1618,7 +1636,7 @@ gq_tls_feed (gq_tls *t, enum gq_level level, const uint8_t **buf, size_t *len)
               gq_slice m = { t->msg, t->msg_len };
 
               t->msg_len = 0;
-              r = dispatch_any (t, level, m);
+              r = dispatch_checked (t, level, m, *len);
               if (r != GQ_OK)
                 return r;
             }

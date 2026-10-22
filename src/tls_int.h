@@ -59,6 +59,8 @@ struct gq_tls
   int primed;			/* Server: continuing a stateless retry.  */
   gq_tls_dtls_prime prime;
   int ku_busy;			/* DTLS: a KeyUpdate of ours is unacknowledged.  */
+  int read_rekeyed;		/* The message being handled changed the read
+				   keys (a KeyUpdate).  */
 
   /* Negotiable parameters after policy filtering.  */
   uint16_t suites[MAX_SUITES];

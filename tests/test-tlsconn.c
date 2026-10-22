@@ -632,6 +632,57 @@ test_rekey_by_count (void)
   side_free (s);
 }
 
+/* RFC 8446 section 5.1: the messages before a key change must end their
+   record, because what follows was protected under the keys that KeyUpdate
+   retires.  A record carrying several KeyUpdates (3,000 fit in one) would
+   otherwise be taken whole, each one rekeying both directions and each
+   requesting one back, from a single record of the peer's.  */
+static void
+test_coalesced_key_updates (void)
+{
+  struct side *s;
+  static const uint8_t one[5] = { GQ_HS_KEY_UPDATE, 0, 0, 1, 1 };
+  uint8_t many[5 * 8];
+  int i;
+
+  /* One, asking for ours in return: answered once.  */
+  s = side_new ();
+  handshake (s, 0, 1);
+  peer_write (s, GQ_CT_HANDSHAKE, one, sizeof one);
+  CHECK_EQ (deliver (s, 0), GQ_OK);
+  CHECK_EQ (s->ev.closed, 0);
+  CHECK_EQ (peer_read_client (s), GQ_OK);
+  CHECK_EQ (s->rekeys_seen, 1);
+  side_free (s);
+
+  /* Eight in one record: refused, unexpected_message, nothing answered.  */
+  s = side_new ();
+  handshake (s, 0, 1);
+  for (i = 0; i < 8; i++)
+    memcpy (many + 5 * i, one, sizeof one);
+  peer_write (s, GQ_CT_HANDSHAKE, many, sizeof many);
+  deliver (s, 0);
+  CHECK_EQ (s->ev.closed, 1);
+  CHECK_EQ (s->ev.close_error, GQ_ERR_PROTOCOL);
+  CHECK_EQ (s->ev.close_alert, GQ_ALERT_UNEXPECTED_MESSAGE);
+  peer_read_client (s);
+  CHECK (s->rekeys_seen <= 1);
+  side_free (s);
+
+  /* Two, not asking for anything back: still more than one before the key
+     change.  */
+  s = side_new ();
+  handshake (s, 0, 1);
+  memcpy (many, one, sizeof one);
+  memcpy (many + 5, one, sizeof one);
+  many[4] = many[9] = 0;
+  peer_write (s, GQ_CT_HANDSHAKE, many, 10);
+  deliver (s, 0);
+  CHECK_EQ (s->ev.closed, 1);
+  CHECK_EQ (s->ev.close_alert, GQ_ALERT_UNEXPECTED_MESSAGE);
+  side_free (s);
+}
+
 static void
 test_failures (void)
 {
@@ -783,6 +834,7 @@ main (void)
   test_handshake_and_data (13, 2);
   test_rekey_by_count ();
   test_flights_over_tcp ();
+  test_coalesced_key_updates ();
   test_failures ();
   TST_DONE ();
 }
