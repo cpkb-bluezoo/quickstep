@@ -2,6 +2,10 @@ quickstep NEWS - history of user-visible changes.
 
 * Noteworthy changes in release ?.? (????-??-??) [?]
 
+** QUIC: max_udp_payload_size is now sent as a transport parameter, with the
+value of gq_conn_config.max_udp_payload.  It was never sent, so a peer assumed
+65527 and its path MTU probes could outgrow a path that carries our
+datagrams inside another tunnel, such as CONNECT-UDP (RFC 9298).
 ** gq_tlsconn_events and gq_conn_events gain an optional verify_peer
 callback, as gq_dtls_events already had, so that the application can replace
 the check of the server's certificate chain against the trust store on TCP

@@ -577,6 +577,11 @@ local_params (gq_conn *c, gq_transport_params *tp)
     tp->n_available_versions = n;
   }
   gq_tp_set_present (tp, GQ_TP_VERSION_INFORMATION);
+  /* What we receive: without it the peer assumes 65527 and its path MTU
+     probes outgrow a path that carries our datagrams inside another
+     tunnel.  */
+  tp->max_udp_payload_size = g->max_udp_payload;
+  gq_tp_set_present (tp, GQ_TP_MAX_UDP_PAYLOAD_SIZE);
   if (g->max_datagram_frame_size)
     {
       tp->max_datagram_frame_size = g->max_datagram_frame_size;

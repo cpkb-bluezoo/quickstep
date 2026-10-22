@@ -1282,6 +1282,40 @@ test_verify_peer (void)
   gq_trust_free (empty);
 }
 
+/* max_udp_payload_size (RFC 9000 section 18.2) is sent: a peer must not
+   assume 65527 when the datagrams we receive are limited, as they are when
+   they travel inside another tunnel.  */
+static void
+test_max_udp_payload_advertised (void)
+{
+  gq_conn_config cc, sc;
+  struct pair *p;
+  gq_transport_params tp;
+
+  memset (&cc, 0, sizeof cc);
+  memset (&sc, 0, sizeof sc);
+  cc.max_udp_payload = 1300;
+  sc.max_udp_payload = 1400;
+  p = pair_new (&cc, &sc, 0, 5);
+  CHECK (run (&p->net, both_connected, 30000000));
+  /* What the client got from the server, and the server from the client.  */
+  CHECK_EQ (gq_conn_get_peer_params (p->cli.c, p->cli.params,
+                                     sizeof p->cli.params,
+                                     &p->cli.params_len), GQ_OK);
+  CHECK_EQ (gq_tp_decode (p->cli.params, p->cli.params_len, GQ_ROLE_SERVER,
+                          &tp), GQ_OK);
+  CHECK (gq_tp_has (&tp, GQ_TP_MAX_UDP_PAYLOAD_SIZE));
+  CHECK_EQ (tp.max_udp_payload_size, 1400);
+  CHECK_EQ (gq_conn_get_peer_params (p->srv.c, p->srv.params,
+                                     sizeof p->srv.params,
+                                     &p->srv.params_len), GQ_OK);
+  CHECK_EQ (gq_tp_decode (p->srv.params, p->srv.params_len, GQ_ROLE_CLIENT,
+                          &tp), GQ_OK);
+  CHECK (gq_tp_has (&tp, GQ_TP_MAX_UDP_PAYLOAD_SIZE));
+  CHECK_EQ (tp.max_udp_payload_size, 1300);
+  pair_free (p);
+}
+
 /* glibc can fill every allocation with a fixed pattern before it is handed
    out, so that memory used before it was written is never the zeros that a
    fresh heap tends to hold (M_PERTURB; other C libraries have nothing like
@@ -3743,6 +3777,7 @@ main (void)
   test_handshake (GQ_VERSION_1, 0, 4);
   test_handshake (GQ_VERSION_2, 0, 2);
   test_handshake (0, 20, 3);
+  test_max_udp_payload_advertised ();
   test_verify_peer ();
   test_flights ();
   test_lost_handshake_datagram ();
