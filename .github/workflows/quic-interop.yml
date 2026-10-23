@@ -115,7 +115,11 @@ jobs:
   interop:
     name: "vs ${{ matrix.peer }}"
     needs: [peers, image]
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest: on 26.04 the TShark from the archive (4.6.4, where
+    # the nightly PPA had 5.1) cannot read the simulator's pcaps, which empties
+    # the ACK and frame analysis.  Pinned to what the earlier runs used until
+    # that is understood.
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
