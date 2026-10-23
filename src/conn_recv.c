@@ -1044,10 +1044,6 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
         }
       return ok;
     }
-  if (c->role == GQ_ROLE_SERVER && !c->got_first_initial
-      && h.version != c->version && h.type == GQ_PKT_INITIAL
-      && gq_version_supported (h.version) && conn_version_listed (c, h.version))
-    c->version = c->orig_version = h.version;	/* Serve what was asked.  */
   if (h.version != c->version)
     {
       /* Only Initial packets may differ, and only during a compatible
@@ -1067,13 +1063,17 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
         }
       else if (c->role == GQ_ROLE_SERVER)
         {
-          if (!c->switched || h.version != c->orig_version
-              || !c->have_orig_rk)
+          if (!c->got_first_initial && gq_version_supported (h.version)
+              && conn_version_listed (c, h.version))
+            ;	/* Trial keys use h.version; commit after decrypt.  */
+          else if (!c->switched || h.version != c->orig_version
+                   || !c->have_orig_rk)
             {
               drop_long (c, &h, "unsupported");
               return 0;
             }
-          rk = &c->orig_rk;
+          else
+            rk = &c->orig_rk;
         }
       else if (c->switched || c->sp[SP_HANDSHAKE].have_rk
                || !conn_version_listed (c, h.version)
@@ -1140,20 +1140,22 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
   sp = h.type == GQ_PKT_INITIAL ? SP_INITIAL : SP_HANDSHAKE;
   if (c->role == GQ_ROLE_SERVER && sp == SP_INITIAL && !c->got_first_initial)
     {
+      uint32_t serve_ver = c->version;
+
       if (dgram < GQ_MIN_INITIAL_DATAGRAM || h.dcid.len < 8)
         {
           drop_long (c, &h, "invalid");
           return 0;
         }
-      if (conn_server_start (c, h.dcid.data, h.dcid.len, h.scid.data,
-                             h.scid.len) != GQ_OK)
+      if (h.version != c->version && gq_version_supported (h.version)
+          && conn_version_listed (c, h.version))
+        serve_ver = h.version;
+      if (conn_server_initial_keys (c, serve_ver, h.dcid.data, h.dcid.len)
+          != GQ_OK)
         {
-          drop_long (c, &h, "internal_error");
-          conn_fail (c, GQ_QERR_INTERNAL, "cannot start handshake");
+          drop_long (c, &h, "key_unavailable");
           return 0;
         }
-      if (c->peer_addr_validated)
-        ql_peer_validated (c);
     }
   if (c->role == GQ_ROLE_SERVER && !c->got_first_initial)
     {
@@ -1225,8 +1227,26 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
     }
   if (r != GQ_OK)
     {
+      if (c->role == GQ_ROLE_SERVER && sp == SP_INITIAL && !c->got_first_initial)
+        conn_server_initial_abort (c);
       drop_long (c, &h, "decryption_failure");
       return r == GQ_ERR_CRYPTO && count_failed (c);
+    }
+  if (c->role == GQ_ROLE_SERVER && sp == SP_INITIAL && !c->got_first_initial)
+    {
+      if (h.version != c->version && gq_version_supported (h.version)
+          && conn_version_listed (c, h.version))
+        c->version = c->orig_version = h.version;
+      if (conn_server_start (c, h.dcid.data, h.dcid.len, h.scid.data,
+                             h.scid.len) != GQ_OK)
+        {
+          conn_server_initial_abort (c);
+          drop_long (c, &h, "internal_error");
+          conn_fail (c, GQ_QERR_INTERNAL, "cannot start handshake");
+          return 0;
+        }
+      if (c->peer_addr_validated)
+        ql_peer_validated (c);
     }
   if (pn < s->recv_floor || gq_ranges_contains (&s->recv, pn))
     {

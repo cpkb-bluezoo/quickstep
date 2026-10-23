@@ -156,6 +156,7 @@ ev_ticket (void *u, const gq_tls_ticket *t)
 
   s->tickets++;
   CHECK_EQ (gq_tls_session_store (&s->sess, t), GQ_OK);
+  CHECK_EQ (gq_tls_session_bind_server_name (&s->sess, "example.test"), GQ_OK);
   s->have_sess = 1;
   return 0;
 }

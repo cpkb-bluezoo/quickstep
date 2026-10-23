@@ -93,6 +93,7 @@ struct app
   int dgram, dgram_left, dgram_recv;	/* DATAGRAM: enabled, to send.  */
   int early;				/* 0-RTT: server accepts, client uses.  */
   const char *session_file;		/* Client: where the session is kept.  */
+  const char *client_sni;		/* Client: name bound into saved sessions.  */
   int saved_session;
   struct app *next;			/* Server: connections in a list.  */
 };
@@ -342,8 +343,11 @@ ev_ticket (void *u, const gq_tls_ticket *t, uint32_t version)
      transport parameters and the QUIC version.  */
   if (a->server || a->session_file == NULL || a->saved_session)
     return;
-  if (gq_tls_session_store (&sess, t) != GQ_OK
-      || gq_tls_session_serialize (&sess, blob, sizeof blob, &bl) != GQ_OK
+  if (gq_tls_session_store (&sess, t) != GQ_OK)
+    return;
+  if (a->client_sni != NULL)
+    gq_tls_session_bind_server_name (&sess, a->client_sni);
+  if (gq_tls_session_serialize (&sess, blob, sizeof blob, &bl) != GQ_OK
       || gq_conn_get_peer_params (a->c, params, sizeof params, &pl) != GQ_OK)
     return;
   f = fopen (a->session_file, "wb");
@@ -915,6 +919,7 @@ main (int argc, char **argv)
           fprintf (stderr, "cannot load CA\n");
           return 1;
         }
+      a.client_sni = sni;
       g.cc.server_name = sni;
       g.cc.no_name_check = sni == NULL;	/* No SNI given: nothing to check.  */
       g.cc.trust = g.trust;
@@ -933,6 +938,8 @@ main (int argc, char **argv)
               && fread (params, 1, v32[2], sf) == v32[2]
               && gq_tls_session_deserialize (&g.sess, blob, v32[1]) == GQ_OK)
             {
+              if (sni != NULL)
+                gq_tls_session_bind_server_name (&g.sess, sni);
               g.cc.resume = &g.sess;
               g.cc.early_data = 1;
               a.cfg.resume_params = params;

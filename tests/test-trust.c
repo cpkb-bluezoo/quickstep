@@ -52,6 +52,40 @@ make_cert (struct tst_cert *out, const char *cn, const char *san,
   return tst_make_cert (out, TST_ECDSA256, cn, san, issuer, nb, na, dig);
 }
 
+/* Leaf with an explicit keyUsage (serverAuth EKU still present).  */
+static int
+make_server_leaf_ku (struct tst_cert *out, const char *san,
+                     const struct tst_cert *issuer, unsigned ku_bits)
+{
+  time_t now = time (NULL);
+  unsigned char serial[4] = { 7, 7, 7, 7 };
+  int r;
+
+  gnutls_x509_privkey_init (&out->key);
+  r = gnutls_x509_privkey_generate (out->key, GNUTLS_PK_ECDSA,
+                                    GNUTLS_CURVE_TO_BITS
+                                    (GNUTLS_ECC_CURVE_SECP256R1), 0);
+  if (r < 0)
+    return r;
+  gnutls_x509_crt_init (&out->crt);
+  gnutls_x509_crt_set_version (out->crt, 3);
+  gnutls_x509_crt_set_key (out->crt, out->key);
+  gnutls_x509_crt_set_serial (out->crt, serial, sizeof serial);
+  gnutls_x509_crt_set_activation_time (out->crt, now - 3600);
+  gnutls_x509_crt_set_expiration_time (out->crt, now + 86400);
+  gnutls_x509_crt_set_dn_by_oid (out->crt, GNUTLS_OID_X520_COMMON_NAME, 0, san,
+                                 (unsigned) strlen (san));
+  gnutls_x509_crt_set_subject_alt_name (out->crt, GNUTLS_SAN_DNSNAME, san,
+                                        (unsigned) strlen (san),
+                                        GNUTLS_FSAN_SET);
+  gnutls_x509_crt_set_key_purpose_oid (out->crt, GNUTLS_KP_TLS_WWW_SERVER, 0);
+  r = gnutls_x509_crt_set_key_usage (out->crt, ku_bits);
+  if (r < 0)
+    return r;
+  return gnutls_x509_crt_sign2 (out->crt, issuer->crt, issuer->key,
+                                GNUTLS_DIG_SHA256, 0);
+}
+
 static gq_slice
 der (const struct tst_cert *c, gnutls_datum_t *d)
 {
@@ -501,6 +535,16 @@ main (void)
       }
     else
       fprintf (stderr, "note: cannot generate RSA-1024 here; skipped\n");
+  }
+
+  {
+    struct tst_cert ku_leaf;
+
+    CHECK_EQ (make_server_leaf_ku (&ku_leaf, "example.test", &ca,
+                                  GNUTLS_KEY_KEY_CERT_SIGN), 0);
+    CHECK_EQ (verify (t, &ku_leaf, "example.test", &why), GQ_ERR_CERT);
+    CHECK_EQ (why, GQ_CERT_OTHER);
+    tst_free_cert (&ku_leaf);
   }
 
   test_mldsa_hybrid_chains ();

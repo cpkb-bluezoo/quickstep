@@ -198,6 +198,14 @@ gq_trust_verify_chain_for (const gq_trust *t, const gq_slice *chain, size_t n,
 
   if (status == 0)
     {
+      unsigned int ku = 0, ku_crit = 0;
+
+      if (gnutls_x509_crt_get_key_usage (crts[0], &ku, &ku_crit) >= 0
+          && ku != 0 && (ku & GNUTLS_KEY_DIGITAL_SIGNATURE) == 0)
+        {
+          reason = GQ_CERT_OTHER;
+          goto out;
+        }
       r = GQ_OK;
       reason = GQ_CERT_OK;
     }

@@ -720,6 +720,7 @@ gq_tls_start (gq_tls *t)
       enum gq_aead a;
       enum gq_hash h;
       uint64_t now = gqi_now_ms (t);
+      size_t want_len = t->cfg.server_name ? strlen (t->cfg.server_name) : 0;
 
       /* Offer only a usable, unexpired session for a suite we offer.  */
       if (r->ticket_len > 0 && r->ticket_len <= GQ_TICKET_MAX
@@ -727,7 +728,10 @@ gq_tls_start (gq_tls *t)
           && r->psk_len == gq_hash_size (h)
           && gqi_in_list (t->suites, t->n_suites, r->cipher_suite)
           && now >= r->received_ms
-          && now - r->received_ms <= (uint64_t) r->lifetime * 1000)
+          && now - r->received_ms <= (uint64_t) r->lifetime * 1000
+          && want_len <= 255 && r->server_name_len == want_len
+          && (want_len == 0
+              || memcmp (r->server_name, t->cfg.server_name, want_len) == 0))
         t->offered = r;
     }
   /* Early data: only if asked for, the session allows it, and we will
@@ -1734,6 +1738,26 @@ gq_tls_session_store (gq_tls_session *s, const gq_tls_ticket *t)
   return GQ_OK;
 }
 
+int
+gq_tls_session_bind_server_name (gq_tls_session *s, const char *name)
+{
+  size_t n;
+
+  if (s == NULL)
+    return GQ_ERR_INVAL;
+  if (name == NULL || name[0] == '\0')
+    {
+      s->server_name_len = 0;
+      return GQ_OK;
+    }
+  n = strlen (name);
+  if (n > sizeof s->server_name)
+    return GQ_ERR_INVAL;
+  memcpy (s->server_name, name, n);
+  s->server_name_len = n;
+  return GQ_OK;
+}
+
 void
 gq_tls_session_wipe (gq_tls_session *s)
 {
@@ -1751,11 +1775,13 @@ gq_tls_session_serialize (const gq_tls_session *s, uint8_t *out, size_t cap,
   if (s == NULL || out == NULL || out_len == NULL || s->ticket_len == 0
       || s->ticket_len > GQ_TICKET_MAX || s->psk_len > GQ_MAX_HASH_LEN)
     return GQ_ERR_INVAL;
-  need = 4 + 2 + 1 + 1 + s->psk_len + 4 + 4 + 4 + 8 + 1 + s->alpn_len + 2
-    + s->ticket_len;
+  if (s->server_name_len > sizeof s->server_name)
+    return GQ_ERR_INVAL;
+  need = 4 + 2 + 1 + 1 + s->psk_len + 4 + 4 + 4 + 8 + 1 + s->alpn_len + 1
+    + s->server_name_len + 2 + s->ticket_len;
   if (cap < need)
     return GQ_ERR_BUFSIZE;
-  memcpy (p, "GQS2", 4);
+  memcpy (p, "GQS3", 4);
   p += 4;
   *p++ = (uint8_t) (s->cipher_suite >> 8);
   *p++ = (uint8_t) s->cipher_suite;
@@ -1775,6 +1801,9 @@ gq_tls_session_serialize (const gq_tls_session *s, uint8_t *out, size_t cap,
   *p++ = (uint8_t) s->alpn_len;
   memcpy (p, s->alpn, s->alpn_len);
   p += s->alpn_len;
+  *p++ = (uint8_t) s->server_name_len;
+  memcpy (p, s->server_name, s->server_name_len);
+  p += s->server_name_len;
   *p++ = (uint8_t) (s->ticket_len >> 8);
   *p++ = (uint8_t) s->ticket_len;
   memcpy (p, s->ticket, s->ticket_len);
@@ -1792,7 +1821,12 @@ gq_tls_session_deserialize (gq_tls_session *s, const uint8_t *d, size_t len)
   size_t i, tl;
   uint32_t v;
 
-  if (s == NULL || d == NULL || len < 4 + 4 || memcmp (d, "GQS2", 4) != 0)
+  int named;
+
+  if (s == NULL || d == NULL || len < 4 + 4)
+    return GQ_ERR_ENCODING;
+  named = memcmp (d, "GQS3", 4) == 0;
+  if (!named && memcmp (d, "GQS2", 4) != 0)
     return GQ_ERR_ENCODING;
   memset (s, 0, sizeof *s);
   p += 4;
@@ -1819,6 +1853,15 @@ gq_tls_session_deserialize (gq_tls_session *s, const uint8_t *d, size_t len)
     return GQ_ERR_ENCODING;
   memcpy (s->alpn, p, s->alpn_len);
   p += s->alpn_len;
+  if (named)
+    {
+      s->server_name_len = *p++;
+      if (s->server_name_len > sizeof s->server_name
+          || (size_t) (end - p) < s->server_name_len + 2)
+        return GQ_ERR_ENCODING;
+      memcpy (s->server_name, p, s->server_name_len);
+      p += s->server_name_len;
+    }
   tl = ((size_t) p[0] << 8) | p[1];
   p += 2;
   if (tl == 0 || tl > GQ_TICKET_MAX || (size_t) (end - p) != tl)

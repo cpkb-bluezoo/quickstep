@@ -334,9 +334,15 @@ test_session_storage (void)
   tk.received_ms = UINT64_C (0x0102030405060708);
 
   CHECK_EQ (gq_tls_session_store (&a, &tk), GQ_OK);
+  CHECK_EQ (gq_tls_session_bind_server_name (&a, "example.test"), GQ_OK);
   CHECK_EQ (gq_tls_session_serialize (&a, buf, sizeof buf, &n), GQ_OK);
   CHECK_EQ (gq_tls_session_deserialize (&b, buf, n), GQ_OK);
   CHECK (memcmp (&a, &b, sizeof a) == 0);
+  CHECK (b.server_name_len == strlen ("example.test"));
+  CHECK (memcmp (b.server_name, "example.test", b.server_name_len) == 0);
+  CHECK_EQ (gq_tls_session_bind_server_name (&a, "other.test"), GQ_OK);
+  CHECK (gq_tls_session_bind_server_name (&a, NULL) == GQ_OK
+         && a.server_name_len == 0);
   CHECK (b.received_ms == UINT64_C (0x0102030405060708) && b.age_add == 0xdeadbeefU);
 
   /* Malformed encodings are rejected, never trusted.  */

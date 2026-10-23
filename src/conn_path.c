@@ -42,6 +42,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <quickstep/crypto.h>
+
 #include "conn_int.h"
 
 static int
@@ -566,23 +568,20 @@ conn_path_on_challenge (gq_conn *c, const uint8_t *data)
 void
 conn_path_on_response (gq_conn *c, const uint8_t *data, uint64_t now)
 {
-  int i;
+  int idx;
   unsigned k;
+  pathinfo *e;
 
   (void) now;
-  for (i = 0; i < MAX_PATHS; i++)
-    {
-      pathinfo *e = &c->paths[i];
-
-      if (!e->used || e->validated)
-        continue;
-      for (k = 0; k < e->n_chal; k++)
-        if (memcmp (e->chal[k], data, 8) == 0)
-          {
-            validated (c, i);
-            return;
-          }
-    }
+  idx = rx_index (c);
+  if (idx < 0)
+    return;
+  e = &c->paths[idx];
+  if (!e->used || e->validated)
+    return;
+  for (k = 0; k < e->n_chal; k++)
+    if (gq_ct_equal (e->chal[k], data, 8))
+      validated (c, idx);
 }
 
 /* ---- Sending ---- */
@@ -602,7 +601,7 @@ conn_path_budget (const gq_conn *c, int idx, uint64_t *budget)
     }
   else
     {
-      if (e->validated || e->local_init)
+      if (e->validated)
         return 0;
       recv = e->recv;
       sent = e->sent;

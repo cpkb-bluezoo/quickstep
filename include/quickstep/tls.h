@@ -187,11 +187,16 @@ typedef struct gq_tls_session
   uint64_t received_ms;
   uint8_t alpn[255];
   size_t alpn_len;
+  uint8_t server_name[255];	/* Verified name when stored; resume only
+				   when server_name matches.  */
+  size_t server_name_len;
 } gq_tls_session;
 
 /* Copy TICKET (as delivered by the ticket callback) into S.  Returns
    GQ_ERR_BUFSIZE if the server's ticket is larger than GQ_TICKET_MAX.  */
 int gq_tls_session_store (gq_tls_session *s, const gq_tls_ticket *ticket);
+/* Record the name the client verified for this session (call after store).  */
+int gq_tls_session_bind_server_name (gq_tls_session *s, const char *name);
 void gq_tls_session_wipe (gq_tls_session *s);
 
 /* Flat encoding for saving a session to disk or a database; the result

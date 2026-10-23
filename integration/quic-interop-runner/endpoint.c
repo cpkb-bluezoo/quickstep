@@ -1210,9 +1210,12 @@ ev_ticket (void *u, const gq_tls_ticket *t, uint32_t version)
      server's transport parameters and the QUIC version.  */
   if (sv->have || cs->c == NULL)
     return;
-  if (gq_tls_session_store (&sv->sess, t) != GQ_OK
-      || gq_conn_get_peer_params (cs->c, sv->params, sizeof sv->params,
-                                  &sv->params_len) != GQ_OK)
+  if (gq_tls_session_store (&sv->sess, t) != GQ_OK)
+    return;
+  if (cs->count > 0 && cs->r->urls[cs->first].host[0] != '\0')
+    gq_tls_session_bind_server_name (&sv->sess, cs->r->urls[cs->first].host);
+  if (gq_conn_get_peer_params (cs->c, sv->params, sizeof sv->params,
+                               &sv->params_len) != GQ_OK)
     return;
   sv->version = version;
   sv->have = 1;
@@ -1723,6 +1726,7 @@ client_session (struct run *r, const gq_trust *trust, size_t first,
     }
   if (resume && r->saved.have)
     {
+      gq_tls_session_bind_server_name (&r->saved.sess, u->host);
       tc.resume = &r->saved.sess;
       /* A ticket is good only in the version it came from.  */
       cc.version = cc.versions[0] = r->saved.version;

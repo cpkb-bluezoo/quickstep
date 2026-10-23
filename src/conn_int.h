@@ -467,6 +467,9 @@ void conn_spin_received (gq_conn *c, int bit, int highest);
 int conn_spin_value (gq_conn *c);
 void conn_enter_closing (gq_conn *c, gq_conn_close_info *info, int draining);
 int conn_reset_token_live (const gq_conn *c, const uint8_t *token);
+int conn_server_initial_keys (gq_conn *c, uint32_t version,
+                              const uint8_t *odcid, size_t odcid_len);
+void conn_server_initial_abort (gq_conn *c);
 int conn_server_start (gq_conn *c, const uint8_t *odcid, size_t odcid_len,
                        const uint8_t *client_scid, size_t client_scid_len);
 void conn_recompute_idle (gq_conn *c, uint64_t now);

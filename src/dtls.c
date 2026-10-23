@@ -477,7 +477,7 @@ process_ack (gq_dtls *c, gq_slice body, int cleartext)
      by an ACK.  The numbers are predictable and a cleartext ACK costs
      nothing to forge, so one must not end the flight: if the ServerHello
      were then lost the client would never send again.  */
-  if (cleartext && !c->server)
+  if (cleartext)
     return;
   c->ack_clear = cleartext;
   if (gq_dtls_acks (body, on_ack_rec, c) == GQ_OK)

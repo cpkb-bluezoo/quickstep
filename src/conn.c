@@ -1395,6 +1395,38 @@ gq_conn_server_new (gq_conn **out, const gq_conn_config *config,
   return gq_conn_server_accept (out, config, tls, events, now_us, NULL);
 }
 
+/* Server: trial Initial keys before the packet is authenticated.  */
+int
+conn_server_initial_keys (gq_conn *c, uint32_t version, const uint8_t *odcid,
+                          size_t odcid_len)
+{
+  gq_packet_keys ck, sk;
+
+  if (c->got_first_initial || c->role != GQ_ROLE_SERVER)
+    return GQ_ERR_INVAL;
+  if (gq_packet_keys_initial (version, odcid, odcid_len, &ck, &sk) != GQ_OK)
+    return GQ_ERR_CRYPTO;
+  c->sp[SP_INITIAL].rk = ck;
+  c->sp[SP_INITIAL].wk = sk;
+  c->sp[SP_INITIAL].have_rk = c->sp[SP_INITIAL].have_wk = 1;
+  return GQ_OK;
+}
+
+void
+conn_server_initial_abort (gq_conn *c)
+{
+  space *s;
+
+  if (c->got_first_initial)
+    return;
+  s = &c->sp[SP_INITIAL];
+  if (s->have_rk)
+    gq_packet_keys_wipe (&s->rk);
+  if (s->have_wk)
+    gq_packet_keys_wipe (&s->wk);
+  s->have_rk = s->have_wk = 0;
+}
+
 /* Server: the first Initial arrived.  Derive its keys and start TLS.  */
 int
 conn_server_start (gq_conn *c, const uint8_t *odcid, size_t odcid_len,
@@ -1417,12 +1449,15 @@ conn_server_start (gq_conn *c, const uint8_t *odcid, size_t odcid_len,
                           c->version);
   ql_alpn_information (c, NULL, 0, c->stls.alpn, c->stls.n_alpn, NULL, 0);
   ql_recovery_parameters (c);
-  r = gq_packet_keys_initial (c->version, odcid, odcid_len, &ck, &sk);
-  if (r != GQ_OK)
-    return r;
-  c->sp[SP_INITIAL].rk = ck;
-  c->sp[SP_INITIAL].wk = sk;
-  c->sp[SP_INITIAL].have_rk = c->sp[SP_INITIAL].have_wk = 1;
+  if (!c->sp[SP_INITIAL].have_rk)
+    {
+      r = gq_packet_keys_initial (c->version, odcid, odcid_len, &ck, &sk);
+      if (r != GQ_OK)
+        return r;
+      c->sp[SP_INITIAL].rk = ck;
+      c->sp[SP_INITIAL].wk = sk;
+      c->sp[SP_INITIAL].have_rk = c->sp[SP_INITIAL].have_wk = 1;
+    }
   ql_key_updated (c, GQ_LEVEL_INITIAL, GQ_DIR_READ, "tls");
   ql_key_updated (c, GQ_LEVEL_INITIAL, GQ_DIR_WRITE, "tls");
   make_offer (c);

@@ -315,6 +315,7 @@ ev_ticket (void *u, const gq_tls_ticket *t, uint32_t version)
   if (a->have_sess)
     return;
   CHECK_EQ (gq_tls_session_store (&a->sess, t), GQ_OK);
+  CHECK_EQ (gq_tls_session_bind_server_name (&a->sess, "example.test"), GQ_OK);
   a->have_sess = 1;
   a->sess_version = version;
   CHECK_EQ (gq_conn_get_peer_params (a->c, a->params, sizeof a->params,

@@ -139,7 +139,11 @@ xticket (void *u, const gq_tls_ticket *t)
 
   s->tickets++;
   if (gq_tls_session_store (&s->saved, t) == GQ_OK)
-    s->have_saved = 1;
+    {
+      if (s->o != NULL && s->o->sni != NULL)
+        gq_tls_session_bind_server_name (&s->saved, s->o->sni);
+      s->have_saved = 1;
+    }
   return 0;
 }
 
