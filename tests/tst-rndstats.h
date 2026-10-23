@@ -46,6 +46,9 @@
 
 static char tst_log[1024];
 
+static void tst_log_cb (void *user, int level, const char *fmt, va_list ap)
+  __attribute__ ((format (printf, 3, 0)));
+
 static void
 tst_log_cb (void *user, int level, const char *fmt, va_list ap)
 {

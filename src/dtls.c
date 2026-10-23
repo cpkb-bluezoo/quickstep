@@ -823,7 +823,11 @@ on_msg (void *u, unsigned type, gq_slice msg)
   r = gq_tls_feed (c->tls, x->level, &p, &l);
   if (r != GQ_OK)
     {
-      if (x->unauth && !c->have_rd)
+      /* A cleartext message the engine took no harm from is discarded
+         (RFC 9147 section 4.1.2.7).  One that ended it cannot be: the
+         engine accepts nothing more, so the association is over, and the
+         peer is owed the alert.  */
+      if (x->unauth && !c->have_rd && !gq_tls_is_failed (c->tls))
         return 0;
       fail (c, r, gq_tls_alert (c->tls));
       return 1;

@@ -975,10 +975,13 @@ test_early_failures_are_counted (void)
     {
       for (k = 0; k < (size_t) idx; k++)
         gq_conn_recv (p->srv.c, p->net.now, d[k], dl[k]);
-      CHECK_EQ (p->srv.c->aead_failed_sp[SP_APP], 0);
+      CHECK_EQ (p->srv.c->aead_failed_early, 0);
       d[idx][dl[idx] - 1] ^= 1;		/* The tag of the 0-RTT packet.  */
       gq_conn_recv (p->srv.c, p->net.now, d[idx], dl[idx]);
-      CHECK_EQ (p->srv.c->aead_failed_sp[SP_APP], 1);
+      /* Counted against the early keys, not the 1-RTT ones (RFC 9001
+         section 6.6: per key).  */
+      CHECK_EQ (p->srv.c->aead_failed_early, 1);
+      CHECK_EQ (p->srv.c->aead_failed_sp[SP_APP], 0);
     }
   pair_free (p);
   g_early_server = 0;

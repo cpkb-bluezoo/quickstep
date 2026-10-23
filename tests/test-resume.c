@@ -245,7 +245,7 @@ test_server_on_rfc_client_hello (void)
 {
   uint8_t ch[600], bad[600];
   size_t n = tst_unhex (R8448_CLIENT_HELLO, ch, sizeof ch);
-  struct lookup lk = { 1000000 + 5000, 1000000, "", GQ_TLS_AES_128_GCM_SHA256, 1 };
+  struct lookup lk = { 1000000 + 5000, 1000000, "server", GQ_TLS_AES_128_GCM_SHA256, 1 };
   struct log lg;
   gq_tls *t = NULL;
   gq_server_hello sh;
@@ -303,11 +303,13 @@ test_server_on_rfc_client_hello (void)
   lk.name = "some-other-name";				/* Bound elsewhere.  */
   CHECK_EQ (run_server (&lk, ch, n, &lg, NULL, 0, NULL), GQ_ERR_PROTOCOL);
   CHECK_EQ (lg.alert, 112);
-  lk.name = "";
+  lk.name = "";						/* Bound to no name.  */
+  CHECK_EQ (run_server (&lk, ch, n, &lg, NULL, 0, NULL), GQ_ERR_PROTOCOL);
+  CHECK_EQ (lg.alert, 112);
+  lk.name = "server";					/* The trace's SNI.  */
   CHECK_EQ (run_server (&lk, ch, n, &lg, chacha_only, 1, NULL),
             GQ_ERR_PROTOCOL);			/* Suite no longer allowed.  */
   CHECK_EQ (lg.alert, 112);
-  lk.name = "server";					/* The trace's SNI.  */
   CHECK_EQ (run_server (&lk, ch, n, &lg, NULL, 0, NULL), GQ_OK);
 }
 

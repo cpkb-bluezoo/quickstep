@@ -35,25 +35,29 @@
 
 #define TRY(expr) do { int r_ = (expr); if (r_ != GQ_OK) return r_; } while (0)
 
-#define COOKIE_MAC_LEN 32
-#define COOKIE_TIME_LEN 8
+/* A cookie is the time it was issued, in seconds, and an HMAC-SHA256 tag
+   truncated to fit.  The whole is 32 bytes, as it always was: GnuTLS takes no
+   longer a DTLS cookie (DTLS_MAX_COOKIE_SIZE), and rejects the
+   HelloVerifyRequest that carries one.  */
+#define COOKIE_TIME_LEN 4
+#define COOKIE_MAC_LEN 28
 #define COOKIE_TOTAL (COOKIE_TIME_LEN + COOKIE_MAC_LEN)
-#define COOKIE_MAX_AGE_MS 120000ULL
+#define COOKIE_MAX_AGE_S 120
+#define COOKIE_MAX_AHEAD_S 60
 
-static uint64_t
-cookie_now_ms (void)
+static uint32_t
+cookie_now_s (void)
 {
-  return (uint64_t) time (NULL) * 1000;
+  return (uint32_t) time (NULL);
 }
 
 static int
-cookie_age_ok (uint64_t issued_ms)
+cookie_age_ok (uint32_t issued_s)
 {
-  uint64_t now = cookie_now_ms ();
+  /* Modular, so that it goes on working past 2106.  */
+  int32_t age = (int32_t) (cookie_now_s () - issued_s);
 
-  if (issued_ms > now + 60000)
-    return 0;
-  return now - issued_ms <= COOKIE_MAX_AGE_MS;
+  return age >= -COOKIE_MAX_AHEAD_S && age <= COOKIE_MAX_AGE_S;
 }
 
 
@@ -108,10 +112,11 @@ take (const uint8_t **p, size_t *n, size_t k, gq_slice *out)
 static int
 tag_of (const uint8_t key[32], const uint8_t *binding, size_t bl,
         const uint8_t *random, gq_slice sid, gq_slice suites,
-        uint64_t issued_ms, uint8_t out[COOKIE_MAC_LEN])
+        uint32_t issued_s, uint8_t out[COOKIE_MAC_LEN])
 {
-  uint8_t buf[256 + 32 + 1 + 32 + 2 + 512 + 8];
+  uint8_t buf[256 + 32 + 1 + 32 + 2 + 512 + COOKIE_TIME_LEN], full[32];
   size_t n = 0, i;
+  int r;
 
   if (bl > 256 || sid.len > 32 || suites.len > 512)
     return GQ_ERR_RANGE;
@@ -127,9 +132,13 @@ tag_of (const uint8_t key[32], const uint8_t *binding, size_t bl,
   memcpy (buf + n, suites.data, suites.len);
   n += suites.len;
   for (i = 0; i < COOKIE_TIME_LEN; i++)
-    buf[n + i] = (uint8_t) (issued_ms >> (8 * (COOKIE_TIME_LEN - 1 - i)));
+    buf[n + i] = (uint8_t) (issued_s >> (8 * (COOKIE_TIME_LEN - 1 - i)));
   n += COOKIE_TIME_LEN;
-  return gq_hmac (GQ_HASH_SHA256, key, 32, buf, n, out, COOKIE_MAC_LEN);
+  r = gq_hmac (GQ_HASH_SHA256, key, 32, buf, n, full, sizeof full);
+  if (r == GQ_OK)
+    memcpy (out, full, COOKIE_MAC_LEN);
+  gq_wipe (full, sizeof full);
+  return r;
 }
 
 int
@@ -143,7 +152,7 @@ gq_dtls12_listen (gq_dtls_cookies *ck, const uint8_t *binding, size_t bl,
   size_t n, l, k;
   gq_slice s, random, sid, cookie, suites;
   uint8_t want[COOKIE_TOTAL], hvr[64], frag[96];
-  uint64_t issued;
+  uint32_t issued;
   gq_wbuf w, f;
   gq_dtls12_epoch e0;
 
@@ -204,7 +213,7 @@ gq_dtls12_listen (gq_dtls_cookies *ck, const uint8_t *binding, size_t bl,
 
   /* Otherwise a HelloVerifyRequest with the cookie for this hello, in a
      record numbered like the ClientHello's.  */
-  issued = cookie_now_ms ();
+  issued = cookie_now_s ();
   for (k = 0; k < COOKIE_TIME_LEN; k++)
     want[k] = (uint8_t) (issued >> (8 * (COOKIE_TIME_LEN - 1 - k)));
   TRY (tag_of (ck->cur, binding, bl, random.data, sid, suites, issued,

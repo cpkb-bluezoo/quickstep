@@ -429,7 +429,8 @@ gq_dtls_listen (gq_dtls_cookies *ck, const gq_tls_server_config *config,
   const uint16_t *suites, *groups;
   size_t ns, ng, i, n;
   int complete;
-  uint8_t cookie[BODY_FIXED + GQ_MAX_HASH_LEN + CHECK_LEN + TAG_LEN];
+  uint8_t cookie[BODY_FIXED + GQ_MAX_HASH_LEN + CHECK_LEN + COOKIE_ISSUED_LEN
+                 + TAG_LEN];
   size_t cookie_len;
   uint8_t hrr[GQ_DTLS_HRR_MAX];
   size_t hrr_len;

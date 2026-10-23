@@ -1096,7 +1096,7 @@ build_probe (gq_conn *c, uint64_t now, uint8_t *out, size_t cap, size_t *len,
   uint64_t pn;
   size_t pnl;
   unsigned k;
-  int r;
+  int r, sent_ping = 0;
   int limited = conn_path_budget (c, idx, &budget);
 
   if (maxdg > cap)
@@ -1126,6 +1126,7 @@ build_probe (gq_conn *c, uint64_t now, uint8_t *out, size_t cap, size_t *len,
       f.type = GQ_FRAME_PING;
       add (p, &f, 1, NULL);
       e->pinged = 1;
+      sent_ping = 1;
     }
   else if (e->need_challenge && !e->chal_hold && room (p) >= 9)
     {
@@ -1184,6 +1185,11 @@ build_probe (gq_conn *c, uint64_t now, uint8_t *out, size_t cap, size_t *len,
   }
   c->dcid = saved;
   c->tx_path = idx;
+  /* The PING is the client's word that it is moving.  Later datagrams
+     go to the new path, or an in-flight packet on the old one looks
+     like a migration back.  */
+  if (sent_ping && r == GQ_OK && *len > 0)
+    conn_path_commit (c, idx);
   free (p);
   return r;
 }

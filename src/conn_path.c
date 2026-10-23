@@ -601,7 +601,7 @@ conn_path_budget (const gq_conn *c, int idx, uint64_t *budget)
     }
   else
     {
-      if (e->validated)
+      if (e->validated || e->local_init)
         return 0;
       recv = e->recv;
       sent = e->sent;

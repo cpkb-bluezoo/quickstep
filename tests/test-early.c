@@ -216,7 +216,8 @@ lookup_psk (void *u, const uint8_t *id, size_t len, gq_session_state *s)
   s->age_add = 0xfad6aac5U;		/* From the NewSessionTicket of section 3.  */
   s->lifetime = 30;
   s->max_early_data = e->max_early;
-  s->server_name_len = 0;
+  s->server_name_len = strlen ("server");	/* The trace's SNI.  */
+  memcpy (s->server_name, "server", s->server_name_len);
   s->alpn_len = strlen (e->alpn);
   memcpy (s->alpn, e->alpn, s->alpn_len);
   return 0;

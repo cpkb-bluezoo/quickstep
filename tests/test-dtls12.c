@@ -1215,7 +1215,7 @@ test_rd0_huge_sequence (void)
   CHECK_EQ (gq_dtls12_start (n->s[0].d, n->now), GQ_OK);
   for (k = 0; k < 5; k++)
     {
-      l = spoof_hs (d, 1, 0, 0, 0, 0, (uint64_t) 1 << 48);
+      l = spoof_hs (d, 1, 0, 0, 0, 0, (uint64_t) 1 << 47);
       gq_dtls12_receive (n->s[0].d, d, l, n->now + (uint64_t) k);
     }
   CHECK_EQ (n->s[0].closed, 0);

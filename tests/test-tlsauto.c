@@ -433,6 +433,7 @@ test_big_hello_fallback (void)
   sess.psk_len = 32;
   sess.lifetime = 7200;
   sess.received_ms = TEST_NOW_MS;
+  CHECK_EQ (gq_tls_session_bind_server_name (&sess, cfg.server_name), GQ_OK);
   for (i = 0; i < 12; i++)
     {
       memset (names[i], 'a' + (int) i, 40);

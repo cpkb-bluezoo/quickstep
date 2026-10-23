@@ -1161,9 +1161,10 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
           return 0;
         }
     }
-  if (c->role == GQ_ROLE_SERVER && !c->got_first_initial)
+  if (c->role == GQ_ROLE_SERVER && !c->got_first_initial && sp != SP_INITIAL)
     {
-      /* A Handshake packet ahead of the Initial that starts us.  */
+      /* A Handshake packet ahead of the Initial that starts us.  (The Initial
+         itself goes on, with trial keys, to be authenticated.)  */
       qlog_hdr q;
       int k = 0;
 
@@ -1185,8 +1186,10 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
     }
   if (!is_our_cid (c, h.dcid.data, h.dcid.len)
       && !(c->role == GQ_ROLE_SERVER && sp == SP_INITIAL
-           && h.dcid.len == c->initial_dcid.len
-           && memcmp (h.dcid.data, c->initial_dcid.data, h.dcid.len) == 0))
+           && (!c->got_first_initial	/* The trial keys came from this DCID.  */
+               || (h.dcid.len == c->initial_dcid.len
+                   && memcmp (h.dcid.data, c->initial_dcid.data,
+                              h.dcid.len) == 0))))
     {
       drop_long (c, &h, "connection_unknown");
       return 0;
@@ -1231,11 +1234,13 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
     }
   if (r != GQ_OK)
     {
+      enum gq_aead aead = s->rk.aead;	/* Before trial keys are wiped.  */
+
       if (c->role == GQ_ROLE_SERVER && sp == SP_INITIAL && !c->got_first_initial)
         conn_server_initial_abort (c);
       drop_long (c, &h, "decryption_failure");
       return r == GQ_ERR_CRYPTO
-        && count_failed (c, s->rk.aead, &c->aead_failed_sp[sp]);
+        && count_failed (c, aead, &c->aead_failed_sp[sp]);
     }
   if (c->role == GQ_ROLE_SERVER && sp == SP_INITIAL && !c->got_first_initial)
     {

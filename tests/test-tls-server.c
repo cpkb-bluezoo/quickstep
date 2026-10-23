@@ -158,6 +158,8 @@ struct end
   uint8_t peer_tp[64];
   size_t peer_tp_len;
   gq_tls_session session;		/* Last ticket received.  */
+  const char *const *dialled;	/* Name a client connected to (if a client): a
+				   stored session is bound to it.  */
   int n_tickets;
   unsigned hs_seq[8];		/* Handshake-level message types sent.  */
   int n_hs;
@@ -216,7 +218,11 @@ e_ticket (void *u, const gq_tls_ticket *t)
   struct end *e = u;
 
   e->n_tickets++;
-  return gq_tls_session_store (&e->session, t) == GQ_OK ? 0 : 1;
+  if (gq_tls_session_store (&e->session, t) != GQ_OK)
+    return 1;
+  return gq_tls_session_bind_server_name (&e->session,
+                                          e->dialled ? *e->dialled : NULL)
+    == GQ_OK ? 0 : 1;
 }
 
 static int
@@ -273,6 +279,7 @@ pair_new (void)
   p->sc.hooks.now_ms = clock_of;
   p->sc.hooks.user = &p->snow;
   p->cc.server_name = "example.test";
+  p->c.dialled = &p->cc.server_name;
   p->cc.trust = client_trust;
   p->sc.credentials = ec_creds;
   p->csink = sink_for (&p->c);
