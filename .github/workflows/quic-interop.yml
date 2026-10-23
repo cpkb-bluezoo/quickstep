@@ -153,11 +153,33 @@ jobs:
       - name: Enable IPv6 in the simulator
         run: sudo modprobe ip6table_filter
 
+      # The runner reads the traces with TShark, and what it makes of them
+      # decides verdicts.  The nightly PPA publishes a new build every day or
+      # two and keeps only the current one in its index, so installing from it
+      # gives results that drift between runs (neqo's retry changed verdict with
+      # the same packets).  This is the build the 2026-10-17 run used, fetched by
+      # name and checked; apt installs it from the files, with the rest from
+      # Ubuntu.  Moving to another build is a deliberate change: new names and
+      # sums.  If Launchpad drops the files, this step fails instead of
+      # quietly using something else.
       - name: Install Wireshark
         run: |
-          sudo add-apt-repository -y ppa:wireshark-dev/nightly
+          base=https://launchpad.net/~wireshark-dev/+archive/ubuntu/nightly/+files
+          mkdir -p "$RUNNER_TEMP/wireshark"
+          cd "$RUNNER_TEMP/wireshark"
+          cat > SHA256SUMS <<'EOF'
+          8af08d1bf0bc8438e3a8b2164ad05c46b7d4ee59319a60fa30f8a73560172fb0  libuiqt-plugin0_5.1.0-0~202610161048~ubuntu24.04.1_amd64.deb
+          84d33140a4720d584fc2888ca14dca56d998c0514aae3cb9c34258d8d394b906  libwireshark-data_5.1.0-0~202610161048~ubuntu24.04.1_all.deb
+          858d821feb3ea061d997f3b25f68493ca768206852c81f7d98194dbe2b1070c7  libwireshark0_5.1.0-0~202610161048~ubuntu24.04.1_amd64.deb
+          b1852bbfce917eac723255c489f5e96f4724cd88f5ec10874cc5fc4399da8f01  libwiretap0_5.1.0-0~202610161048~ubuntu24.04.1_amd64.deb
+          613c2c06e5f80ad05a4dcdaea7bf50a08f2e0cce21c154769c737d81ef77666d  libwsutil0_5.1.0-0~202610161048~ubuntu24.04.1_amd64.deb
+          784748b006fc8bc45d217e46f3b766f4641ad933c08218721dc0bbf78b62d698  tshark_5.1.0-0~202610161048~ubuntu24.04.1_amd64.deb
+          efbffa9f20a31484dd09404301fe6440ec2c804cf0bca54bb7369b8e52ba3bea  wireshark-common_5.1.0-0~202610161048~ubuntu24.04.1_amd64.deb
+          EOF
+          while read -r _ deb; do curl -fsSLO "$base/$deb"; done < SHA256SUMS
+          sha256sum -c SHA256SUMS
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends tshark
+          sudo apt-get install -y --no-install-recommends ./*.deb
           tshark --version | head -n 1
 
       - name: Install runner dependencies
