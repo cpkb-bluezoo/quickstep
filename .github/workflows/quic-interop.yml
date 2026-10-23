@@ -163,6 +163,7 @@ jobs:
       # sums.  If Launchpad drops the files, this step fails instead of
       # quietly using something else.
       - name: Install Wireshark
+        timeout-minutes: 10
         run: |
           base=https://launchpad.net/~wireshark-dev/+archive/ubuntu/nightly/+files
           mkdir -p "$RUNNER_TEMP/wireshark"
@@ -176,7 +177,12 @@ jobs:
           784748b006fc8bc45d217e46f3b766f4641ad933c08218721dc0bbf78b62d698  tshark_5.1.0-0~202610161048~ubuntu24.04.1_amd64.deb
           efbffa9f20a31484dd09404301fe6440ec2c804cf0bca54bb7369b8e52ba3bea  wireshark-common_5.1.0-0~202610161048~ubuntu24.04.1_amd64.deb
           EOF
-          while read -r _ deb; do curl -fsSLO "$base/$deb"; done < SHA256SUMS
+          # Launchpad's file server is slow (a minute or two for these) and can
+          # stall: bound each attempt and try again.
+          while read -r _ deb; do
+            curl -fsSLO --retry 4 --retry-all-errors --connect-timeout 20 \
+                 --max-time 240 "$base/$deb"
+          done < SHA256SUMS
           sha256sum -c SHA256SUMS
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ./*.deb
