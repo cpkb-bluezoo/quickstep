@@ -257,6 +257,9 @@ on_param (void *user, uint64_t id, gq_slice v)
         case GQ_TP_ACTIVE_CONNECTION_ID_LIMIT:
           if (x < 2) goto bad;
           break;
+        case GQ_TP_MAX_DATAGRAM_FRAME_SIZE:
+          if (x < 8) goto bad;
+          break;
         case GQ_TP_INITIAL_MAX_STREAMS_BIDI:
         case GQ_TP_INITIAL_MAX_STREAMS_UNI:
           if (x > (UINT64_C (1) << 60)) goto bad;

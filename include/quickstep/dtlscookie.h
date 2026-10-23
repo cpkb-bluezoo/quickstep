@@ -67,11 +67,10 @@ int gq_dtls_cookies_new (gq_dtls_cookies **out);
 void gq_dtls_cookies_free (gq_dtls_cookies *ck);
 
 /* Start using a new random secret; the previous one still verifies.  Call
-   it every minute or so.  A cookie carries no time of its own, so one that
-   was captured stays good for the two secrets in the ring, which is the
-   most a rotation interval buys: a replay of it draws a first flight for
-   the address it names.  Datagrams from an address that already has an
-   association belong to that association, not to the listener.  */
+   it every minute or so.  Cookies carry an issuance time and expire after
+   about two rotation intervals even if the MAC still verifies.  Datagrams
+   from an address that already has an association belong to that
+   association, not to the listener.  */
 int gq_dtls_cookies_rotate (gq_dtls_cookies *ck);
 
 /* Install secrets chosen by the caller (to share between servers behind

@@ -26,6 +26,7 @@
 #include <quickstep/status.h>
 #include <quickstep/policy.h>
 #include <quickstep/crypto.h>
+#include <quickstep/record.h>
 
 #include "tls_int.h"
 
@@ -118,6 +119,21 @@ gq_tls_early_data_offered (const gq_tls *t)
 {
   return t != NULL && t->role == ROLE_SERVER && t->early_offered
     && !t->early_accepted;
+}
+
+size_t
+gq_tls_early_skip_bytes (const gq_tls *t)
+{
+  size_t lim, per;
+
+  if (t == NULL || t->role != ROLE_SERVER || !t->early_offered)
+    return 0;
+  lim = t->sess.max_early_data;
+  if (lim == 0)
+    return (size_t) GQ_REC_MAX_CIPHERTEXT * 2;
+  per = GQ_REC_HEADER_LEN + GQ_REC_MAX_CIPHERTEXT;
+  return lim + per * ((lim + GQ_REC_MAX_PLAINTEXT - 1) / GQ_REC_MAX_PLAINTEXT
+                      + 1);
 }
 
 /* ------------------------------------------------------------------ */

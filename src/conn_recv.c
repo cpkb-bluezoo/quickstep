@@ -902,7 +902,7 @@ recv_vn (gq_conn *c, const gq_long_header *h)
   return 1;
 }
 
-static int count_failed (gq_conn *c);
+static int count_failed (gq_conn *c, enum gq_aead aead, uint64_t *ctr);
 
 /* Server: a 0-RTT packet (RFC 9001 section 4.6).  It is a packet of the
    application data space, protected with the early keys the handshake
@@ -951,8 +951,8 @@ recv_early (gq_conn *c, uint64_t now, uint8_t *pkt, const gq_long_header *h)
   if (r != GQ_OK)
     {
       drop_long (c, h, "decryption_failure");
-      /* RFC 9001 section 6.6: counted across all keys, like the others.  */
-      return r == GQ_ERR_CRYPTO && count_failed (c);
+      return r == GQ_ERR_CRYPTO
+        && count_failed (c, c->early_rk.aead, &c->aead_failed_early);
     }
   if (pn < s->recv_floor || gq_ranges_contains (&s->recv, pn))
     {
@@ -970,17 +970,21 @@ recv_early (gq_conn *c, uint64_t now, uint8_t *pkt, const gq_long_header *h)
   return 1;
 }
 
-/* RFC 9001 section 6.6: packets that fail authentication are counted for the
-   whole connection; past the integrity limit of the AEAD the connection is
-   closed.  Returns 1 if it was.  */
-static int
-count_failed (gq_conn *c)
+static uint64_t
+aead_integrity_limit (enum gq_aead aead)
 {
-  const space *s = &c->sp[SP_APP];
-  uint64_t limit = s->have_rk && s->rk.aead == GQ_AEAD_CHACHA20_POLY1305
-    ? (uint64_t) 1 << 36 : (uint64_t) 1 << 52;
+  return aead == GQ_AEAD_CHACHA20_POLY1305 ? (uint64_t) 1 << 36
+                                           : (uint64_t) 1 << 52;
+}
 
-  if (++c->aead_failed < limit)
+/* RFC 9001 section 6.6: failures are counted per packet-protection keys.
+   Returns 1 if the connection was closed.  */
+static int
+count_failed (gq_conn *c, enum gq_aead aead, uint64_t *ctr)
+{
+  uint64_t limit = aead_integrity_limit (aead);
+
+  if (++*ctr < limit)
     return 0;
   conn_fail (c, GQ_QERR_AEAD_LIMIT, "AEAD integrity limit reached");
   return 1;
@@ -1230,7 +1234,8 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
       if (c->role == GQ_ROLE_SERVER && sp == SP_INITIAL && !c->got_first_initial)
         conn_server_initial_abort (c);
       drop_long (c, &h, "decryption_failure");
-      return r == GQ_ERR_CRYPTO && count_failed (c);
+      return r == GQ_ERR_CRYPTO
+        && count_failed (c, s->rk.aead, &c->aead_failed_sp[sp]);
     }
   if (c->role == GQ_ROLE_SERVER && sp == SP_INITIAL && !c->got_first_initial)
     {
@@ -1412,8 +1417,19 @@ recv_short (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t *used)
     }
   if (r != GQ_OK)
     {
-      if (r == GQ_ERR_CRYPTO && count_failed (c))
-        return 1;
+      if (r == GQ_ERR_CRYPTO)
+        {
+          uint64_t *ctr;
+
+          if (keys == &c->rk_prev)
+            ctr = &c->aead_failed_rk_prev;
+          else if (keys == &c->rk_next)
+            ctr = &c->aead_failed_rk_next;
+          else
+            ctr = &c->aead_failed_sp[SP_APP];
+          if (count_failed (c, keys->aead, ctr))
+            return 1;
+        }
       goto failed;
     }
   if (pn < s->recv_floor || gq_ranges_contains (&s->recv, pn))

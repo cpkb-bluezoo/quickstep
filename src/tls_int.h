@@ -61,6 +61,7 @@ struct gq_tls
   int ku_busy;			/* DTLS: a KeyUpdate of ours is unacknowledged.  */
   int read_rekeyed;		/* The message being handled changed the read
 				   keys (a KeyUpdate).  */
+  unsigned peer_key_updates;	/* Inbound KeyUpdate messages accepted.  */
 
   /* Negotiable parameters after policy filtering.  */
   uint16_t suites[MAX_SUITES];

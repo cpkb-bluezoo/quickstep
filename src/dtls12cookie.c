@@ -22,6 +22,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <quickstep/status.h>
 #include <quickstep/crypto.h>
@@ -34,7 +35,26 @@
 
 #define TRY(expr) do { int r_ = (expr); if (r_ != GQ_OK) return r_; } while (0)
 
-#define COOKIE_LEN 32
+#define COOKIE_MAC_LEN 32
+#define COOKIE_TIME_LEN 8
+#define COOKIE_TOTAL (COOKIE_TIME_LEN + COOKIE_MAC_LEN)
+#define COOKIE_MAX_AGE_MS 120000ULL
+
+static uint64_t
+cookie_now_ms (void)
+{
+  return (uint64_t) time (NULL) * 1000;
+}
+
+static int
+cookie_age_ok (uint64_t issued_ms)
+{
+  uint64_t now = cookie_now_ms ();
+
+  if (issued_ms > now + 60000)
+    return 0;
+  return now - issued_ms <= COOKIE_MAX_AGE_MS;
+}
 
 
 struct first
@@ -88,10 +108,10 @@ take (const uint8_t **p, size_t *n, size_t k, gq_slice *out)
 static int
 tag_of (const uint8_t key[32], const uint8_t *binding, size_t bl,
         const uint8_t *random, gq_slice sid, gq_slice suites,
-        uint8_t out[COOKIE_LEN])
+        uint64_t issued_ms, uint8_t out[COOKIE_MAC_LEN])
 {
-  uint8_t buf[256 + 32 + 1 + 32 + 2 + 512];
-  size_t n = 0;
+  uint8_t buf[256 + 32 + 1 + 32 + 2 + 512 + 8];
+  size_t n = 0, i;
 
   if (bl > 256 || sid.len > 32 || suites.len > 512)
     return GQ_ERR_RANGE;
@@ -106,7 +126,10 @@ tag_of (const uint8_t key[32], const uint8_t *binding, size_t bl,
   buf[n++] = (uint8_t) suites.len;
   memcpy (buf + n, suites.data, suites.len);
   n += suites.len;
-  return gq_hmac (GQ_HASH_SHA256, key, 32, buf, n, out, COOKIE_LEN);
+  for (i = 0; i < COOKIE_TIME_LEN; i++)
+    buf[n + i] = (uint8_t) (issued_ms >> (8 * (COOKIE_TIME_LEN - 1 - i)));
+  n += COOKIE_TIME_LEN;
+  return gq_hmac (GQ_HASH_SHA256, key, 32, buf, n, out, COOKIE_MAC_LEN);
 }
 
 int
@@ -117,9 +140,10 @@ gq_dtls12_listen (gq_dtls_cookies *ck, const uint8_t *binding, size_t bl,
 {
   struct first x;
   const uint8_t *p;
-  size_t n, l;
+  size_t n, l, k;
   gq_slice s, random, sid, cookie, suites;
-  uint8_t want[COOKIE_LEN], hvr[64], frag[96];
+  uint8_t want[COOKIE_TOTAL], hvr[64], frag[96];
+  uint64_t issued;
   gq_wbuf w, f;
   gq_dtls12_epoch e0;
 
@@ -153,17 +177,25 @@ gq_dtls12_listen (gq_dtls_cookies *ck, const uint8_t *binding, size_t bl,
     return GQ_DTLS_LISTEN_DROP;
 
   /* A valid cookie (from this or the previous secret): accept.  */
-  if (cookie.len == COOKIE_LEN)
+  if (cookie.len == COOKIE_TOTAL)
     {
-      if (tag_of (ck->cur, binding, bl, random.data, sid, suites, want)
-          == GQ_OK && gq_ct_equal (want, cookie.data, COOKIE_LEN))
+      issued = 0;
+      for (k = 0; k < COOKIE_TIME_LEN; k++)
+        issued = (issued << 8) | cookie.data[k];
+      if (cookie_age_ok (issued)
+          && tag_of (ck->cur, binding, bl, random.data, sid, suites, issued,
+                     want + COOKIE_TIME_LEN) == GQ_OK
+          && gq_ct_equal (want + COOKIE_TIME_LEN, cookie.data + COOKIE_TIME_LEN,
+                          COOKIE_MAC_LEN))
         {
           prime->e0_seq = x.rec.seq + 1;
           return GQ_DTLS_LISTEN_ACCEPT;
         }
-      if (ck->have_prev
-          && tag_of (ck->prev, binding, bl, random.data, sid, suites, want)
-             == GQ_OK && gq_ct_equal (want, cookie.data, COOKIE_LEN))
+      if (ck->have_prev && cookie_age_ok (issued)
+          && tag_of (ck->prev, binding, bl, random.data, sid, suites, issued,
+                     want + COOKIE_TIME_LEN) == GQ_OK
+          && gq_ct_equal (want + COOKIE_TIME_LEN, cookie.data + COOKIE_TIME_LEN,
+                          COOKIE_MAC_LEN))
         {
           prime->e0_seq = x.rec.seq + 1;
           return GQ_DTLS_LISTEN_ACCEPT;
@@ -172,9 +204,13 @@ gq_dtls12_listen (gq_dtls_cookies *ck, const uint8_t *binding, size_t bl,
 
   /* Otherwise a HelloVerifyRequest with the cookie for this hello, in a
      record numbered like the ClientHello's.  */
-  TRY (tag_of (ck->cur, binding, bl, random.data, sid, suites, want));
+  issued = cookie_now_ms ();
+  for (k = 0; k < COOKIE_TIME_LEN; k++)
+    want[k] = (uint8_t) (issued >> (8 * (COOKIE_TIME_LEN - 1 - k)));
+  TRY (tag_of (ck->cur, binding, bl, random.data, sid, suites, issued,
+               want + COOKIE_TIME_LEN));
   gq_wbuf_init (&w, hvr, sizeof hvr);
-  gq_tls12_build_hvr (&w, (gq_slice) { want, COOKIE_LEN });
+  gq_tls12_build_hvr (&w, (gq_slice) { want, COOKIE_TOTAL });
   TRY (gq_wbuf_status (&w));
   gq_wbuf_init (&f, frag, sizeof frag);
   gq_dtls_put_hs_frag (&f, GQ_HS12_HELLO_VERIFY_REQUEST,

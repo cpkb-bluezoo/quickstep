@@ -22,6 +22,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <quickstep/status.h>
 #include <quickstep/policy.h>
@@ -38,7 +39,10 @@
 
 #define TAG_LEN 16
 #define CHECK_LEN 16
-#define COOKIE_VERSION 1
+#define COOKIE_VERSION 2
+#define COOKIE_VERSION_LEGACY 1
+#define COOKIE_ISSUED_LEN 8
+#define COOKIE_MAX_AGE_MS 120000ULL
 
 int
 gq_dtls_cookies_new (gq_dtls_cookies **out)
@@ -102,8 +106,25 @@ gq_dtls_cookies_set (gq_dtls_cookies *ck, const uint8_t cur[32],
 /* Cookie                                                             */
 /* ------------------------------------------------------------------ */
 
-/* version | suite | group | hash length | ClientHello1 hash | check | tag  */
+/* version | suite | group | hash length | ClientHello1 hash | check |
+   issued_ms (v2) | tag  */
 #define BODY_FIXED (1 + 2 + 2 + 1)
+
+static uint64_t
+cookie_now_ms (void)
+{
+  return (uint64_t) time (NULL) * 1000;
+}
+
+static int
+cookie_age_ok (uint64_t issued_ms)
+{
+  uint64_t now = cookie_now_ms ();
+
+  if (issued_ms > now + 60000)
+    return 0;
+  return now - issued_ms <= COOKIE_MAX_AGE_MS;
+}
 
 static int
 tag_of (const uint8_t key[32], const uint8_t *binding, size_t bl,
@@ -172,6 +193,14 @@ make_cookie (const gq_dtls_cookies *ck, const uint8_t *binding, size_t bl,
   n += c->hlen;
   memcpy (out + n, c->check, CHECK_LEN);
   n += CHECK_LEN;
+  {
+    uint64_t issued = cookie_now_ms ();
+    size_t i;
+
+    for (i = 0; i < COOKIE_ISSUED_LEN; i++)
+      out[n + i] = (uint8_t) (issued >> (8 * (COOKIE_ISSUED_LEN - 1 - i)));
+    n += COOKIE_ISSUED_LEN;
+  }
   TRY (tag_of (ck->cur, binding, bl, out, n, out + n));
   *out_len = n + TAG_LEN;
   return GQ_OK;
@@ -186,12 +215,15 @@ open_cookie (const gq_dtls_cookies *ck, const uint8_t *binding, size_t bl,
   size_t n, hl;
   int ok = 0;
 
-  if (s.len < BODY_FIXED + CHECK_LEN + TAG_LEN || s.data[0] != COOKIE_VERSION)
+  if (s.len < BODY_FIXED + CHECK_LEN + TAG_LEN
+      || (s.data[0] != COOKIE_VERSION && s.data[0] != COOKIE_VERSION_LEGACY))
     return 0;
   hl = s.data[5];
   if (hl != 32 && hl != 48)
     return 0;
   n = BODY_FIXED + hl + CHECK_LEN;
+  if (s.data[0] == COOKIE_VERSION)
+    n += COOKIE_ISSUED_LEN;
   if (s.len != n + TAG_LEN)
     return 0;
   if (tag_of (ck->cur, binding, bl, s.data, n, tag) == GQ_OK
@@ -203,6 +235,16 @@ open_cookie (const gq_dtls_cookies *ck, const uint8_t *binding, size_t bl,
     ok = 1;
   if (!ok)
     return 0;
+  if (s.data[0] == COOKIE_VERSION)
+    {
+      uint64_t issued = 0;
+      size_t i, off = BODY_FIXED + hl + CHECK_LEN;
+
+      for (i = 0; i < COOKIE_ISSUED_LEN; i++)
+        issued = (issued << 8) | s.data[off + i];
+      if (!cookie_age_ok (issued))
+        return 0;
+    }
   c->suite = (uint16_t) (((unsigned) s.data[1] << 8) | s.data[2]);
   c->group = (uint16_t) (((unsigned) s.data[3] << 8) | s.data[4]);
   c->hlen = hl;

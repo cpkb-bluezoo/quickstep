@@ -276,7 +276,7 @@ test_integrity_limit (void)
   for (i = 0; i < 3; i++)
     forge (c, s, p->net.now, NULL, &f, 1, 1);
   CHECK (s->state < GQ_CONN_CLOSING);
-  s->aead_failed = limit - 1;
+  s->aead_failed_sp[SP_APP] = limit - 1;
   forge (c, s, p->net.now, NULL, &f, 1, 1);
   CHECK (s->state >= GQ_CONN_CLOSING);
   run (&p->net, NULL, 3000000);
@@ -975,10 +975,10 @@ test_early_failures_are_counted (void)
     {
       for (k = 0; k < (size_t) idx; k++)
         gq_conn_recv (p->srv.c, p->net.now, d[k], dl[k]);
-      CHECK_EQ (p->srv.c->aead_failed, 0);
+      CHECK_EQ (p->srv.c->aead_failed_sp[SP_APP], 0);
       d[idx][dl[idx] - 1] ^= 1;		/* The tag of the 0-RTT packet.  */
       gq_conn_recv (p->srv.c, p->net.now, d[idx], dl[idx]);
-      CHECK_EQ (p->srv.c->aead_failed, 1);
+      CHECK_EQ (p->srv.c->aead_failed_sp[SP_APP], 1);
     }
   pair_free (p);
   g_early_server = 0;

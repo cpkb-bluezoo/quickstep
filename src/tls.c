@@ -1467,6 +1467,8 @@ gqi_on_key_update (gq_tls *t, gq_slice body)
 
   if (t->quic)		/* RFC 9001 section 6: QUIC has its own.  */
     return gqi_fail (t, GQ_ALERT_UNEXPECTED_MESSAGE, GQ_ERR_PROTOCOL);
+  if (++t->peer_key_updates > 16)
+    return gqi_fail (t, GQ_ALERT_UNEXPECTED_MESSAGE, GQ_ERR_PROTOCOL);
   r = gq_key_update_parse (body, &request);
   if (r != GQ_OK)
     return gqi_fail_parse (t, r);

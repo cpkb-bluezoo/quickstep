@@ -457,6 +457,10 @@ void gq_tls_server_set_ticket_keys (gq_tls *tls, gq_ticket_keys *keys);
    records that follow (see gq_record_set_skip_budget).  */
 int gq_tls_early_data_offered (const gq_tls *tls);
 
+/* Server: how many ciphertext bytes of declined 0-RTT may still arrive
+   (the ticket limit plus record overhead).  */
+size_t gq_tls_early_skip_bytes (const gq_tls *tls);
+
 /* Either role: nonzero if 0-RTT data was accepted.  */
 int gq_tls_early_data_accepted (const gq_tls *tls);
 

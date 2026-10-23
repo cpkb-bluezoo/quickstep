@@ -368,7 +368,7 @@ on_record (void *u, unsigned type, const uint8_t *data, size_t len)
          and we advertised none).  */
       if (c->server && !c->connected && gq_tls_early_data_offered (c->tls)
           && gq_record_skip_budget (&c->rec) == 0)
-        gq_record_set_skip_budget (&c->rec, GQ_REC_MAX_CIPHERTEXT * 2);
+        gq_record_set_skip_budget (&c->rec, gq_tls_early_skip_bytes (c->tls));
       return 0;
 
     case GQ_CT_APPLICATION_DATA:

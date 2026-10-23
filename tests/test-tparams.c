@@ -153,6 +153,7 @@ test_rejects (void)
   CHECK_EQ (decode_hex ("0e0102", GQ_ROLE_CLIENT), GQ_OK);
   CHECK_EQ (decode_hex ("030244b0", GQ_ROLE_CLIENT), GQ_OK);		/* 1200 */
   CHECK_EQ (decode_hex ("0302" "44af", GQ_ROLE_CLIENT), GQ_ERR_ENCODING);
+  CHECK_EQ (decode_hex ("2007", GQ_ROLE_CLIENT), GQ_ERR_ENCODING);	/* datagram < 8 */
   CHECK_EQ (decode_hex ("0c00", GQ_ROLE_CLIENT), GQ_OK);
   CHECK_EQ (decode_hex ("0c0100", GQ_ROLE_CLIENT), GQ_ERR_ENCODING);
   CHECK_EQ (decode_hex ("0f15" "000000000000000000000000000000000000000000",

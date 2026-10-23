@@ -303,7 +303,10 @@ struct gq_conn
   uint64_t w_first_pn;		/* First pn we sent in the write phase.  */
   uint8_t w_phase_acked;
   uint64_t rk_prev_until;	/* When the previous phase's read keys go.  */
-  uint64_t aead_failed;		/* Packets that failed authentication.  */
+  uint64_t aead_failed_sp[N_SPACES];	/* Per packet-protection keys.  */
+  uint64_t aead_failed_early;
+  uint64_t aead_failed_rk_prev;
+  uint64_t aead_failed_rk_next;
   uint8_t ecn_state;		/* A gq_ecn_state.  */
   /* Path MTU discovery: the size of datagrams sent now, the largest known
      to work and the smallest known not to (or one past the ceiling, before
