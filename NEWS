@@ -102,14 +102,13 @@ probe (a PING, or a ClientHello that does not advance) is answered by
 resending the oldest unacknowledged Initial and Handshake data.  0-RTT
 sent before a Retry goes out again as 0-RTT.  The server's connection ID
 is taken from its Initial packets, and settled by the first that carries
-CRYPTO.  A server that may change version acknowledges the first Initial
-in the client's version before switching.  A client moving to a preferred
-address sends a PING first, moves its own traffic there, and sends its
-challenge once the server has challenged.  A server challenges a new path
-before answering one.  When a peer at its connection-ID limit starts using
-a newer ID, the older ones are retired and a replacement is issued.  An
-application close is sent only in 1-RTT once those keys exist, so the
-error code is not replaced by APPLICATION_ERROR.
+CRYPTO.  A client moving to a preferred address sends a PING first, moves
+its own traffic there, and sends its challenge once the server has
+challenged.  A server challenges a new path before answering one.  When a
+peer at its connection-ID limit starts using a newer ID, the older ones are
+retired and a replacement is issued.  An application close is sent only in
+1-RTT once those keys exist, so the error code is not replaced by
+APPLICATION_ERROR.
 
 ** Performance.  A bulk QUIC transfer between two connections in one process
 runs at about 1 GB/s per core, where it ran at 70 MB/s.

@@ -1279,28 +1279,12 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
     ql_handshake_started (c);
   log_long (c, &h, pkt, pn, poff, plen);
   {
-    gq_packet_keys pre_wk;
-    int nonprobing = 0, highest, arm = 0;
+    int nonprobing = 0, highest;
 
-    /* RFC 9368 section 2.3: acknowledge the first Initial in the client's
-       version before its frames reach TLS, which may switch the version
-       in this same call.  The ACK goes out ahead of that flight.  */
-    if (c->role == GQ_ROLE_SERVER && sp == SP_INITIAL && s->next_pn == 0
-        && c->cfg.n_versions > 1 && !c->switched)
-      {
-        pre_wk = s->wk;
-        arm = 1;
-      }
     c->pkt_crypto = 0;
     highest = !s->have_recv || pn > s->largest_recv;
     if (process_payload (c, sp, pkt + poff, plen, &ae, &nonprobing) != 0)
       return 1;
-    if (arm && c->switched && c->state < GQ_CONN_CLOSING)
-      {
-        c->lead_wk = pre_wk;
-        c->lead_version = c->orig_version;
-        c->lead_ack = 1;
-      }
     /* Each server Initial that decrypts may move the destination
        connection ID; the first that carries CRYPTO settles it.  */
     if (c->role == GQ_ROLE_CLIENT && sp == SP_INITIAL && !c->scid_settled)

@@ -1664,10 +1664,7 @@ gq_conn_send_path (gq_conn *c, uint64_t now_us, uint8_t *out, size_t cap,
     return GQ_OK;
   if (cap < conn_max_datagram (c))
     return GQ_ERR_BUFSIZE;
-  if (c->lead_ack)
-    r = conn_send_version_ack (c, now_us, out, cap, len);
-  else
-    r = conn_build_datagram (c, now_us, out, cap, len);
+  r = conn_build_datagram (c, now_us, out, cap, len);
   ql_after (c);
   if (to)
     *to = c->paths[c->tx_path].p;

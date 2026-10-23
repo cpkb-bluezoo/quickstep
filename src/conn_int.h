@@ -239,11 +239,6 @@ struct gq_conn
   size_t peer_tp_raw_len;
   gq_packet_keys orig_rk;	/* Server: Initial keys of orig_version.  */
   uint8_t have_orig_rk;
-  /* Server: an ACK of the first Initial, sealed in the client's version
-     before a compatible switch (RFC 9368 section 2.3).  */
-  uint8_t lead_ack;
-  uint32_t lead_version;
-  gq_packet_keys lead_wk;
 
   gq_tls *tls;
   gq_tls_config ctls;		/* Copies of the caller's configuration:  */
@@ -490,8 +485,6 @@ int conn_apply_peer_params (gq_conn *c);
 int conn_discard_space (gq_conn *c, int sp);
 void conn_maybe_confirm (gq_conn *c);
 void conn_cid_peer_using (gq_conn *c, const uint8_t *cid, size_t len);
-int conn_send_version_ack (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
-                           size_t *len);
 void conn_notify_connected (gq_conn *c, const gq_tls_info *info);
 size_t conn_max_datagram (const gq_conn *c);
 
