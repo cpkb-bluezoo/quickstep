@@ -1454,7 +1454,10 @@ run_server (struct run *r, const char *cert, const char *key)
   /* Only the retry case may send a Retry: handshake fails if one arrives.  */
   ec.admit.require_retry = r->tc == TC_RETRY;
   ec.tickets = 1;
-  ec.early_data = r->tc == TC_ZERORTT;
+  /* A ticket is worth caching to some clients (xquic's) only if it allows
+     early data, so resumption issues such tickets too; a client then asks for
+     0-RTT only in the zerortt case.  */
+  ec.early_data = r->tc == TC_ZERORTT || r->tc == TC_RESUMPTION;
   /* A client that opens in v1 and offers v2 is moved to v2 only in the v2
      case; every other case checks for v1 throughout.  */
   if (r->tc == TC_V2)
