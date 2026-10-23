@@ -1201,6 +1201,29 @@ test_spoofed_duplicate_draws_no_flight (void)
 }
 
 static void
+test_rd0_huge_sequence (void)
+{
+  struct opts o;
+  struct net *n;
+  uint8_t d[64];
+  size_t l;
+  int k;
+
+  memset (&o, 0, sizeof o);
+  n = net_new (&o);
+  CHECK_EQ (gq_dtls12_start (n->s[0].d, n->now), GQ_OK);
+  for (k = 0; k < 5; k++)
+    {
+      l = spoof_hs (d, 1, 0, 0, 0, 0, (uint64_t) 1 << 48);
+      gq_dtls12_receive (n->s[0].d, d, l, n->now + (uint64_t) k);
+    }
+  CHECK_EQ (n->s[0].closed, 0);
+  run (n, 20000);
+  expect_ok (n);
+  net_free (n);
+}
+
+static void
 test_spoofed_fragments_mid_handshake (void)
 {
   struct opts o;
@@ -1277,15 +1300,19 @@ test_warning_alerts (void)
           exchange (n, 3, 1);
           net_free (n);
 
-          /* The same at fatal level ends it, with the code.  */
+          /* Fatal in the clear is forged as easily as a warning: ignored.  */
           n = net_new (&o);
           if (target == 0)
             CHECK_EQ (gq_dtls12_start (n->s[0].d, n->now), GQ_OK);
           l = spoof_alert (d, 2, codes[i], 10 + i);
           gq_dtls12_receive (n->s[target].d, d, l, n->now);
-          CHECK_EQ (n->s[target].closed, 1);
-          CHECK_EQ (n->s[target].close_alert, (int) codes[i]);
-          CHECK (n->s[target].close_err < 0);
+          CHECK_EQ (n->s[target].closed, 0);
+          if (target == 0)
+            run (n, 20000);
+          else
+            CHECK (handshake (n, 20000));
+          expect_ok (n);
+          exchange (n, 3, 1);
           net_free (n);
         }
     }
@@ -1327,8 +1354,7 @@ test_cleartext_alert_window (void)
 
   memset (&o, 0, sizeof o);
 
-  /* The server has sent its flight and heard nothing since the ClientHello:
-     a client refusing it (a certificate it will not take) may say so.  */
+  /* A fatal alert in the clear is not believed: anyone can send one.  */
   n = net_new (&o);
   n->lose = drop_client_after_first;
   CHECK_EQ (gq_dtls12_start (n->s[0].d, n->now), GQ_OK);
@@ -1336,8 +1362,7 @@ test_cleartext_alert_window (void)
   CHECK (n->s[1].sent > 0);
   l = spoof_alert (d, 2, 42, 50);
   gq_dtls12_receive (n->s[1].d, d, l, n->now);
-  CHECK_EQ (n->s[1].closed, 1);
-  CHECK_EQ (n->s[1].close_alert, 42);
+  CHECK_EQ (n->s[1].closed, 0);
   net_free (n);
 
   /* The client has its server's flight, so the first exchange is over.  */
@@ -1405,6 +1430,7 @@ main (void)
   test_noise ();
   test_spoofed_cleartext_after_handshake ();
   test_spoofed_duplicate_draws_no_flight ();
+  test_rd0_huge_sequence ();
   test_spoofed_fragments_mid_handshake ();
   test_warning_alerts ();
   test_cleartext_alert_window ();

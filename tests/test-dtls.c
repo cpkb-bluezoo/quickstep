@@ -1708,7 +1708,7 @@ test_alerts_by_type (void)
           exchange (n, 3, 1);
           net_free (n);
         }
-      /* Anything else ends it, warning level or not.  */
+      /* Anything else in the clear is forged as easily: ignored.  */
       for (level = 1; level <= 2; level++)
         {
           n = net_new (&o);
@@ -1716,9 +1716,13 @@ test_alerts_by_type (void)
             CHECK_EQ (gq_dtls_start (n->s[0].d, n->now), GQ_OK);
           l = spoof_alert (d, (unsigned) level, 112, 11);
           gq_dtls_receive (n->s[target].d, d, l, n->now);
-          CHECK_EQ (n->s[target].closed, 1);
-          CHECK_EQ (n->s[target].close_alert, 112);
-          CHECK (n->s[target].close_err < 0);
+          CHECK_EQ (n->s[target].closed, 0);
+          if (target == 0)
+            run (n, 20000);
+          else
+            CHECK (handshake (n, 20000));
+          expect_ok (n);
+          exchange (n, 3, 1);
           net_free (n);
         }
     }

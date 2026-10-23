@@ -816,16 +816,21 @@ on_msg (void *u, unsigned type, gq_slice msg)
   gq_dtls *c = x->c;
   const uint8_t *p = msg.data;
   size_t l = msg.len;
-  int r;
+  int r, defer = x->unauth && !c->have_rd;
 
   (void) type;
-  fl_implicit (c);		/* The peer's next message answers our flight.  */
+  if (!defer)
+    fl_implicit (c);		/* The peer's next message answers our flight.  */
   r = gq_tls_feed (c->tls, x->level, &p, &l);
   if (r != GQ_OK)
     {
+      if (defer)
+        return 0;
       fail (c, r, gq_tls_alert (c->tls));
       return 1;
     }
+  if (defer)
+    fl_implicit (c);
   return 0;
 }
 
@@ -873,7 +878,8 @@ on_frag (void *u, const gq_dtls_hs_frag *f)
       ok = 1;
       break;
     case GQ_DRX_DUPLICATE:
-      c->d_dup = 1;
+      if (!(x->unauth && !c->have_rd))
+        c->d_dup = 1;
       ok = 1;
       break;
     default:
@@ -940,14 +946,7 @@ on_record (void *u, const gq_drec *rec)
           process_hs (c, GQ_LEVEL_INITIAL, rec->body, no);
           break;
         case GQ_DTLS_CT_ALERT:
-          /* Unauthenticated: honoured only while nothing is protected yet
-             (a server refusing our ClientHello), else it could be forged
-             by anyone who can guess the addresses.  And then only an alert
-             that refuses: a close_notify says all went well, which nobody
-             can have shown, and anyone can send one.  */
-          if (!c->have_rd && rec->body.len == 2
-              && rec->body.data[1] != GQ_ALERT_CLOSE_NOTIFY)
-            handle_alert (c, rec->body);
+          /* Unauthenticated: ignored (RFC 9147 section 4.1.2.7).  */
           break;
         case GQ_DTLS_CT_ACK:
           process_ack (c, rec->body, 1);

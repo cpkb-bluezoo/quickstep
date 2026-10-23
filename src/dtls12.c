@@ -589,6 +589,20 @@ struct rxctx
 				   sent it.  */
 };
 
+/* Cleartext epoch 0: reject a sequence that would slide the anti-replay
+   window beyond what a legitimate peer needs (RFC 6347 section 4.1.2.7).  */
+#define RD0_MAX_AHEAD 64
+
+static int
+rd0_replay_ok (const gq_dtls12_epoch *e, uint64_t seq)
+{
+  if (!e->recv_any)
+    return seq <= RD0_MAX_AHEAD;
+  if (seq > e->recv_max)
+    return seq <= e->recv_max + RD0_MAX_AHEAD;
+  return gq_dtls12_replay_ok (e, seq);
+}
+
 static int
 on_msg (void *u, unsigned type, gq_slice msg)
 {
@@ -596,20 +610,32 @@ on_msg (void *u, unsigned type, gq_slice msg)
   gq_dtls12 *c = x->c;
   const uint8_t *p = msg.data;
   size_t l = msg.len;
-  int r;
+  int r, defer = x->unauth && !c->rd1.active;
 
-  /* The first exchange is over once the peer says anything but the opening
-     (ClientHello, HelloVerifyRequest): see the alerts of epoch 0.  */
-  if (type != GQ_HS_CLIENT_HELLO && type != GQ_HS12_HELLO_VERIFY_REQUEST)
-    c->past_first = 1;
-  /* The peer's next message answers our flight (a final one stays).  */
-  if (c->fl.active && !c->fl.final)
-    c->fl.superseded = 1;
+  if (!defer)
+    {
+      /* The first exchange is over once the peer says anything but the opening
+         (ClientHello, HelloVerifyRequest): see the alerts of epoch 0.  */
+      if (type != GQ_HS_CLIENT_HELLO && type != GQ_HS12_HELLO_VERIFY_REQUEST)
+        c->past_first = 1;
+      /* The peer's next message answers our flight (a final one stays).  */
+      if (c->fl.active && !c->fl.final)
+        c->fl.superseded = 1;
+    }
   r = gq_tls12_feed (c->tls, &p, &l);
   if (r != GQ_OK)
     {
+      if (defer)
+        return 0;
       fail (c, r, gq_tls12_alert (c->tls));
       return 1;
+    }
+  if (defer)
+    {
+      if (type != GQ_HS_CLIENT_HELLO && type != GQ_HS12_HELLO_VERIFY_REQUEST)
+        c->past_first = 1;
+      if (c->fl.active && !c->fl.final)
+        c->fl.superseded = 1;
     }
   return try_ccs (c) != GQ_OK;
 }
@@ -648,7 +674,7 @@ on_frag (void *u, const gq_dtls_hs_frag *f)
     }
   if (d == GQ_DRX_BUFFERED && c->fl.active && !c->fl.final)
     c->fl.superseded = 1;
-  if (d == GQ_DRX_DUPLICATE)
+  if (d == GQ_DRX_DUPLICATE && !(x->unauth && !c->rd1.active))
     c->d_dup = 1;
   return 0;
 }
@@ -686,7 +712,7 @@ on_record (void *u, const gq_d12rec *rec)
     return 1;
   if (rec->epoch == 0)
     {
-      if (!gq_dtls12_replay_ok (&c->rd0, rec->seq))
+      if (!rd0_replay_ok (&c->rd0, rec->seq))
         return 0;
       switch (rec->type)
         {
@@ -705,21 +731,7 @@ on_record (void *u, const gq_d12rec *rec)
             }
           break;
         case GQ_D12_CT_ALERT:
-          /* Unauthenticated.  A peer that refuses our first flight (a server
-             that will not have our ClientHello, a client that will not have
-             the server's certificate) has no keys to say so with, so a fatal
-             alert is believed until the peer goes on past that first
-             exchange; after that, or at warning level, or as a close_notify,
-             it is only ever something anyone who can guess the addresses
-             sent, and ends nothing.  */
-          if (!c->rd1.active && !c->past_first
-              && rec->body.len == 2
-              && rec->body.data[0] == GQ_ALERT_LEVEL_FATAL
-              && rec->body.data[1] != GQ_ALERT_CLOSE_NOTIFY)
-            {
-              gq_dtls12_replay_update (&c->rd0, rec->seq);
-              handle_alert (c, rec->body);
-            }
+          /* Unauthenticated: ignored (RFC 6347 section 4.1.2.7).  */
           break;
         default:
           break;

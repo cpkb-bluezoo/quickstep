@@ -354,6 +354,41 @@ test_huge_ack_delay (void)
    than a full datagram of credit left the Initial waits; it is not sent
    short, and the timer for it is not armed to no purpose (RFC 9002 section
    6.2.2.1).  */
+/* RFC 9000 section 8.1: only datagrams from the unvalidated peer address
+   count toward the send budget, not the same connection ID from elsewhere.  */
+static void
+test_amplification_ignores_wrong_source (void)
+{
+  struct pair *p = pair_new (NULL, NULL, 0, 1);
+  gq_conn *c = p->cli.c, *s = p->srv.c;
+  gq_path other;
+  uint64_t now = p->net.now;
+  uint64_t recv0;
+  uint8_t buf[2048];
+  size_t len;
+
+  hand_over (c, s, now, 1);
+  CHECK (!s->peer_addr_validated);
+  recv0 = s->bytes_recv;
+  CHECK (recv0 > 0);
+  memset (&other, 0, sizeof other);
+  other.local = s->paths[0].p.local;
+  other.remote.len = s->paths[0].p.remote.len;
+  memcpy (other.remote.data, s->paths[0].p.remote.data,
+          other.remote.len);
+  other.remote.data[other.remote.len - 1] ^= 0xff;
+  now += 5000;
+  for (;;)
+    {
+      CHECK_EQ (gq_conn_send_path (c, now, buf, sizeof buf, &len, NULL), GQ_OK);
+      if (len == 0)
+        break;
+      gq_conn_recv_path (s, now, &other, buf, len);
+    }
+  CHECK_EQ (s->bytes_recv, recv0);
+  pair_free (p);
+}
+
 static void
 test_initial_waits_for_amplification_credit (void)
 {
@@ -3983,6 +4018,7 @@ main (void)
   test_integrity_limit ();
   test_confidentiality_limit ();
   test_huge_ack_delay ();
+  test_amplification_ignores_wrong_source ();
   test_initial_waits_for_amplification_credit ();
   test_no_probe_timer_without_credit ();
   test_first_update_waits_for_a_1rtt_ack ();

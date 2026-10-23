@@ -505,10 +505,10 @@ psk_acceptable (gq_tls *t, const gq_session_state *s, const gq_client_hello *ch,
     return 0;
   if ((s->created_ms > now ? 0 : now - s->created_ms) > life * 1000)
     return 0;
-  /* A ticket is bound to the server name it was issued for.  */
-  if (s->server_name_len
-      && (s->server_name_len != c->sni.len
-          || memcmp (s->server_name, c->sni.data, c->sni.len) != 0))
+  /* A ticket is bound to the server name it was issued for, including both
+     empty (no SNI on the original connection).  */
+  if (s->server_name_len != c->sni.len
+      || memcmp (s->server_name, c->sni.data, c->sni.len) != 0)
     return 0;
   /* Client certificates required: only sessions that had one may resume.  */
   if (t->scfg.client_auth == GQ_CLIENT_AUTH_REQUIRED
@@ -624,6 +624,9 @@ early_eligible (gq_tls *t)
   if (t->scfg.max_early_data == 0 || t->scfg.replay_check == NULL)
     return 0;
   if (t->psk_index != 0 || t->sess.max_early_data == 0)
+    return 0;
+  if (t->sess.server_name_len != t->sni_len
+      || memcmp (t->sess.server_name, t->sni, t->sni_len) != 0)
     return 0;
   if (t->info.alpn_len != t->sess.alpn_len
       || memcmp (t->info.alpn, t->sess.alpn, t->sess.alpn_len) != 0)

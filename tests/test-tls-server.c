@@ -835,6 +835,41 @@ by_name (void *u, const char *name)
 }
 
 static void
+test_nameless_ticket_not_rebound (void)
+{
+  gq_ticket_keys *keys;
+  gq_tls_session sess;
+  struct pair *p;
+
+  CHECK_EQ (gq_ticket_keys_new (&keys), GQ_OK);
+  p = pair_new ();
+  p->sc.ticket_keys = keys;
+  p->cc.server_name = NULL;
+  p->cc.trust = client_trust;
+  p->cc.no_name_check = 1;
+  pair_create (p);
+  CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+  CHECK_EQ (pump (p, 0), GQ_OK);
+  check_success (p);
+  CHECK_EQ (p->s.info.server_name_len, 0);
+  sess = p->c.session;
+  pair_free (p);
+
+  p = pair_new ();
+  p->sc.ticket_keys = keys;
+  p->cc.server_name = "example.test";
+  p->cc.resume = &sess;
+  pair_create (p);
+  CHECK_EQ (gq_tls_start (p->c.tls), GQ_OK);
+  CHECK_EQ (pump (p, 0), GQ_OK);
+  check_success (p);
+  CHECK_EQ (p->c.info.resumed, 0);
+  CHECK_EQ (p->s.info.resumed, 0);
+  pair_free (p);
+  gq_ticket_keys_free (keys);
+}
+
+static void
 test_sni_credentials (void)
 {
   struct pair *p;
@@ -2611,6 +2646,7 @@ main (void)
   test_pure_groups_opt_in ();
   test_pure_groups_order ();
   test_pure_groups_wrong_length ();
+  test_nameless_ticket_not_rebound ();
   test_sni_credentials ();
   test_alpn_and_quic ();
   test_client_auth ();

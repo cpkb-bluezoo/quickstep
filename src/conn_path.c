@@ -438,8 +438,22 @@ conn_path_accept_rx (const gq_conn *c)
 void
 conn_path_account_recv (gq_conn *c, size_t len)
 {
-  int i = rx_index (c);
+  int i;
 
+  /* RFC 9000 section 8.1: before the address is validated, only datagrams
+     from that address count toward the three-times limit.  Anyone else can
+     still send Initials that decrypt (another source address), and those
+     must not raise the budget for what we send to the pinned peer.  */
+  if (c->role == GQ_ROLE_SERVER && !c->peer_addr_validated && c->rx_known)
+    {
+      i = find (c, &c->rx);
+      if (i < 0)
+        return;
+      if (c->paths[i].initial && c->paths[i].p.remote.len > 0
+          && !addr_eq (&c->rx.remote, &c->paths[i].p.remote))
+        return;
+    }
+  i = rx_index (c);
   if (i >= 0 && !c->paths[i].initial)
     c->paths[i].recv += len;
   else
