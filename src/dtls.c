@@ -816,21 +816,18 @@ on_msg (void *u, unsigned type, gq_slice msg)
   gq_dtls *c = x->c;
   const uint8_t *p = msg.data;
   size_t l = msg.len;
-  int r, defer = x->unauth && !c->have_rd;
+  int r;
 
   (void) type;
-  if (!defer)
-    fl_implicit (c);		/* The peer's next message answers our flight.  */
+  fl_implicit (c);		/* The peer's next message answers our flight.  */
   r = gq_tls_feed (c->tls, x->level, &p, &l);
   if (r != GQ_OK)
     {
-      if (defer)
+      if (x->unauth && !c->have_rd)
         return 0;
       fail (c, r, gq_tls_alert (c->tls));
       return 1;
     }
-  if (defer)
-    fl_implicit (c);
   return 0;
 }
 
@@ -878,7 +875,8 @@ on_frag (void *u, const gq_dtls_hs_frag *f)
       ok = 1;
       break;
     case GQ_DRX_DUPLICATE:
-      if (!(x->unauth && !c->have_rd))
+      if (!(x->unauth && !c->have_rd)
+          || f->message_seq < c->reasm.next_seq)
         c->d_dup = 1;
       ok = 1;
       break;

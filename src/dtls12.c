@@ -610,32 +610,22 @@ on_msg (void *u, unsigned type, gq_slice msg)
   gq_dtls12 *c = x->c;
   const uint8_t *p = msg.data;
   size_t l = msg.len;
-  int r, defer = x->unauth && !c->rd1.active;
+  int r;
 
-  if (!defer)
-    {
-      /* The first exchange is over once the peer says anything but the opening
-         (ClientHello, HelloVerifyRequest): see the alerts of epoch 0.  */
-      if (type != GQ_HS_CLIENT_HELLO && type != GQ_HS12_HELLO_VERIFY_REQUEST)
-        c->past_first = 1;
-      /* The peer's next message answers our flight (a final one stays).  */
-      if (c->fl.active && !c->fl.final)
-        c->fl.superseded = 1;
-    }
+  /* The first exchange is over once the peer says anything but the opening
+     (ClientHello, HelloVerifyRequest): see the alerts of epoch 0.  */
+  if (type != GQ_HS_CLIENT_HELLO && type != GQ_HS12_HELLO_VERIFY_REQUEST)
+    c->past_first = 1;
+  /* The peer's next message answers our flight (a final one stays).  */
+  if (c->fl.active && !c->fl.final)
+    c->fl.superseded = 1;
   r = gq_tls12_feed (c->tls, &p, &l);
   if (r != GQ_OK)
     {
-      if (defer)
+      if (x->unauth && !c->rd1.active)
         return 0;
       fail (c, r, gq_tls12_alert (c->tls));
       return 1;
-    }
-  if (defer)
-    {
-      if (type != GQ_HS_CLIENT_HELLO && type != GQ_HS12_HELLO_VERIFY_REQUEST)
-        c->past_first = 1;
-      if (c->fl.active && !c->fl.final)
-        c->fl.superseded = 1;
     }
   return try_ccs (c) != GQ_OK;
 }
@@ -674,8 +664,12 @@ on_frag (void *u, const gq_dtls_hs_frag *f)
     }
   if (d == GQ_DRX_BUFFERED && c->fl.active && !c->fl.final)
     c->fl.superseded = 1;
-  if (d == GQ_DRX_DUPLICATE && !(x->unauth && !c->rd1.active))
-    c->d_dup = 1;
+  if (d == GQ_DRX_DUPLICATE)
+    {
+      if (!(x->unauth && !c->rd1.active)
+          || f->message_seq < c->reasm.next_seq)
+        c->d_dup = 1;
+    }
   return 0;
 }
 
