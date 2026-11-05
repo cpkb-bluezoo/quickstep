@@ -598,13 +598,20 @@ gq_rstream_take_update (gq_rstream *s, uint64_t window, uint64_t *max)
 {
   if (s->reset || s->final_known)
     return 0;
-  if (s->off + window > s->max_data && s->off + window - s->max_data >= window / 2)
+  if (!s->hold && s->off + window > s->max_data
+      && s->off + window - s->max_data >= window / 2)
     s->max_data = s->off + window;
   if (s->max_data <= s->max_sent)
     return 0;
   s->max_sent = s->max_data;
   *max = s->max_data;
   return 1;
+}
+
+void
+gq_rstream_hold (gq_rstream *s, int hold)
+{
+  s->hold = hold != 0;
 }
 
 void

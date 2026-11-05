@@ -166,7 +166,7 @@ typedef struct gq_rstream
   uint64_t max_sent;		/* Last credit put on the wire.  */
   uint64_t reset_err;
   uint64_t stop_err;
-  uint8_t final_known, fin_delivered, reset, discard;
+  uint8_t final_known, fin_delivered, reset, discard, hold;
   uint8_t stop_pending;
 } gq_rstream;
 
@@ -196,6 +196,12 @@ void gq_rstream_stop_lost (gq_rstream *s);
    the value to send in MAX_STREAM_DATA when there is one to announce.  */
 int gq_rstream_take_update (gq_rstream *s, uint64_t window, uint64_t *max);
 void gq_rstream_update_lost (gq_rstream *s, uint64_t max);
+
+/* Withhold credit: while HOLD is non-zero no new limit is announced, so the
+   peer stops when it has used what it was granted.  A grant that was lost is
+   still repeated.  Clearing it lets the window slide again from what has been
+   delivered.  */
+void gq_rstream_hold (gq_rstream *s, int hold);
 
 enum gq_recv_state gq_rstream_state (const gq_rstream *s);
 

@@ -565,6 +565,20 @@ gq_conn_stream_stop_sending (gq_conn *c, uint64_t id, uint64_t error)
   return GQ_OK;
 }
 
+int
+gq_conn_stream_hold (gq_conn *c, uint64_t id, int hold)
+{
+  stream *st = stream_find (c, id);
+
+  if (st == NULL || !st->has_recv)
+    return GQ_ERR_INVAL;
+  gq_rstream_hold (&st->r, hold);
+  /* Letting go announces what was withheld.  */
+  if (!hold)
+    conn_wake (c);
+  return GQ_OK;
+}
+
 size_t
 gq_conn_stream_room (const gq_conn *c, uint64_t id)
 {

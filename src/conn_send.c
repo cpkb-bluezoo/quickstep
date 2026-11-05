@@ -129,7 +129,7 @@ stream_wants (const gq_conn *c, stream *st)
       if (!st->r.final_known && !st->r.reset
           && st->r.max_data > st->r.max_sent)
         return 1;
-      if (!st->r.final_known && !st->r.reset
+      if (!st->r.final_known && !st->r.reset && !st->r.hold
           && st->r.off + c->cfg.initial_max_stream_data > st->r.max_data
           && st->r.off + c->cfg.initial_max_stream_data - st->r.max_data
              >= c->cfg.initial_max_stream_data / 2)

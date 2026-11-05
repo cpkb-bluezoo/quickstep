@@ -400,6 +400,31 @@ test_recv_rules (void)
   gq_rstream_update_lost (&r, 170);
   CHECK (gq_rstream_take_update (&r, 100, &nb) && nb == 170);
   gq_rstream_free (&r);
+
+  /* A held stream is granted no more; a grant that was lost is repeated;
+     and letting go slides the window from what has been delivered.  */
+  gq_rstream_init (&r, 100);
+  memset (&k, 0, sizeof k);
+  {
+    uint8_t big[70];
+
+    memset (big, 1, sizeof big);
+    gq_rstream_push (&r, 0, big, 70, 0, on_data, &k, &nb);
+  }
+  CHECK (gq_rstream_take_update (&r, 100, &nb) && nb == 170);
+  gq_rstream_update_lost (&r, 170);
+  gq_rstream_hold (&r, 1);
+  CHECK (gq_rstream_take_update (&r, 100, &nb) && nb == 170);
+  {
+    uint8_t more[100];
+
+    memset (more, 2, sizeof more);
+    gq_rstream_push (&r, 70, more, 100, 0, on_data, &k, &nb);
+  }
+  CHECK (!gq_rstream_take_update (&r, 100, &nb));
+  gq_rstream_hold (&r, 0);
+  CHECK (gq_rstream_take_update (&r, 100, &nb) && nb == 270);
+  gq_rstream_free (&r);
 }
 
 /* The pattern the byte at stream offset O carries.  */

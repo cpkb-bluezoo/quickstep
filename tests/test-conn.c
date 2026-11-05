@@ -3701,6 +3701,57 @@ test_streams_misc (void)
   pair_free (p);
 }
 
+/* The credit of one stream can be withheld: the peer stops on it when it has
+   used its window, another stream goes on, and letting go lets the held one
+   finish.  */
+static void
+test_stream_hold (void)
+{
+  struct pair *p;
+  gq_conn_config small;
+  uint64_t held, other;
+  struct sbuf *sh, *so;
+  size_t at_hold, before;
+
+  memset (&small, 0, sizeof small);
+  small.initial_max_stream_data = 6000;
+  small.initial_max_data = 1u << 20;
+  p = pair_new (&small, &small, 0, 21);
+  CHECK (run (&p->net, both_connected, 30000000));
+  CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &held), GQ_OK);
+  sh = sb_get (&p->cli, held);
+  sh->out_total = 100000;
+  sh->out_fin = 1;
+  run (&p->net, NULL, 100000);
+  CHECK (p->srv.opened >= 1);
+  before = sb_get (&p->srv, held)->n;
+  CHECK_EQ (gq_conn_stream_hold (p->srv.c, held, 1), GQ_OK);
+  run (&p->net, NULL, 2000000);
+  sh = sb_get (&p->srv, held);
+  at_hold = sh->n;
+  /* Only what the peer had been granted before the hold.  */
+  CHECK (at_hold > before && at_hold <= before + 6000);
+  CHECK (!sh->fin && at_hold < 100000);
+  /* Another stream is not held up.  */
+  CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &other), GQ_OK);
+  so = sb_get (&p->cli, other);
+  so->out_total = 20000;
+  so->out_fin = 1;
+  run (&p->net, NULL, 2000000);
+  so = sb_get (&p->srv, other);
+  CHECK (so->fin && so->n == 20000);
+  CHECK_EQ (sb_get (&p->srv, held)->n, at_hold);
+  /* A stream that is not there cannot be held.  */
+  CHECK (gq_conn_stream_hold (p->srv.c, 9999, 1) != GQ_OK);
+  /* Let go: the rest comes.  */
+  CHECK_EQ (gq_conn_stream_hold (p->srv.c, held, 0), GQ_OK);
+  run (&p->net, NULL, 10000000);
+  sh = sb_get (&p->srv, held);
+  CHECK (sh->fin && sh->n == 100000);
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  pair_free (p);
+}
+
 static void
 test_key_update (uint32_t version)
 {
@@ -3844,6 +3895,7 @@ main (void)
   test_close ();
   test_idle ();
   test_streams_misc ();
+  test_stream_hold ();
   test_key_update (0);
   test_key_update (GQ_VERSION_2);
   {

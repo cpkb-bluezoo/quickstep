@@ -635,6 +635,15 @@ int gq_conn_stream_finish (gq_conn *c, uint64_t id);
 int gq_conn_stream_reset (gq_conn *c, uint64_t id, uint64_t error);
 int gq_conn_stream_stop_sending (gq_conn *c, uint64_t id, uint64_t error);
 
+/* Withhold the receive credit of one stream (flow control, RFC 9000
+   section 4.1).  Data keeps arriving until the peer has used what it was
+   granted, and is delivered as usual; the limit is not raised meanwhile, so the
+   peer stops.  Other streams and the connection's own credit are not
+   affected.  Clearing HOLD raises the limit again from what has been
+   delivered.  An application that cannot take more of a stream uses this
+   instead of buffering without bound.  */
+int gq_conn_stream_hold (gq_conn *c, uint64_t id, int hold);
+
 /* Room left in the send buffer of a stream.  */
 size_t gq_conn_stream_room (const gq_conn *c, uint64_t id);
 
