@@ -172,6 +172,71 @@ test_hmac_rfc4231 (void)
     "faea9ea9076ede7f4af152e8b2fa9cb6"));
 }
 
+/* RFC 6234 section 8.4: the short SHA-512 test messages.  */
+static void
+test_sha512_rfc6234 (void)
+{
+  uint8_t out[64];
+  const char *two_blocks =
+    "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno"
+    "ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
+
+  CHECK_EQ (gq_sha512 ("", 0, out), GQ_OK);
+  CHECK (tst_eq_hex (out, 64,
+    "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
+    "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"));
+  CHECK_EQ (gq_sha512 (NULL, 0, out), GQ_OK);
+  CHECK (tst_eq_hex (out, 64,
+    "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
+    "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"));
+  CHECK_EQ (gq_sha512 ("abc", 3, out), GQ_OK);
+  CHECK (tst_eq_hex (out, 64,
+    "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
+    "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"));
+  CHECK_EQ (gq_sha512 (two_blocks, strlen (two_blocks), out), GQ_OK);
+  CHECK (tst_eq_hex (out, 64,
+    "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018"
+    "501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909"));
+
+  CHECK_EQ (gq_sha512 ("abc", 3, NULL), GQ_ERR_INVAL);
+  CHECK_EQ (gq_sha512 (NULL, 3, out), GQ_ERR_INVAL);
+}
+
+/* RFC 4493 section 4: the four AES-128-CMAC examples (an empty message, a
+   partial block, a whole block, and more than one block).  */
+static void
+test_cmac_rfc4493 (void)
+{
+  static const char *const msg =
+    "6bc1bee22e409f96e93d7e117393172a"
+    "ae2d8a571e03ac9c9eb76fac45af8e51"
+    "30c81c46a35ce411e5fbc1191a0a52ef"
+    "f69f2445df4f9b17ad2b417be66c3710";
+  static const struct { size_t len; const char *tag; } ex[] = {
+    {  0, "bb1d6929e95937287fa37d129b756746" },
+    { 16, "070a16b46b4d4144f79bdd9dd04a287c" },
+    { 40, "dfa66747de9ae63030ca32611497c827" },
+    { 64, "51f0bebf7e3b9d92fc49741779363cfe" }
+  };
+  uint8_t key[16], m[64], out[16];
+  size_t i;
+
+  tst_unhex ("2b7e151628aed2a6abf7158809cf4f3c", key, sizeof key);
+  tst_unhex (msg, m, sizeof m);
+  for (i = 0; i < sizeof ex / sizeof ex[0]; i++)
+    {
+      memset (out, 0, sizeof out);
+      CHECK_EQ (gq_cmac_aes128 (key, m, ex[i].len, out), GQ_OK);
+      CHECK (tst_eq_hex (out, sizeof out, ex[i].tag));
+    }
+  CHECK_EQ (gq_cmac_aes128 (key, NULL, 0, out), GQ_OK);
+  CHECK (tst_eq_hex (out, sizeof out, ex[0].tag));
+
+  CHECK_EQ (gq_cmac_aes128 (key, m, 16, NULL), GQ_ERR_INVAL);
+  CHECK_EQ (gq_cmac_aes128 (NULL, m, 16, out), GQ_ERR_INVAL);
+  CHECK_EQ (gq_cmac_aes128 (key, NULL, 16, out), GQ_ERR_INVAL);
+}
+
 static void
 test_misc (void)
 {
@@ -255,6 +320,8 @@ main (void)
   test_hkdf_rfc5869 ();
   test_hp_masks ();
   test_hmac_rfc4231 ();
+  test_sha512_rfc6234 ();
+  test_cmac_rfc4493 ();
   test_aead (GQ_AEAD_AES_128_GCM);
   test_aead (GQ_AEAD_AES_256_GCM);
   test_aead (GQ_AEAD_CHACHA20_POLY1305);

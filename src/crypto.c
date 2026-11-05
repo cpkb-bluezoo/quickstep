@@ -166,6 +166,48 @@ gq_hmac (enum gq_hash alg, const void *key, size_t keylen,
   return hmac_iov (alg, iov, 2, out);
 }
 
+/* SHA-512 and AES-128-CMAC are primitives for callers.  SHA-512 is a function
+   of its own and not an enum gq_hash value because the transcript and the
+   key schedule read that enum as SHA-256 and SHA-384 only.  */
+int
+gq_sha512 (const void *data, size_t len, uint8_t out[64])
+{
+  int r = gq_crypto_init ();
+
+  if (r != GQ_OK)
+    return r;
+  if (out == NULL || (data == NULL && len > 0))
+    return GQ_ERR_INVAL;
+  if (gcry_md_test_algo (GCRY_MD_SHA512))
+    return GQ_ERR_CRYPTO;
+  gcry_md_hash_buffer (GCRY_MD_SHA512, out, data ? data : no_bytes, len);
+  return GQ_OK;
+}
+
+int
+gq_cmac_aes128 (const uint8_t key[16], const void *data, size_t len,
+                uint8_t out[16])
+{
+  gcry_mac_hd_t h;
+  size_t taglen = 16;
+  int r = gq_crypto_init ();
+
+  if (r != GQ_OK)
+    return r;
+  if (key == NULL || out == NULL || (data == NULL && len > 0))
+    return GQ_ERR_INVAL;
+  if (gcry_mac_open (&h, GCRY_MAC_CMAC_AES, 0, NULL))
+    return GQ_ERR_CRYPTO;
+  if (gcry_mac_setkey (h, key, 16)
+      || (len > 0 && gcry_mac_write (h, data, len))
+      || gcry_mac_read (h, out, &taglen) || taglen != 16)
+    r = GQ_ERR_CRYPTO;
+  gcry_mac_close (h);
+  if (r != GQ_OK)
+    gq_wipe (out, 16);
+  return r;
+}
+
 /* ------------------------------------------------------------------ */
 /* HKDF                                                               */
 /* ------------------------------------------------------------------ */

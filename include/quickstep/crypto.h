@@ -87,6 +87,22 @@ int gq_hash_compute (enum gq_hash alg, const void *data, size_t len,
 int gq_hmac (enum gq_hash alg, const void *key, size_t keylen,
              const void *data, size_t len, uint8_t *out, size_t outlen);
 
+/* SHA-512 of DATA into OUT (64 bytes), in one call.  This is a primitive for
+   callers, such as SMB 3.1.1 pre-authentication integrity.  It is not an
+   enum gq_hash value: no suite the library negotiates uses SHA-512, and the
+   transcript and key schedule treat that enum as SHA-256 and SHA-384 only.
+   Returns GQ_ERR_INVAL if OUT is NULL or DATA is NULL with LEN above zero,
+   and GQ_ERR_CRYPTO if libgcrypt cannot compute it.  */
+int gq_sha512 (const void *data, size_t len, uint8_t out[64]);
+
+/* AES-128-CMAC (NIST SP 800-38B, RFC 4493) of DATA under the 16-byte KEY into
+   OUT (the 16-byte tag), in one call.  This computes the tag; the caller
+   compares it, with gq_ct_equal.  There is no AES-256-CMAC.  Returns
+   GQ_ERR_INVAL if KEY or OUT is NULL or DATA is NULL with LEN above zero,
+   and GQ_ERR_CRYPTO if libgcrypt fails.  */
+int gq_cmac_aes128 (const uint8_t key[16], const void *data, size_t len,
+                    uint8_t out[16]);
+
 /* ---- HKDF ---- */
 
 /* HKDF-Extract.  An empty SALT means a string of zeros as in RFC 5869.

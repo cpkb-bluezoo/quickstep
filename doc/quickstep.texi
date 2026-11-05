@@ -143,6 +143,20 @@ because TLS needs extract and expand separately), HKDF-Expand-Label
 Each is checked against the vectors in its RFC (@file{tests/test-crypto.c}).
 No primitive is implemented in this tree.
 
+@cindex SHA-512
+@cindex AES-CMAC
+Two further primitives are available to callers and are not used by any
+protocol the library speaks.  @code{gq_sha512} computes SHA-512 in one call
+(RFC 6234), and @code{gq_cmac_aes128} computes the 16-byte AES-128-CMAC tag
+of a message under a 16-byte key (NIST SP 800-38B, RFC 4493); the caller
+compares a received tag with @code{gq_ct_equal}.  An application, such as an
+SMB 3.1.1 client hashing its negotiate exchange or checking a signed
+session-setup response, can therefore do without @file{<gcrypt.h>}.  SHA-512
+is not a @code{gq_hash} value, since no suite the library negotiates uses it
+and the transcript and key schedule take that enumeration as SHA-256 and
+SHA-384 only.  There is no AES-256-CMAC, and no CCM.  Each is checked against
+the vectors in its RFC (@file{tests/test-crypto.c}).
+
 @cindex cipher contexts
 libgcrypt opens a context for every cipher, hash and MAC operation, which
 for a single operation is right and for every packet is not: an allocation,
