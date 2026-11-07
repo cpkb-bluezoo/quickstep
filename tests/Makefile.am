@@ -50,6 +50,8 @@ test_mldsa_LDFLAGS = -static
 # vectors.
 test_mlkem_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
 test_mlkem_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
+test_endpoint_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)
+test_endpoint_LDADD = $(LDADD) $(LIBGCRYPT_LIBS)
 # These count libgcrypt's allocations (tst-alloc.h) to see how many cipher
 # contexts a packet or a record opens.
 test_protect_CFLAGS = $(AM_CFLAGS) $(LIBGCRYPT_CFLAGS)

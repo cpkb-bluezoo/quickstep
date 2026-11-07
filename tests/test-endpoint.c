@@ -44,6 +44,7 @@ main (void)
 #else
 
 #include "tst-fix12.h"
+#include "tst-rndstats.h"
 
 #define MAXQ 4096
 #define MAXNODES 3
@@ -1572,6 +1573,41 @@ test_rebinding_through_endpoint (void)
   net_free (net);
 }
 
+/* An endpoint that only dials has no use for the strongest randomness: its
+   reset and token keys protect nothing a client sends.  Asking libgcrypt
+   for it makes the first one in a process seed from its jitter entropy
+   source, which costs about ten milliseconds of CPU, on every short lived
+   client.  A server, which does issue tokens and resets, still asks.  */
+static void
+test_client_endpoint_asks_for_ordinary_randomness (void)
+{
+  gq_endpoint_config cc;
+  gq_endpoint_events ce;
+  gq_endpoint *ep;
+  struct net *net;
+  unsigned long before, after;
+
+  tst_catch_gcrypt_log ();
+  if (!tst_rnd_stat ("getlvl2=", 0, &before))
+    {
+      fprintf (stderr, "note: libgcrypt does not keep random statistics "
+               "here (FIPS mode or another generator); skipped\n");
+      return;
+    }
+  memset (&cc, 0, sizeof cc);
+  cc.conn.wall_seconds = sim_wall;
+  memset (&ce, 0, sizeof ce);
+  CHECK_EQ (gq_endpoint_new (&ep, &cc, &ce), GQ_OK);
+  CHECK (tst_rnd_stat ("getlvl2=", 0, &after));
+  CHECK_EQ (after, before);
+  gq_endpoint_free (ep);
+
+  net = net_new (NULL, 1, NULL);
+  CHECK (tst_rnd_stat ("getlvl2=", 0, &after));
+  CHECK (after > before);
+  net_free (net);
+}
+
 int
 main (void)
 {
@@ -1595,6 +1631,7 @@ main (void)
   test_idle_timeouts ();
   test_rebinding_through_endpoint ();
   test_late_initial ();
+  test_client_endpoint_asks_for_ordinary_randomness ();
   if (getenv ("QLOG_STATS"))
     {
       size_t k;

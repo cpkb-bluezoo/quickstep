@@ -699,13 +699,36 @@ gq_endpoint_new (gq_endpoint **out, const gq_endpoint_config *config,
       free (ep);
       return GQ_ERR_INVAL;
     }
+  /* Reset and token keys are what a server's answers rest on.  A client
+     sends neither Retry nor NEW_TOKEN, and its reset tokens guard no
+     connection that matters, so it does not ask for the strongest
+     randomness: libgcrypt seeds that from its jitter entropy source on the
+     first request, about ten milliseconds of CPU, which a short lived
+     client would pay every time.  */
   if (!config->have_reset_key)
-    gq_random_key (ep->cfg.reset_key, sizeof ep->cfg.reset_key);
-  gq_random (&ep->seed, sizeof ep->seed);
-  if (gq_token_keys_init (&ep->keys) != GQ_OK)
     {
-      free (ep);
-      return GQ_ERR_CRYPTO;
+      if (config->server)
+        gq_random_key (ep->cfg.reset_key, sizeof ep->cfg.reset_key);
+      else
+        gq_random (ep->cfg.reset_key, sizeof ep->cfg.reset_key);
+    }
+  gq_random (&ep->seed, sizeof ep->seed);
+  if (config->server)
+    {
+      if (gq_token_keys_init (&ep->keys) != GQ_OK)
+        {
+          free (ep);
+          return GQ_ERR_CRYPTO;
+        }
+    }
+  else
+    {
+      memset (&ep->keys, 0, sizeof ep->keys);
+      if (gq_random (ep->keys.key[0], GQ_TOKEN_KEY_LEN) != GQ_OK)
+        {
+          free (ep);
+          return GQ_ERR_CRYPTO;
+        }
     }
   if (config->server)
     {
