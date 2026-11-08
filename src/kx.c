@@ -273,6 +273,27 @@ gq_kx_generate (unsigned group, gq_kx_key *key)
 }
 
 int
+gq_kx_classical_of (const gq_kx_key *hybrid, unsigned group, gq_kx_key *out)
+{
+  const struct group *h, *p;
+
+  if (hybrid == NULL || out == NULL)
+    return GQ_ERR_INVAL;
+  h = find_group (hybrid->group);
+  p = find_group (group);
+  if (h == NULL || p == NULL || h->kem_algo == 0 || h->ec_algo == 0
+      || p->kem_algo != 0 || p->ec_algo != h->ec_algo)
+    return GQ_ERR_UNSUPPORTED;
+  memset (out, 0, sizeof *out);
+  out->group = p->id;
+  memcpy (out->share, hybrid->share + (h->pq_first ? h->kem_pub : 0),
+          p->ec_pub);
+  out->share_len = p->ec_pub;
+  memcpy (out->secret, hybrid->secret, p->ec_sec);
+  return GQ_OK;
+}
+
+int
 gq_kx_respond (unsigned group, const uint8_t *client_share,
                size_t client_len, uint8_t *server_share, size_t cap,
                size_t *server_len, uint8_t *shared, size_t shared_cap,

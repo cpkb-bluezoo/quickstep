@@ -586,9 +586,61 @@ test_ephemeral_keys_not_strongest (void)
   CHECK_EQ (after, before);
 }
 
+/* The classical half of a hybrid key is a key of its own group: the plain
+   share a client sends beside the hybrid one need not be another key (the
+   hybrid draft allows the reuse).  */
+static void
+test_classical_of (void)
+{
+  static gq_kx_key hy, plain, other;
+  uint8_t server[GQ_KX_SHARE_MAX], ss[GQ_KX_SHARED_MAX], cs[GQ_KX_SHARED_MAX];
+  size_t slen, sslen, cslen;
+
+  CHECK_EQ (gq_kx_generate (GQ_GROUP_X25519_MLKEM768, &hy), GQ_OK);
+  CHECK_EQ (gq_kx_classical_of (&hy, GQ_GROUP_X25519, &plain), GQ_OK);
+  CHECK_EQ (plain.group, GQ_GROUP_X25519);
+  CHECK_EQ (plain.share_len, 32);
+  /* X25519MLKEM768 puts ML-KEM first and the X25519 key last.  */
+  CHECK (memcmp (plain.share, hy.share + 1184, 32) == 0);
+  /* It works as a key of its own: a server answers it, and it completes.  */
+  CHECK_EQ (gq_kx_respond (GQ_GROUP_X25519, plain.share, plain.share_len,
+                           server, sizeof server, &slen, ss, sizeof ss,
+                           &sslen), GQ_OK);
+  CHECK_EQ (gq_kx_complete (&plain, server, slen, cs, sizeof cs, &cslen),
+            GQ_OK);
+  CHECK_EQ (cslen, sslen);
+  CHECK (memcmp (cs, ss, cslen) == 0);
+  /* The classical half of the P-256 hybrid is P-256, and no other.  */
+  CHECK_EQ (gq_kx_classical_of (&hy, GQ_GROUP_SECP256R1, &other),
+            GQ_ERR_UNSUPPORTED);
+  CHECK_EQ (gq_kx_classical_of (&hy, GQ_GROUP_X25519_MLKEM768, &other),
+            GQ_ERR_UNSUPPORTED);
+  gq_kx_key_wipe (&hy);
+  CHECK_EQ (gq_kx_generate (GQ_GROUP_SECP256R1_MLKEM768, &hy), GQ_OK);
+  CHECK_EQ (gq_kx_classical_of (&hy, GQ_GROUP_SECP256R1, &plain), GQ_OK);
+  CHECK_EQ (plain.share_len, 65);
+  CHECK (memcmp (plain.share, hy.share, 65) == 0);
+  CHECK_EQ (gq_kx_respond (GQ_GROUP_SECP256R1, plain.share, plain.share_len,
+                           server, sizeof server, &slen, ss, sizeof ss,
+                           &sslen), GQ_OK);
+  CHECK_EQ (gq_kx_complete (&plain, server, slen, cs, sizeof cs, &cslen),
+            GQ_OK);
+  CHECK (cslen == sslen && memcmp (cs, ss, cslen) == 0);
+  CHECK_EQ (gq_kx_classical_of (&hy, GQ_GROUP_X25519, &other),
+            GQ_ERR_UNSUPPORTED);
+  /* A group with no classical half has none to give.  */
+  gq_kx_key_wipe (&hy);
+  CHECK_EQ (gq_kx_generate (GQ_GROUP_MLKEM768, &hy), GQ_OK);
+  CHECK_EQ (gq_kx_classical_of (&hy, GQ_GROUP_X25519, &other),
+            GQ_ERR_UNSUPPORTED);
+  gq_kx_key_wipe (&hy);
+  gq_kx_key_wipe (&plain);
+}
+
 int
 main (void)
 {
+  test_classical_of ();
   test_roundtrip ();
   test_x25519_kat ();
   test_hybrid_order ();

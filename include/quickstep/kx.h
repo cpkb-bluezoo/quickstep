@@ -82,6 +82,16 @@ size_t gq_kx_shared_len (unsigned group);
    policy does not allow the group.  */
 int gq_kx_generate (unsigned group, gq_kx_key *key);
 
+/* The key of GROUP that is the classical half of HYBRID (a key made for one
+   of the hybrid groups): X25519 for X25519MLKEM768, secp256r1 for
+   SecP256r1MLKEM768, secp384r1 for SecP384r1MLKEM1024.  A client that offers a
+   plain share beside the hybrid one may use it so, and save a scalar
+   multiplication (the hybrid draft allows the reuse); the two shares then
+   hold one ephemeral key, and only one of them is answered.
+   GQ_ERR_UNSUPPORTED if GROUP is not the classical half of HYBRID's.  */
+int gq_kx_classical_of (const gq_kx_key *hybrid, unsigned group,
+                        gq_kx_key *out);
+
 /* Server side.  Consume CLIENT_SHARE, write the server share to
    SERVER_SHARE (CAP bytes) and the shared secret to SHARED (SHARED_CAP
    bytes).  GQ_ERR_ENCODING for a share of the wrong size,

@@ -1321,11 +1321,62 @@ test_creation_rules (void)
   gq_tls_free (t);
 }
 
+/* The plain X25519 share beside the hybrid one is the hybrid's own X25519
+   key, not a second one: a scalar multiplication saved on every connection.  */
+struct kx_count
+{
+  int calls;
+  gq_kx_key first;
+};
+
+static int
+count_kx (void *user, unsigned group, gq_kx_key *key)
+{
+  struct kx_count *c = user;
+  int r = gq_kx_generate (group, key);
+
+  if (c->calls++ == 0 && r == GQ_OK)
+    c->first = *key;
+  return r;
+}
+
+static size_t
+count_in (const uint8_t *hay, size_t n, const uint8_t *needle, size_t m)
+{
+  size_t i, found = 0;
+
+  for (i = 0; i + m <= n; i++)
+    if (memcmp (hay + i, needle, m) == 0)
+      found++;
+  return found;
+}
+
+static void
+test_one_x25519_key (void)
+{
+  static struct kx_count kc;
+  struct env *e = env_new ();
+
+  memset (&kc, 0, sizeof kc);
+  e->cfg.hooks.kx_generate = count_kx;
+  e->cfg.hooks.user = &kc;
+  env_create (e);
+  env_start (e);
+  CHECK_EQ (kc.calls, 1);
+  CHECK_EQ (kc.first.group, GQ_GROUP_X25519_MLKEM768);
+  /* The hybrid share ends in its X25519 key, and the plain share is that
+     key again.  */
+  CHECK_EQ (count_in (e->ch, e->chlen, kc.first.share + 1184, 32), 2);
+  gq_kx_key_wipe (&kc.first);
+  env_free (e);
+}
+
 int
 main (void)
 {
   setup_fixtures ();
 
+  test_one_x25519_key ();
   test_basic (0, 0, 0);
   test_basic (1, 0, 0);
   test_basic (7, 0, 0);

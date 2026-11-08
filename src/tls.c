@@ -710,7 +710,10 @@ gq_tls_start (gq_tls *t)
           want = t->groups[i];
       if (want)
         {
-          TRY (gen_kx (t, want, &t->kx[1]));
+          /* The plain share may be the hybrid's own classical key; if not,
+             it is a key of its own.  */
+          if (gq_kx_classical_of (&t->kx[0], want, &t->kx[1]) != GQ_OK)
+            TRY (gen_kx (t, want, &t->kx[1]));
           t->n_kx = 2;
         }
     }

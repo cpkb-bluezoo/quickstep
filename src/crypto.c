@@ -33,13 +33,16 @@
 
 #define GQ_MIN_GCRYPT "1.12.0"
 
+/* Through a volatile pointer to memset, which a compiler cannot see through
+   to drop the store as dead; and memset is fast, where a loop of volatile
+   byte stores is not (a handshake wipes some 60 KiB, and it was 2% of one).  */
+static void *(*volatile gq_memset) (void *, int, size_t) = memset;
+
 void
 gq_wipe (void *secret, size_t len)
 {
-  volatile uint8_t *p = secret;
-
-  while (len--)
-    *p++ = 0;
+  if (len > 0)
+    gq_memset (secret, 0, len);
 }
 
 int
